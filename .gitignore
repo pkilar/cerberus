@@ -1,8 +1,8 @@
 # Go Sudo I/O Log Server .gitignore
 
 # Compiled binary
-sudosrv*
-sudosrv.exe
+ssh-cert-api
+ssh-cert-signer
 
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
