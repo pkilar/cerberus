@@ -1,0 +1,62 @@
+# rules.yaml
+# This file defines the authorization policies for the SSH Certificate Authority.
+# It maps Kerberos principals (users) to groups, and groups to specific
+# certificate signing permissions.
+
+groups:
+  # The 'backend-engineers' group has access to production servers.
+  backend-engineers:
+    # List of Kerberos principals (e.g., from Active Directory or MIT Kerberos)
+    # who belong to this group. The API will check the authenticated user's
+    # principal against this list.
+    members:
+      - "alice@YOUR-REALM.COM"
+      - "bob@YOUR-REALM.COM"
+
+    # Rules that apply to certificates issued to members of this group.
+    certificate_rules:
+      # Maximum validity period for the certificate. Uses Go's time.ParseDuration format.
+      # (e.g., "8h" for 8 hours, "30m" for 30 minutes).
+      validity: "8h"
+
+      # A list of server usernames (principals) that the signed key is allowed
+      # to log in as. Wildcards (*) can be used.
+      allowed_principals:
+        - "root"
+        - "ubuntu"
+        - "ec2-user"
+
+      # Standard SSH certificate permissions.
+      # An empty string "" means the permission is granted.
+      # A non-empty string can add specific restrictions (though typically not used).
+      # If a permission is omitted, it is denied.
+      permissions:
+        permit-X11-forwarding: ""
+        permit-agent-forwarding: ""
+        permit-port-forwarding: ""
+        permit-pty: ""
+        permit-user-rc: ""
+
+      # Static key-value pairs that will be embedded as custom extensions
+      # in the signed certificate. Useful for auditing and context.
+      static_attributes:
+        team: "backend"
+        access-level: "production"
+
+  # The 'data-analysts' group has more restricted access.
+  data-analysts:
+    members:
+      - "charlie@YOUR-REALM.COM"
+
+    certificate_rules:
+      validity: "1h"
+      allowed_principals:
+        - "analyst"
+        - "readonly-user"
+      permissions:
+        # Note: No port forwarding for this group.
+        permit-pty: ""
+        permit-user-rc: ""
+      static_attributes:
+        team: "data"
+        access-level: "restricted"
