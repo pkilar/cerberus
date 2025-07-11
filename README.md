@@ -1,4 +1,4 @@
-![Cerberus](https://github.com/pkilar/cerberus/blob/master/cerberus.png?raw=true)
+![Cerberus](https://github.com/pkilar/cerberus/blob/main/cerberus.png?raw=true)
 
 # **Cerberus: An AWS Nitro Enclave SSH Certificate Authority**
 
