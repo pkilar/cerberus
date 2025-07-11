@@ -1,0 +1,91 @@
+# config.yaml
+# This file defines the authorization policies for the SSH Certificate Authority.
+# It maps Kerberos principals (users) to groups, and groups to specific
+# certificate signing permissions.
+
+# Path to the Kerberos keytab file for authenticating incoming requests
+keytab_path: "/etc/krb5.keytab"
+
+# Service principal name for SPNEGO authentication (optional)
+# If not specified, the service will use the principal from the keytab
+# Example: "HTTP/hostname.domain.com@REALM.COM"
+service_principal: ""
+
+# IP address and port to listen on, default ":8443" if not specified
+listen: ""
+
+# Location of the TLS certificate and key, defaults are "cert.pem", "key.pem" in the same folder as the binary
+# For local dev, generate self-signed certs: go run $(go env GOROOT)/src/crypto/tls/generate_cert.go --host localhost
+tls_cert: ""
+tls_key: ""
+
+groups:
+  # The 'backend-engineers' group has access to production servers.
+  backend-engineers:
+    # List of Kerberos principals (e.g., from Active Directory or MIT Kerberos)
+    # who belong to this group. The API will check the authenticated user's
+    # principal against this list.
+    members:
+      - "alice@YOUR-REALM.COM"
+      - "bob@YOUR-REALM.COM"
+
+    # Rules that apply to certificates issued to members of this group.
+    certificate_rules:
+      # Maximum validity period for the certificate. Uses Go's time.ParseDuration format.
+      # (e.g., "8h" for 8 hours, "30m" for 30 minutes).
+      validity: "8h"
+
+      # A list of server usernames (principals) that the signed key is allowed
+      # to log in as. Wildcards (*) can be used.
+      allowed_principals:
+        - "root"
+        - "ec2-user"
+
+      # Standard SSH certificate permissions.
+      # An empty string "" means the permission is granted.
+      # A non-empty string can add specific restrictions (though typically not used).
+      # If a permission is omitted, it is denied.
+      # Full list at: https://www.ietf.org/id/draft-miller-ssh-cert-01.html
+
+      # Some basic extensions:
+      # permit-x11-forwarding: Permit X11 forwarding (using ssh -X) to run remote X11 programs on a local display.
+      # permit-agent-forwarding: Permit Agent forwarding (using ssh -A) to forward local SSH agent keys to the remote host. (See our blog post SSH Agent Explained for more.)
+      # permit-port-forwarding: Permit port forwardings (tunnels) from local to remote (using ssh -L) or from remote to local (using ssh -R)
+      # permit-pty: This one's pretty important. If you want an interactive shell session, you need a pty (a pseudo-tty) to be allocated to you by the host. The alternative is a remote host that doesn't allow any interactivity.
+      # permit-user-rc: Run a personal RC file upon connection (located in ~/.ssh/rc on the remote)
+      permissions:
+        permit-X11-forwarding: ""
+        permit-agent-forwarding: ""
+        permit-port-forwarding: ""
+        permit-pty: ""
+        permit-user-rc: ""
+
+      # Static key-value pairs that will be embedded as custom extensions
+      # in the signed certificate. Useful for auditing and context.
+      static_attributes:
+        team: "backend"
+        access-level: "production"
+
+      # Critical options are a set of directives that, when present in a certificate, must be understood and processed by the SSH server.
+      # If the server doesn't recognize a critical option, it will reject the certificate, preventing authentication.
+      # The most common critical options are force-command and source-address.
+      critical_options:
+        source-address: "10.20.30.0/24,1.1.1.1/32"
+
+  # The 'data-analysts' group has more restricted access.
+  data-analysts:
+    members:
+      - "charlie@YOUR-REALM.COM"
+
+    certificate_rules:
+      validity: "1h"
+      allowed_principals:
+        - "analyst"
+        - "readonly-user"
+      permissions:
+        # Note: No port forwarding for this group.
+        permit-pty: ""
+        permit-user-rc: ""
+      static_attributes:
+        team: "data"
+        access-level: "restricted"

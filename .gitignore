@@ -1,12 +1,6 @@
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
 
 # Test binary, built with `go test -c`
 *.test
@@ -17,9 +11,6 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
 # Go workspace file
 go.work
 go.work.sum
@@ -27,6 +18,44 @@ go.work.sum
 # env file
 .env
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Compiled binary
+ssh-cert-api.*
+ssh-cert-signer.*
+
+# Local configuration files
+# These often contain secrets or local paths and should not be committed.
+# A template or example file (e.g., config.example.yaml) should be committed instead.
+ca_key.*
+config.yaml
+*.key
+*.crt
+*.pem
+
+# Log files and directories
+*.log
+
+# Go build cache and dependencies
+bin/
+vendor/
+*.test
+*.prof
+cover.out
+test.coverprofile
+.cache/
+.config/
+*.tar.gz
+deb/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+._*
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+*~
+.claude/
+.claude.json
+CLAUDE.md
