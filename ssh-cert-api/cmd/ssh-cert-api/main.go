@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"cerberus/constants"
@@ -18,9 +20,8 @@ import (
 	"ssh-cert-api/internal/enclave"
 	"ssh-cert-api/internal/proxy"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 )
 
 func main() {
@@ -133,24 +134,44 @@ func LoadKeySigner() error {
 
 // fetchAWSCredentials retrieves AWS credentials from the EC2 instance metadata service
 func fetchAWSCredentials() (*messages.Credentials, error) {
-	sess, err := session.NewSession(&aws.Config{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create AWS session: %w", err)
-	}
-	metadataClient := ec2metadata.New(sess) // Create EC2 metadata client
+	ctx := context.Background()
 
-	roleName, err := metadataClient.GetMetadata("iam/security-credentials/")
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	metadataClient := imds.NewFromConfig(cfg)
+
+	roleNameResp, err := metadataClient.GetMetadata(ctx, &imds.GetMetadataInput{
+		Path: "iam/security-credentials/",
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get IAM role name: %w", err)
 	}
+	defer roleNameResp.Content.Close()
 
-	credentialsJSON, err := metadataClient.GetMetadata("iam/security-credentials/" + roleName)
+	roleNameBytes, err := io.ReadAll(roleNameResp.Content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read IAM role name: %w", err)
+	}
+	roleName := strings.TrimSpace(string(roleNameBytes))
+
+	credentialsResp, err := metadataClient.GetMetadata(ctx, &imds.GetMetadataInput{
+		Path: "iam/security-credentials/" + roleName,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get IAM credentials: %w", err)
 	}
+	defer credentialsResp.Content.Close()
+
+	credentialsBytes, err := io.ReadAll(credentialsResp.Content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read IAM credentials: %w", err)
+	}
 
 	var creds messages.Credentials
-	if err := json.Unmarshal([]byte(credentialsJSON), &creds); err != nil {
+	if err := json.Unmarshal(credentialsBytes, &creds); err != nil {
 		return nil, fmt.Errorf("failed to parse credentials JSON: %w", err)
 	}
 
