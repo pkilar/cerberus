@@ -71,9 +71,13 @@ func TestSignPublicKey(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "nil signer",
-			signer:      nil,
-			request:     messages.EnclaveSigningRequest{},
+			name:   "nil signer",
+			signer: nil,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:   testPublicKey,
+				KeyID:    "test-key-nil-signer",
+				Validity: "1h",
+			},
 			expectError: true,
 			errorMsg:    "CA signer is not initialized",
 		},
@@ -99,7 +103,7 @@ func TestSignPublicKey(t *testing.T) {
 				Validity:   "invalid-duration",
 			},
 			expectError: true,
-			errorMsg:    "invalid validity duration string",
+			errorMsg:    "invalid validity duration format",
 		},
 		{
 			name:   "empty principals",
@@ -111,6 +115,49 @@ func TestSignPublicKey(t *testing.T) {
 				Validity:   "1h",
 			},
 			expectError: false, // Empty principals should be allowed
+		},
+		{
+			name:   "empty SSH key",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:   "",
+				KeyID:    "test-key-5",
+				Validity: "1h",
+			},
+			expectError: true,
+			errorMsg:    "SSH key cannot be empty",
+		},
+		{
+			name:   "empty KeyID",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:   testPublicKey,
+				KeyID:    "",
+				Validity: "1h",
+			},
+			expectError: true,
+			errorMsg:    "KeyID cannot be empty",
+		},
+		{
+			name:   "empty validity",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey: testPublicKey,
+				KeyID:  "test-key-6",
+			},
+			expectError: true,
+			errorMsg:    "validity duration cannot be empty",
+		},
+		{
+			name:   "excessive validity duration",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:   testPublicKey,
+				KeyID:    "test-key-7",
+				Validity: "48h", // Exceeds 24h limit
+			},
+			expectError: true,
+			errorMsg:    "validity duration",
 		},
 	}
 
@@ -315,7 +362,7 @@ func TestSignPublicKey_CriticalOptions(t *testing.T) {
 			"department": "security",
 		},
 		CriticalOptions: map[string]string{
-			"force-command": "/bin/restricted-shell",
+			"force-command":  "/bin/restricted-shell",
 			"source-address": "192.168.1.0/24,10.0.0.1/32",
 		},
 	}

@@ -49,16 +49,23 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	logging.Debug("Accepted new connection from parent instance.")
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		log.Printf("ERROR: failed to set read deadline: %v", err)
+		return
+	}
+
 	scanner := bufio.NewScanner(conn)
 
 	for scanner.Scan() {
 		response := processRequest(scanner.Bytes())
-		sendResponse(conn, response)
+		if err := sendResponse(conn, response); err != nil {
+			log.Printf("ERROR: failed to send response: %v", err)
+			return
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("scanner.Scan() failed: %s\n", err)
+		log.Printf("ERROR: scanner.Scan() failed: %s", err)
 	}
 }
 
@@ -119,13 +126,23 @@ func createErrorResponse(err error) messages.Response {
 }
 
 // sendResponse marshals and sends a response over the connection
-func sendResponse(conn net.Conn, response messages.Response) {
+func sendResponse(conn net.Conn, response messages.Response) error {
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
-		log.Panic(err)
+		return fmt.Errorf("failed to marshal response: %w", err)
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.Write(responseBytes)
-	conn.Write([]byte{'\n'})
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("failed to set write deadline: %w", err)
+	}
+
+	if _, err := conn.Write(responseBytes); err != nil {
+		return fmt.Errorf("failed to write response: %w", err)
+	}
+
+	if _, err := conn.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("failed to write newline: %w", err)
+	}
+
+	return nil
 }

@@ -21,7 +21,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
-// LoadKeySignerHandler loads an encrypted CA key form a file and decrypts it with KMS.
+// LoadKeySignerHandler loads an encrypted CA key from a file and decrypts it with KMS.
 func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest) (ssh.Signer, error) {
 	// Set default region to us-east-1 if not specified
 	region := os.Getenv("AWS_REGION")
@@ -45,7 +45,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 		}
 	})
 
-	// The AWS SDK must use the credentials from the parent intance.
+	// The AWS SDK must use the credentials from the parent instance.
 	credentialProvider := credentials.NewStaticCredentialsProvider(req.Credentials.AccessKeyId, req.Credentials.SecretAccessKey, req.Credentials.Token)
 
 	logging.Debug("Loading AWS configuration...")
