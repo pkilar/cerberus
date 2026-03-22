@@ -55,7 +55,7 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 		return fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	logging.Debug("Sending request to enclave: %s", string(requestBytes))
+	logging.Debug("Sending request to enclave: %s", redactRequest(request))
 	_, err = conn.Write(append(requestBytes, '\n')) // Send request to enclave with newline delimiter
 	if err != nil {
 		return fmt.Errorf("failed to send request to enclave: %v", err)
@@ -75,6 +75,23 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 	}
 
 	return nil
+}
+
+// redactRequest returns a JSON string safe for logging, with credentials truncated.
+func redactRequest(request any) string {
+	r, ok := request.(messages.Request)
+	if ok && r.LoadKeySigner != nil {
+		r.LoadKeySigner = &messages.LoadKeySignerRequest{
+			EncryptedKey: r.LoadKeySigner.EncryptedKey,
+			Credentials:  r.LoadKeySigner.Credentials.Redacted(),
+		}
+		request = r
+	}
+	b, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
 }
 
 func (c *Client) SignPublicKey(req *messages.EnclaveSigningRequest) (string, error) {
