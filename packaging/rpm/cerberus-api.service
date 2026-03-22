@@ -1,0 +1,28 @@
+[Unit]
+Description=Cerberus SSH Certificate API
+Documentation=https://github.com/pkilar/cerberus
+After=network-online.target nitro-enclaves-allocator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cerberus
+Group=cerberus
+EnvironmentFile=-/etc/sysconfig/cerberus-api
+ExecStart=/usr/bin/ssh-cert-api
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/cerberus
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

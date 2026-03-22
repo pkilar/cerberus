@@ -1,0 +1,20 @@
+# Configuration for the Cerberus SSH Certificate Signer enclave.
+# This file is sourced by the run-enclave.sh wrapper script.
+
+# Architecture of the EIF to run (amd64 or arm64).
+ARCH=amd64
+
+# Path to the Enclave Image File.
+EIF_PATH=/usr/share/cerberus/ssh-cert-signer-${ARCH}.eif
+
+# Enclave CID (must match the value expected by ssh-cert-api).
+ENCLAVE_CID=16
+
+# CPU cores allocated to the enclave.
+ENCLAVE_CPU_COUNT=1
+
+# Memory (MiB) allocated to the enclave.
+ENCLAVE_MEMORY_MIB=1024
+
+# Enable debug mode (true/false). Debug mode attaches the console.
+# ENCLAVE_DEBUG=false

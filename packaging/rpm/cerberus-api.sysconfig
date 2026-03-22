@@ -1,0 +1,17 @@
+# Configuration for the Cerberus SSH Certificate API service.
+# This file is sourced by systemd as an EnvironmentFile.
+
+# Path to the authorization config file.
+CONFIG_PATH=/etc/cerberus/config.yaml
+
+# Path to the Kerberos keytab file for SPNEGO authentication.
+KERBEROS_KEYTAB_PATH=/etc/cerberus/krb5.keytab
+
+# AWS region for KMS operations.
+AWS_REGION=us-east-1
+
+# VSOCK port for enclave communication (default: 5000).
+# ENCLAVE_VSOCK_PORT=5000
+
+# Enable debug-level logging (true/false).
+# DEBUG=false
