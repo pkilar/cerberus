@@ -37,14 +37,22 @@ eif: eif-amd64 eif-arm64
 eif-amd64: build
 	@echo "Building AMD64 Enclave Image File ($(EIF_NAME_AMD64))..."
 	docker buildx build --platform linux/amd64 --build-arg TARGETARCH=amd64 -t ssh-cert-signer:amd64 .
-	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:amd64 --output-file $(EIF_NAME_AMD64)
-	@echo "Successfully created $(EIF_NAME_AMD64). This is the artifact to deploy to AMD64 enclaves."
+	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:amd64 --output-file $(EIF_NAME_AMD64) | tee /dev/stderr | \
+		python3 -c "import sys,json; d=json.load(sys.stdin); m=d.get('Measurements',{}); \
+		json.dump({'Architecture':'amd64','EIF':'$(EIF_NAME_AMD64)','PCR0':m.get('PCR0',''),'PCR1':m.get('PCR1',''),'PCR2':m.get('PCR2','')}, \
+		open('pcr-manifest-amd64.json','w'),indent=2)" || true
+	@echo "Successfully created $(EIF_NAME_AMD64)."
+	@if [ -f pcr-manifest-amd64.json ]; then echo "PCR manifest: pcr-manifest-amd64.json"; cat pcr-manifest-amd64.json; fi
 
 eif-arm64: build
 	@echo "Building ARM64 Enclave Image File ($(EIF_NAME_ARM64))..."
 	docker buildx build --platform linux/arm64 --build-arg TARGETARCH=arm64 -t ssh-cert-signer:arm64 .
-	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:arm64 --output-file $(EIF_NAME_ARM64)
-	@echo "Successfully created $(EIF_NAME_ARM64). This is the artifact to deploy to ARM64 enclaves."
+	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:arm64 --output-file $(EIF_NAME_ARM64) | tee /dev/stderr | \
+		python3 -c "import sys,json; d=json.load(sys.stdin); m=d.get('Measurements',{}); \
+		json.dump({'Architecture':'arm64','EIF':'$(EIF_NAME_ARM64)','PCR0':m.get('PCR0',''),'PCR1':m.get('PCR1',''),'PCR2':m.get('PCR2','')}, \
+		open('pcr-manifest-arm64.json','w'),indent=2)" || true
+	@echo "Successfully created $(EIF_NAME_ARM64)."
+	@if [ -f pcr-manifest-arm64.json ]; then echo "PCR manifest: pcr-manifest-arm64.json"; cat pcr-manifest-arm64.json; fi
 
 # Run tests
 test:
@@ -83,7 +91,7 @@ encrypt-ca-key:
 # Clean all build artifacts and generated keys
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -f $(BINARY_NAME).amd64 $(BINARY_NAME).arm64 $(EIF_NAME_AMD64) $(EIF_NAME_ARM64) coverage.out coverage.html ca_key ca_key.pub ca_key.enc
+	rm -f $(BINARY_NAME).amd64 $(BINARY_NAME).arm64 $(EIF_NAME_AMD64) $(EIF_NAME_ARM64) coverage.out coverage.html ca_key ca_key.pub ca_key.enc pcr-manifest-amd64.json pcr-manifest-arm64.json
 	$(GOCLEAN)
 
 # Ensure targets are always run

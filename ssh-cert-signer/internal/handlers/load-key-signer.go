@@ -11,18 +11,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/crypto/ssh"
 
 	"cerberus/constants"
 	"cerberus/logging"
 	"cerberus/messages"
+	"ssh-cert-signer/internal/attestation"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
 // LoadKeySignerHandler loads an encrypted CA key from a file and decrypts it with KMS.
-func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest) (ssh.Signer, error) {
+// If attestProvider is non-nil and available, an NSM attestation document is attached
+// to the KMS Decrypt call for full enclave attestation. Pass nil to skip attestation
+// (development mode or testing).
+func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest, attestProvider *attestation.Provider) (ssh.Signer, error) {
 	// Set default region to us-east-1 if not specified
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
@@ -75,20 +80,54 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	logging.Debug("Created KMS client for region: %s", region)
 	logging.Debug("All HTTP requests will go through VSOCK proxy to parent instance")
 
-	// Decrypt the key using KMS
+	// Build KMS Decrypt input
 	logging.Debug("Decrypting CA key with KMS...")
 	logging.Debug("Encrypted key size: %d bytes", len(encryptedKeyBytes))
-	decryptOutput, err := kmsClient.Decrypt(ctx, &kms.DecryptInput{
+	decryptInput := &kms.DecryptInput{
 		CiphertextBlob: encryptedKeyBytes,
-	})
+	}
+
+	// If running inside an enclave, attach attestation document
+	if attestProvider != nil && attestProvider.IsAvailable() {
+		logging.Debug("Generating NSM attestation document...")
+		attestDoc, err := attestProvider.GenerateAttestationDoc()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate attestation document: %w", err)
+		}
+		decryptInput.Recipient = &types.RecipientInfo{
+			AttestationDocument:    attestDoc,
+			KeyEncryptionAlgorithm: types.KeyEncryptionMechanismRsaesOaepSha256,
+		}
+		logging.Debug("Attestation document attached to KMS Decrypt request (%d bytes)", len(attestDoc))
+	}
+
+	decryptOutput, err := kmsClient.Decrypt(ctx, decryptInput)
 	if err != nil {
 		log.Printf("KMS decrypt error details: %v", err)
 		return nil, fmt.Errorf("failed to decrypt key with KMS: %w", err)
 	}
-	log.Println("Successfully decrypted CA key with KMS")
+
+	// Extract plaintext — different path depending on whether attestation was used
+	var plaintextKey []byte
+	if decryptInput.Recipient != nil {
+		// Attested path: plaintext is re-encrypted in a CMS envelope
+		if len(decryptOutput.CiphertextForRecipient) == 0 {
+			return nil, fmt.Errorf("KMS returned empty CiphertextForRecipient despite Recipient being set")
+		}
+		logging.Debug("Decrypting CMS envelope from CiphertextForRecipient (%d bytes)...", len(decryptOutput.CiphertextForRecipient))
+		plaintextKey, err = attestProvider.DecryptCMSEnvelope(decryptOutput.CiphertextForRecipient)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt CiphertextForRecipient: %w", err)
+		}
+		log.Println("Successfully decrypted CA key with KMS (attested)")
+	} else {
+		// Non-attested path: plaintext is directly available
+		plaintextKey = decryptOutput.Plaintext
+		log.Println("Successfully decrypted CA key with KMS (non-attested)")
+	}
 
 	// Parse the decrypted private key
-	signer, err := ssh.ParsePrivateKey(decryptOutput.Plaintext)
+	signer, err := ssh.ParsePrivateKey(plaintextKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse decrypted private key: %w", err)
 	}

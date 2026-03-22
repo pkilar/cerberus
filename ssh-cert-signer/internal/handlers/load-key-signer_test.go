@@ -29,7 +29,7 @@ func TestLoadKeySignerHandler_MissingFile(t *testing.T) {
 		},
 	}
 
-	_, err := LoadKeySignerHandler(context.Background(), req)
+	_, err := LoadKeySignerHandler(context.Background(), req, nil)
 	if err == nil {
 		t.Error("expected error when file doesn't exist")
 	}
@@ -57,7 +57,7 @@ func TestLoadKeySignerHandler_EmptyFilePath(t *testing.T) {
 		},
 	}
 
-	_, err := LoadKeySignerHandler(context.Background(), req)
+	_, err := LoadKeySignerHandler(context.Background(), req, nil)
 	if err == nil {
 		t.Error("expected error when default file doesn't exist")
 	}
@@ -96,7 +96,7 @@ func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	}
 
 	// This should fail at the KMS decryption step since we can't connect to AWS in tests
-	_, err = LoadKeySignerHandler(context.Background(), req)
+	_, err = LoadKeySignerHandler(context.Background(), req, nil)
 	if err == nil {
 		t.Error("expected error when trying to decrypt empty file")
 	}
@@ -150,7 +150,7 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 	}
 
 	// This will fail at AWS connection, but we can verify the region was set
-	_, err = LoadKeySignerHandler(context.Background(), req)
+	_, err = LoadKeySignerHandler(context.Background(), req, nil)
 	if err == nil {
 		t.Error("expected error due to AWS connection failure")
 	}

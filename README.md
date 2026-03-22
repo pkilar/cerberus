@@ -271,6 +271,7 @@ See `ssh-cert-api/configs/config-example.yaml` for a complete configuration exam
 ## **Security Considerations**
 
 - The CA private key never leaves the Nitro Enclave
+- [Nitro Enclave attestation](docs/kms-attestation-policy.md) ensures only a verified enclave image can decrypt the CA key
 - All communication between services uses secure VSOCK
 - Kerberos provides strong authentication
 - AWS KMS encrypts the CA key at rest
