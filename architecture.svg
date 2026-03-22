@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="920" height="520" rx="12" fill="#f8fafc"/>
+
+  <!-- User box -->
+  <rect x="30" y="140" width="140" height="120" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="100" y="185" text-anchor="middle" font-weight="600" font-size="15" fill="#1e293b">User</text>
+  <text x="100" y="205" text-anchor="middle" font-size="11" fill="#64748b">(Kerberos Client)</text>
+  <circle cx="100" cy="235" r="14" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="100" y="240" text-anchor="middle" font-size="16" fill="#6366f1">&#x1f511;</text>
+
+  <!-- EC2 Host boundary -->
+  <rect x="225" y="40" width="310" height="440" rx="12" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="6 3" filter="url(#shadow)"/>
+  <text x="380" y="68" text-anchor="middle" font-weight="600" font-size="14" fill="#1d4ed8">EC2 Instance (Host OS)</text>
+
+  <!-- ssh-cert-api box -->
+  <rect x="260" y="140" width="240" height="120" rx="10" fill="#fff" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="380" y="175" text-anchor="middle" font-weight="700" font-size="15" fill="#1e40af">ssh-cert-api</text>
+  <text x="380" y="198" text-anchor="middle" font-size="11" fill="#64748b">Web API Service</text>
+  <text x="380" y="216" text-anchor="middle" font-size="11" fill="#64748b">Authentication &amp; Authorization</text>
+  <text x="380" y="234" text-anchor="middle" font-size="11" fill="#64748b">SPNEGO / Kerberos</text>
+  <rect x="320" y="242" width="120" height="4" rx="2" fill="#3b82f6" opacity="0.3"/>
+
+  <!-- config.yaml box -->
+  <rect x="295" y="360" width="170" height="70" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="380" y="393" text-anchor="middle" font-size="12" fill="#475569">&#128196; config.yaml</text>
+  <text x="380" y="412" text-anchor="middle" font-size="10" fill="#94a3b8">Groups &amp; Rules</text>
+
+  <!-- Nitro Enclave boundary -->
+  <rect x="590" y="40" width="300" height="440" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="6 3" filter="url(#shadow)"/>
+  <text x="740" y="68" text-anchor="middle" font-weight="600" font-size="14" fill="#047857">AWS Nitro Enclave</text>
+  <text x="740" y="86" text-anchor="middle" font-size="10" fill="#6ee7b7">&#x1f512; Isolated &amp; Attested</text>
+
+  <!-- ssh-cert-signer box -->
+  <rect x="625" y="140" width="230" height="120" rx="10" fill="#fff" stroke="#10b981" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="740" y="175" text-anchor="middle" font-weight="700" font-size="15" fill="#065f46">ssh-cert-signer</text>
+  <text x="740" y="198" text-anchor="middle" font-size="11" fill="#64748b">Enclave Signing Service</text>
+  <text x="740" y="216" text-anchor="middle" font-size="11" fill="#64748b">SSH Certificate Signing</text>
+  <text x="740" y="234" text-anchor="middle" font-size="11" fill="#64748b">CA Key in Memory Only</text>
+  <rect x="680" y="242" width="120" height="4" rx="2" fill="#10b981" opacity="0.3"/>
+
+  <!-- KMS encrypted key box -->
+  <rect x="660" y="360" width="170" height="70" rx="8" fill="#fff" stroke="#94a3b8" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="745" y="388" text-anchor="middle" font-size="12" fill="#475569">&#x1f510; KMS-encrypted</text>
+  <text x="745" y="407" text-anchor="middle" font-size="12" fill="#475569">CA Private Key</text>
+
+  <!-- Arrow 1: User -> API (HTTPS) -->
+  <line x1="170" y1="180" x2="255" y2="180" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="184" y="163" width="55" height="18" rx="4" fill="#dbeafe"/>
+  <text x="211" y="176" text-anchor="middle" font-size="10" font-weight="600" fill="#1d4ed8">HTTPS</text>
+  <circle cx="182" cy="180" r="10" fill="#3b82f6"/>
+  <text x="182" y="184" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">1</text>
+
+  <!-- Arrow 6: API -> User (signed cert) -->
+  <line x1="255" y1="230" x2="170" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <circle cx="182" cy="230" r="10" fill="#3b82f6"/>
+  <text x="182" y="234" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">6</text>
+
+  <!-- Arrow 2: API -> config.yaml -->
+  <line x1="380" y1="265" x2="380" y2="355" stroke="#475569" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <circle cx="380" cy="310" r="10" fill="#64748b"/>
+  <text x="380" y="314" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">2</text>
+
+  <!-- Arrow 3: API -> Signer (VSOCK) -->
+  <line x1="505" y1="180" x2="620" y2="180" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="528" y="163" width="60" height="18" rx="4" fill="#d1fae5"/>
+  <text x="558" y="176" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">VSOCK</text>
+  <circle cx="518" cy="180" r="10" fill="#10b981"/>
+  <text x="518" y="184" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">3</text>
+
+  <!-- Arrow 4: Signer -> KMS key -->
+  <line x1="740" y1="265" x2="740" y2="355" stroke="#475569" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <circle cx="740" cy="310" r="10" fill="#64748b"/>
+  <text x="740" y="314" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">4</text>
+
+  <!-- Arrow 5: Signer -> API (signed cert back) -->
+  <line x1="620" y1="230" x2="505" y2="230" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <circle cx="608" cy="230" r="10" fill="#10b981"/>
+  <text x="608" y="234" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">5</text>
+
+  <!-- KMS Proxy arrow (bidirectional, below main flow) -->
+  <path d="M 500 290 Q 560 320 620 290" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow)"/>
+  <rect x="525" y="300" width="75" height="18" rx="4" fill="#fef3c7"/>
+  <text x="562" y="313" text-anchor="middle" font-size="9" font-weight="600" fill="#92400e">KMS Proxy</text>
+
+  <!-- Legend -->
+  <rect x="30" y="470" width="860" height="35" rx="6" fill="#f1f5f9"/>
+  <circle cx="55" cy="487" r="6" fill="#3b82f6"/>
+  <text x="67" y="491" font-size="11" fill="#475569">HTTPS flow</text>
+  <circle cx="175" cy="487" r="6" fill="#10b981"/>
+  <text x="187" y="491" font-size="11" fill="#475569">VSOCK flow</text>
+  <circle cx="295" cy="487" r="6" fill="#64748b"/>
+  <text x="307" y="491" font-size="11" fill="#475569">Data access</text>
+  <line x1="410" y1="487" x2="440" y2="487" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="447" y="491" font-size="11" fill="#475569">KMS proxy (enclave &#x2192; host &#x2192; KMS API)</text>
+</svg>
