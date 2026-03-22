@@ -35,6 +35,8 @@ cerberus/
 ├── constants/                    # Shared constants
 ├── logging/                      # Logging component
 ├── messages/                     # Shared message types
+├── packaging/rpm/                # RPM spec, systemd units, build script
+├── docs/                         # Operational runbook
 ├── ssh-cert-api/                 # API service
 │   ├── cmd/ssh-cert-api/         # Main entry point
 │   ├── internal/                 # Private application code
@@ -86,16 +88,47 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 
 ## **Prerequisites**
 
-- Go 1.23+
+- Go 1.26+
 - Docker
 - AWS CLI
 - [AWS Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli.html)
-- An EC2 instance with Nitro Enclaves enabled
+- An EC2 instance with Nitro Enclaves enabled (Amazon Linux 2, Amazon Linux 2023, RHEL, or Fedora)
 - A Kerberos Key Distribution Center (KDC) and a keytab file for the API service
 
-## **Setup and Deployment**
+## **Installation**
 
-### **Step 1: Prepare the CA Private Key**
+### **Option A: RPM Install (Amazon Linux / RHEL / Fedora)**
+
+Build and install the RPM packages:
+
+```bash
+# Build RPMs (requires rpm-build, rpmdevtools, golang, make)
+./packaging/rpm/build-rpm.sh
+
+# Amazon Linux 2023 / Fedora / RHEL 8+
+sudo dnf install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
+sudo dnf install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
+
+# Amazon Linux 2 / RHEL 7
+sudo yum install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
+sudo yum install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
+
+# Configure
+sudo cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+sudo vim /etc/cerberus/config.yaml
+
+# Place keytab, TLS certs, and EIF (see docs/RUNBOOK.md for details)
+
+# Start services
+sudo systemctl enable --now cerberus-signer
+sudo systemctl enable --now cerberus-api
+```
+
+The RPM creates a `cerberus` system user, installs systemd units with security hardening, and manages sysconfig files for environment variables. See [docs/RUNBOOK.md](docs/RUNBOOK.md) for full post-install setup.
+
+### **Option B: Manual Setup**
+
+#### **Step 1: Prepare the CA Private Key**
 
 1. **Generate an SSH key pair** to serve as your Certificate Authority:
 
@@ -122,7 +155,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 
    Note: The enclave service will load the encrypted CA private key from the file path specified by `CA_KEY_FILE_PATH` environment variable (defaults to `/app/ca_key.enc`).
 
-### **Step 2: Configure ssh-cert-api**
+#### **Step 2: Configure ssh-cert-api**
 
 1. **Create configuration file**:
 
@@ -136,7 +169,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
    make -C ssh-cert-api tls-certs
    ```
 
-### **Step 3: Build the Services**
+#### **Step 3: Build the Services**
 
 1. **Build everything**:
 
@@ -155,7 +188,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
    make -C ssh-cert-signer eif
    ```
 
-### **Step 4: Deploy and Run**
+#### **Step 4: Deploy and Run**
 
 1. **Run the enclave**:
 
@@ -277,10 +310,13 @@ See `ssh-cert-api/configs/config-example.yaml` for a complete configuration exam
 - AWS KMS encrypts the CA key at rest
 - Certificate signing operations are logged for audit trails
 
-## **Troubleshooting**
+## **Operations & Troubleshooting**
 
-- Check service logs for detailed error messages
-- Verify Nitro Enclave is properly configured and running
-- Ensure AWS credentials and KMS permissions are correct
-- Validate Kerberos configuration and keytab file
-- Use debug mode for enclave development and testing
+See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full operations runbook covering:
+
+- Health checks and monitoring recommendations
+- Credential rotation (CA key, TLS, Kerberos keytab)
+- Enclave lifecycle management
+- RPM package management and systemd service control
+- Troubleshooting tables for common issues (signing failures, auth errors, VSOCK/KMS proxy, network)
+- Diagnostic commands reference
