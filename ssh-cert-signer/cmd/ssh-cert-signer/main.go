@@ -15,13 +15,25 @@ import (
 	"cerberus/constants"
 	"cerberus/logging"
 	"cerberus/messages"
+	"ssh-cert-signer/internal/attestation"
 	"ssh-cert-signer/internal/handlers"
 )
 
-var caSigner ssh.Signer
+var (
+	caSigner       ssh.Signer
+	attestProvider *attestation.Provider
+)
 
 func main() {
 	log.Println("Starting Enclave Signing Service...")
+
+	// Initialize attestation provider (gracefully degrades outside enclaves)
+	attestProvider = attestation.NewProvider()
+	if attestProvider.IsAvailable() {
+		log.Println("NSM device detected — attestation enabled")
+	} else {
+		log.Println("NSM device not found — running without attestation (development mode)")
+	}
 
 	// Listen for connections on a VSOCK port.
 	// The parent EC2 instance will connect to this listener.
@@ -93,7 +105,7 @@ func processRequest(requestBytes []byte) messages.Response {
 // handleLoadKeySigner processes a load key signer request
 func handleLoadKeySigner(ctx context.Context, req messages.LoadKeySignerRequest) messages.Response {
 	var err error
-	caSigner, err = handlers.LoadKeySignerHandler(ctx, req)
+	caSigner, err = handlers.LoadKeySignerHandler(ctx, req, attestProvider)
 	if err != nil {
 		return createErrorResponse(err)
 	}
