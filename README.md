@@ -17,22 +17,9 @@ Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to r
 
 The system is composed of two primary services that work together to provide a secure signing workflow.
 
-```
-+-----------+       +---------------------------------+       +--------------------------------------+
-|           |       |      EC2 Instance (Host OS)     |       |         AWS Nitro Enclave            |
-|   User    |--(1)->|                                 |--(3)--|                                      |
-| (Kerberos)| HTTPS |      ssh-cert-api Service       | VSOCK |       ssh-cert-signer Service        |
-|   Client  |       |                                 |       |                                      |
-|           |<-(6)--| (Web API, Auth, Authorization)  |<-(5)--| (Cryptographic Signing Operations)   |
-+-----------+       +-----------------------+---------+       +------------------------+-------------+
-                                            |                                          |
-                                            | (2) Reads rules                          | (4) Decrypts key
-                                            |                                          |
-                                     +------v------+                          +--------v-------+
-                                     | config.yaml  |                         | KMS-encrypted  |
-                                     +-------------+                          | CA certificate |
-                                                                              +----------------+
-```
+<p align="center">
+  <img src="architecture.svg" alt="Cerberus Architecture Diagram" width="920"/>
+</p>
 
 1. A user with a valid Kerberos ticket makes an HTTPS request to the ssh-cert-api service with the public key they want signed.
 2. The ssh-cert-api service authenticates the user's Kerberos ticket and loads config.yaml to authorize the request based on the user's group membership.
