@@ -1,8 +1,8 @@
 module ssh-cert-api
 
-go 1.23.0
+go 1.26.0
 
-toolchain go1.23.10
+toolchain go1.26.1
 
 require (
 	cerberus v0.0.0-00010101000000-000000000000
