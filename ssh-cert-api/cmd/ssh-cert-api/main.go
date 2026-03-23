@@ -16,6 +16,7 @@ import (
 	"cerberus/messages"
 	"ssh-cert-api/internal/api"
 	"ssh-cert-api/internal/auth"
+	"ssh-cert-api/internal/authz"
 	"ssh-cert-api/internal/config"
 	"ssh-cert-api/internal/enclave"
 	"ssh-cert-api/internal/proxy"
@@ -78,8 +79,14 @@ func main() {
 	logging.Debug("Enclave initialized successfully")
 	vsockProxy.Stop()
 
-	// --- 4. Setup API Server ---
-	server, err := api.NewServer(cfg, kerberosAuthenticator, enclaveClient)
+	// --- 4. Initialize Authorizer ---
+	authorizer, err := authz.NewCasbinAuthorizer(cfg)
+	if err != nil {
+		log.Fatalf("Failed to initialize authorizer: %v", err)
+	}
+
+	// --- 5. Setup API Server ---
+	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient)
 	if err != nil {
 		log.Fatalf("Failed to initialize API server: %v", err)
 	}

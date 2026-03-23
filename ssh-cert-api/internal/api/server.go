@@ -7,11 +7,11 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"slices"
 	"time"
 
 	"cerberus/messages"
 	"ssh-cert-api/internal/auth"
+	"ssh-cert-api/internal/authz"
 	"ssh-cert-api/internal/config"
 	"ssh-cert-api/internal/enclave"
 )
@@ -23,14 +23,16 @@ const userContextKey contextKey = "user"
 type Server struct {
 	config        *config.Config
 	authenticator auth.Authenticator
+	authorizer    authz.Authorizer
 	enclaveClient enclave.Signer
 	router        *http.ServeMux
 }
 
-func NewServer(cfg *config.Config, authenticator auth.Authenticator, enclaveClient enclave.Signer) (*Server, error) {
+func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer authz.Authorizer, enclaveClient enclave.Signer) (*Server, error) {
 	s := &Server{
 		config:        cfg,
 		authenticator: authenticator,
+		authorizer:    authorizer,
 		enclaveClient: enclaveClient,
 		router:        http.NewServeMux(),
 	}
@@ -105,8 +107,15 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Signing request from user: %s", principal)
 
 	// Check authorization and get user's group configuration
-	groupConfig, authorized := s.getAuthorizationConfig(principal, req.Principals)
-	if !authorized {
+	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
+	if authzErr != nil {
+		log.Printf("Authorization error for %s: %v", principal, authzErr)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
+		return
+	}
+	if !result.Allowed {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
@@ -116,18 +125,18 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// Create enclave request using config-based attributes
 	// Merge static attributes from config with dynamic audit attributes
 	customAttributes := make(map[string]string)
-	maps.Copy(customAttributes, groupConfig.StaticAttributes)
+	maps.Copy(customAttributes, result.CertificateRules.StaticAttributes)
 	// Add audit trail attributes
 	customAttributes["issued_at"] = fmt.Sprintf("%d", time.Now().Unix())
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,
 		KeyID:            principal,
-		Principals:       groupConfig.AllowedPrincipals,
-		Validity:         groupConfig.Validity,
-		Permissions:      groupConfig.Permissions,
+		Principals:       result.CertificateRules.AllowedPrincipals,
+		Validity:         result.CertificateRules.Validity,
+		Permissions:      result.CertificateRules.Permissions,
 		CustomAttributes: customAttributes,
-		CriticalOptions:  groupConfig.CriticalOptions,
+		CriticalOptions:  result.CertificateRules.CriticalOptions,
 	}
 
 	// Sign the key
@@ -145,25 +154,6 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
-// getAuthorizationConfig checks if the user is authorized and returns their group configuration
-func (s *Server) getAuthorizationConfig(principal string, requestedPrincipals []string) (*config.CertificateRules, bool) {
-	for _, group := range s.config.Groups {
-		for _, member := range group.Members {
-			if member == principal {
-				// Check if all requested principals are allowed for this user's group
-				for _, reqPrincipal := range requestedPrincipals {
-					found := slices.Contains(group.CertificateRules.AllowedPrincipals, reqPrincipal)
-					if !found {
-						return nil, false
-					}
-				}
-				// All requested principals are authorized, return the group's certificate rules
-				return &group.CertificateRules, true
-			}
-		}
-	}
-	return nil, false
-}
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
