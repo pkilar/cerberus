@@ -8,6 +8,7 @@ require (
 	cerberus v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2/config v1.29.17
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.32
+	github.com/casbin/casbin/v2 v2.135.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mdlayher/vsock v1.2.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -25,6 +26,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.34.0 // indirect
 	github.com/aws/smithy-go v1.22.4 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
+	github.com/casbin/govaluate v1.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect

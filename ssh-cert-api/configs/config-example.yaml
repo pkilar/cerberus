@@ -2,6 +2,45 @@
 # This file defines the authorization policies for the SSH Certificate Authority.
 # It maps Kerberos principals (users) to groups, and groups to specific
 # certificate signing permissions.
+#
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │                    CASBIN AUTHORIZATION MODEL                       │
+# ├──────────────────────────────────────────────────────────────────────┤
+# │ This file is the SINGLE SOURCE OF TRUTH for authorization.          │
+# │ There is no separate Casbin policy or model file — both are         │
+# │ generated programmatically from this YAML at startup.               │
+# │                                                                     │
+# │ HOW IT WORKS:                                                       │
+# │                                                                     │
+# │ 1. Each group's members become user-to-group mappings:              │
+# │      alice@REALM.COM  →  backend-engineers                          │
+# │      bob@REALM.COM    →  backend-engineers                          │
+# │      charlie@REALM.COM → data-analysts                              │
+# │                                                                     │
+# │ 2. Each group's allowed_principals become Casbin policies:          │
+# │      p, backend-engineers, root, sign                               │
+# │      p, backend-engineers, ec2-user, sign                           │
+# │      p, data-analysts, analyst, sign                                │
+# │      p, data-analysts, readonly-user, sign                          │
+# │                                                                     │
+# │ 3. When a user requests a certificate, Casbin evaluates:            │
+# │      Enforce(groupName, requestedPrincipal, "sign")                 │
+# │    for each group the user belongs to (alphabetical order).         │
+# │                                                                     │
+# │ RULES:                                                              │
+# │  - Groups are evaluated in alphabetical order (deterministic)       │
+# │  - ALL requested principals must match within a SINGLE group        │
+# │  - A user in multiple groups CANNOT combine principals across them  │
+# │  - Use "*" in allowed_principals to permit any SSH principal        │
+# │  - The matched group's certificate_rules (validity, permissions,    │
+# │    attributes, critical_options) are applied to the certificate     │
+# │                                                                     │
+# │ EXAMPLE — user in multiple groups:                                  │
+# │  alice is in both "backend-engineers" and "data-analysts":          │
+# │    Request ["root"]    → allowed via backend-engineers (8h cert)    │
+# │    Request ["analyst"] → allowed via data-analysts (1h cert)        │
+# │    Request ["root", "analyst"] → DENIED (no single group has both)  │
+# └──────────────────────────────────────────────────────────────────────┘
 
 # Path to the Kerberos keytab file for authenticating incoming requests
 keytab_path: "/etc/krb5.keytab"
@@ -36,7 +75,9 @@ groups:
       validity: "8h"
 
       # A list of server usernames (principals) that the signed key is allowed
-      # to log in as. Wildcards (*) can be used.
+      # to log in as. These become Casbin policies: p, <group>, <principal>, sign
+      # Use "*" as a single entry to allow ANY SSH principal for this group.
+      # Example wildcard: allowed_principals: ["*"]
       allowed_principals:
         - "root"
         - "ec2-user"

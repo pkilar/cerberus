@@ -8,7 +8,7 @@ Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to r
 
 - **Ultimate Key Security**: The CA private key is loaded directly into a secure Nitro Enclave and never leaves it. It is not accessible from the parent EC2 instance.
 - **Kerberos Authentication**: The public-facing API uses Kerberos (SPNEGO) to authenticate users, integrating seamlessly with existing enterprise identity systems like Active Directory or MIT Kerberos.
-- **Flexible, Group-Based Authorization**: A simple, powerful YAML file (config.yaml) defines which users belong to which groups and what permissions each group has (e.g., certificate validity, allowed server principals).
+- **Flexible, Group-Based Authorization**: A simple, powerful YAML file (config.yaml) defines which users belong to which groups and what permissions each group has (e.g., certificate validity, allowed server principals). Authorization is enforced by [Casbin](https://casbin.org/) with per-group policy evaluation and wildcard principal support.
 - **Secure Communication**: The API server communicates with the signing service in the enclave over a secure, isolated VSOCK connection, not the standard network stack.
 - **Auditable**: All issued certificates can be embedded with custom metadata, such as the requesting user's principal and a timestamp, for clear audit trails.
 - **Easy to Deploy**: Makefile automation simplifies building the application binaries and the Enclave Image File (.eif).
@@ -22,7 +22,7 @@ The system is composed of two primary services that work together to provide a s
 </p>
 
 1. A user with a valid Kerberos ticket makes an HTTPS request to the ssh-cert-api service with the public key they want signed.
-2. The ssh-cert-api service authenticates the user's Kerberos ticket and loads config.yaml to authorize the request based on the user's group membership.
+2. The ssh-cert-api service authenticates the user's Kerberos ticket and authorizes the request using Casbin policy evaluation against the user's group membership defined in config.yaml.
 3. If authorized, the API service forwards a detailed signing request to the ssh-cert-signer service running in the Nitro Enclave via a secure VSOCK.
 4. The ssh-cert-signer service fetches the CA private key from AWS KMS-encrypted storage.
 5. The enclave service signs the certificate and returns it to the API service over the VSOCK.
@@ -42,6 +42,7 @@ cerberus/
 │   ├── internal/                 # Private application code
 │   │   ├── api/                  # HTTP server and handlers
 │   │   ├── auth/                 # Kerberos authentication
+│   │   ├── authz/                # Casbin-based authorization
 │   │   ├── config/               # Configuration management
 │   │   ├── enclave/              # Enclave communication
 │   │   └── proxy/                # VSOCK proxy
@@ -63,7 +64,7 @@ This is the user-facing component that runs on the parent EC2 instance.
   - Listens for HTTPS requests
   - Authenticates users via Kerberos/SPNEGO
   - Parses and validates configuration
-  - Authorizes requests against defined rules
+  - Authorizes requests using Casbin policy engine with per-group enforcement
   - Communicates with the enclave service
 - **Configuration**:
   - `configs/config.yaml`: Defines user groups and permissions
