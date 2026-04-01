@@ -60,3 +60,6 @@ Thumbs.db
 .claude.json
 .claude.json.backup
 CLAUDE.md
+
+# FastEmbed model cache
+.fastembed_cache/
