@@ -13,7 +13,7 @@ Cerberus is a highly secure SSH Certificate Authority (CA) system designed for e
 
 ### Key Value Propositions
 
-- **Maximum Security**: Private signing keys are cryptographically isolated in hardware enclaves, unreachable by any software or user
+- **Maximum Security**: Private signing keys are cryptographically isolated in hardware enclaves, unreachable from the host when PCR-conditioned KMS attestation is enforced
 - **Enterprise Integration**: Seamless integration with existing Kerberos/Active Directory infrastructure
 - **Operational Efficiency**: Automated certificate issuance eliminates manual key management overhead
 - **Compliance Ready**: Built-in audit trails and access controls support regulatory requirements
@@ -49,9 +49,9 @@ SSH certificates provide temporary, auditable credentials that solve these chall
 
 - **Time-Limited**: Certificates automatically expire (e.g., after 8 hours)
 - **Centralized Issuance**: All access requests flow through a single, auditable authority
-- **Granular Permissions**: Certificates specify exactly which servers and accounts can be accessed
+- **Group-Based Permissions**: Certificates grant all principals defined in the matching authorization group
 - **Built-in Context**: Certificates embed user identity, timestamp, and authorization details
-- **Instant Revocation**: Access ends automatically when certificates expire
+- **Expiry-Based Revocation**: Access ends when certificates expire; removing a user from a group stops future issuance after config reload
 
 ### Why Nitro Enclaves?
 
@@ -260,16 +260,17 @@ Cerberus implements multiple layers of security controls:
 #### Layer 2: Authorization (Access Control)
 
 - **Mechanism**: Group-based policy enforcement
-- **Granularity**: Specific principals, permissions, and network restrictions per group
+- **Granularity**: Group-wide principal grants, permissions, and network restrictions per group
 - **Flexibility**: Policies defined in human-readable YAML configuration
 - **Principle**: Least-privilege access (users get minimum necessary permissions)
 
 #### Layer 3: Cryptographic Isolation (Key Protection)
 
 - **Mechanism**: AWS Nitro Enclaves hardware isolation
-- **Protection**: Private key unreachable by any software or administrator
-- **Attestation**: Enclave can prove its identity and integrity to AWS services
-- **Standard**: FIPS 140-2 Level 2 equivalent protection
+- **Protection**: Private key held in enclave memory; unreachable from host **when** KMS key policy includes PCR-based attestation conditions (see `docs/kms-attestation-policy.md`)
+- **Attestation**: Enclave proves its identity and integrity to KMS via PCR values; **production deployments must configure PCR conditions** on the KMS key policy to enforce this boundary
+- **Development Mode**: Without `/dev/nsm` (outside a real Nitro Enclave), the signer falls back to non-attested KMS calls — this mode provides no key-isolation guarantee and must not be used in production
+- **Standard**: FIPS 140-2 Level 2 equivalent protection (when PCR-conditioned attestation is enforced)
 
 #### Layer 4: Time-Based Expiration (Limited Exposure)
 
@@ -430,10 +431,10 @@ Cerberus supports regulatory and compliance requirements through:
 **Cerberus Approach**:
 - Create temporary group for contractor with 24-hour validity limit
 - Add contractor's Kerberos principal to group
-- Certificate limited to staging servers only
-- When contract ends, remove from group—access ends immediately
+- Certificate grants all principals defined in the contractor's authorization group
+- When contract ends, remove from group and restart/reload the API service — no new certificates can be issued, and existing certificates expire within the configured validity window
 
-**Benefits**: Time-limited access, reduced operational overhead, instant revocation
+**Benefits**: Time-limited access, reduced operational overhead, expiry-bounded revocation
 
 ### Use Case 3: Break-Glass Emergency Access
 
@@ -452,7 +453,7 @@ Cerberus supports regulatory and compliance requirements through:
 - Certificates expire after 2 hours
 - Remove engineers from group after incident
 
-**Benefits**: Individual accountability, automatic expiration, complete audit trail
+**Benefits**: Individual accountability, automatic expiration, issuance-level audit trail
 
 ### Use Case 4: Compliance and Auditing
 
@@ -468,9 +469,9 @@ Cerberus supports regulatory and compliance requirements through:
 - Show certificate issuance logs with user identity, timestamp, and permissions
 - Demonstrate automated policy enforcement in `config.yaml`
 - Prove short-lived credentials (time-limited access)
-- Show complete audit trail from request to usage
+- Issuance-level audit trail covering authentication, authorization, and signing events (Cerberus does not collect downstream SSH session logs from target hosts — host-side session auditing requires separate infrastructure)
 
-**Benefits**: Simplified compliance, reduced audit scope, demonstrable controls
+**Benefits**: Simplified compliance, reduced audit scope, demonstrable issuance controls
 
 ---
 
@@ -528,7 +529,7 @@ Cerberus supports regulatory and compliance requirements through:
 | -------------------------------- | ---------- | -------- | ------------------------------------------------------------ |
 | Policy misconfiguration          | Medium     | Medium   | Peer review of config changes, audit logging                 |
 | Lost/stolen user credentials     | Medium     | Medium   | Short-lived certificates limit exposure window               |
-| Insider threat                   | Low        | High     | Complete audit trail, multi-person authorization for changes |
+| Insider threat                   | Low        | High     | Issuance audit trail, multi-person authorization for changes |
 | Enclave compromise (theoretical) | Very Low   | Critical | Hardware-level isolation makes this extremely difficult      |
 
 ### Business Risks
@@ -644,9 +645,9 @@ The system is particularly well-suited for organizations that:
 
 ### Key Takeaways
 
-1. **Maximum Security**: Hardware isolation ensures CA key cannot be compromised
+1. **Maximum Security**: Hardware isolation ensures CA key cannot be compromised (requires PCR-conditioned KMS attestation policy in production)
 2. **Operational Efficiency**: Automated issuance eliminates manual key management
-3. **Compliance Ready**: Complete audit trails and policy enforcement
+3. **Compliance Ready**: Issuance-level audit trails and automated policy enforcement
 4. **Enterprise Integration**: Works with existing Kerberos infrastructure
 5. **Proven Technology**: Built on AWS Nitro Enclaves and standard SSH certificates
 
