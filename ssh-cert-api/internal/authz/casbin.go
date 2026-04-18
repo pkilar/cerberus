@@ -24,6 +24,8 @@ e = some(where (p.eft == allow))
 m = r.sub == p.sub && (p.obj == "*" || r.obj == p.obj) && r.act == p.act
 `
 
+var _ Authorizer = (*CasbinAuthorizer)(nil)
+
 // CasbinAuthorizer implements Authorizer using Casbin as the policy engine.
 // User-to-group mappings are managed explicitly (not via Casbin RBAC grouping)
 // to ensure that authorization decisions and CertificateRules always come from

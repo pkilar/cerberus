@@ -25,6 +25,8 @@ type Authenticator interface {
 	AuthenticateRequest(r *http.Request) (*AuthenticatedUser, error)
 }
 
+var _ Authenticator = (*KerberosAuthenticator)(nil)
+
 type KerberosAuthenticator struct {
 	keytab   *keytab.Keytab
 	spnego   *spnego.SPNEGO

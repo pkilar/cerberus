@@ -24,6 +24,8 @@ type Signer interface {
 	Close() error
 }
 
+var _ Signer = (*Client)(nil)
+
 type Client struct {
 	vsockPort int
 }
