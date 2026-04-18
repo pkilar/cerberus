@@ -2,7 +2,7 @@ package authz
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
@@ -66,7 +66,7 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 	for name := range cfg.Groups {
 		groupNames = append(groupNames, name)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 
 	for _, groupName := range groupNames {
 		group := cfg.Groups[groupName]
