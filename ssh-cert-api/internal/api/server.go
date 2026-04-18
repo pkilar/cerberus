@@ -16,6 +16,8 @@ import (
 	"ssh-cert-api/internal/authz"
 	"ssh-cert-api/internal/config"
 	"ssh-cert-api/internal/enclave"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type contextKey string
@@ -57,7 +59,10 @@ func (s *Server) Router() http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		// /health and /metrics are intentionally unauthenticated so
+		// load balancers and Prometheus scrapers can reach them without
+		// Kerberos tickets. Protect /metrics via network-level ACLs.
+		if r.URL.Path == "/health" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -80,10 +85,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func (s *Server) setupRoutes() {
 	s.router.Handle("/sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
 	s.router.HandleFunc("/health", s.handleHealth)
+	s.router.Handle("/metrics", promhttp.Handler())
 }
 
 func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := outcomeFailed
+	defer func() {
+		signDurationSeconds.Observe(time.Since(start).Seconds())
+		signRequestsTotal.WithLabelValues(outcome).Inc()
+	}()
+
 	if r.Method != http.MethodPost {
+		outcome = outcomeInvalidMethod
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Method not allowed"})
@@ -92,6 +106,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	user, ok := r.Context().Value(userContextKey).(*auth.AuthenticatedUser)
 	if !ok {
+		outcome = outcomeNoAuth
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Failed to get authenticated user"})
@@ -103,11 +118,13 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
+			outcome = outcomeTooLarge
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Request body too large"})
 			return
 		}
+		outcome = outcomeInvalidBody
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid request format"})
@@ -115,6 +132,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.SSHKey == "" {
+		outcome = outcomeMissingKey
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing SSH key"})
@@ -127,6 +145,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// Check authorization and get user's group configuration
 	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
 	if authzErr != nil {
+		outcome = outcomeAuthzError
 		slog.Error("authz.error", "principal", principal, "error", authzErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -134,6 +153,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !result.Allowed {
+		outcome = outcomeDenied
 		slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
@@ -161,6 +181,8 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// Sign the key
 	signedKey, err := s.enclaveClient.SignPublicKey(enclaveReq)
 	if err != nil {
+		outcome = outcomeFailed
+		enclaveErrorsTotal.Inc()
 		slog.Error("sign.failed", "principal", principal, "group", result.GroupName, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -168,6 +190,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	outcome = outcomeSuccess
 	slog.Info("sign.success",
 		"principal", principal,
 		"group", result.GroupName,

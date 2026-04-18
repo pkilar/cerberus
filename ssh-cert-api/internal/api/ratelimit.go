@@ -68,6 +68,7 @@ func (p *principalLimiter) middleware(next http.Handler) http.Handler {
 		}
 		principal := user.Username + "@" + user.Realm
 		if !p.allow(principal) {
+			signRequestsTotal.WithLabelValues(outcomeRatelimited).Inc()
 			slog.Warn("ratelimit.denied", "principal", principal)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
