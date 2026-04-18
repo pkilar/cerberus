@@ -93,10 +93,12 @@ func main() {
 
 	// --- 5. Define the HTTP server with authentication middleware ---
 	httpServer := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      server.Router(), // The router now includes the middleware
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:              cfg.Listen,
+		Handler:           server.Router(), // The router now includes the middleware
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// --- 6. Start Server ---

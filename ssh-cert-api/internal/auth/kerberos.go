@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"cerberus/logging"
@@ -31,6 +32,10 @@ type AuthenticatedUser struct {
 }
 
 func NewKerberosAuthenticator(keytabPath string, servicePrincipal string) (*KerberosAuthenticator, error) {
+	if err := checkKeytabPermissions(keytabPath); err != nil {
+		return nil, err
+	}
+
 	kt, err := keytab.Load(keytabPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load keytab from %s: %w", keytabPath, err)
@@ -63,11 +68,10 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		return nil, fmt.Errorf("missing Authorization header")
 	}
 
-	if !strings.HasPrefix(authHeader, "Negotiate ") {
+	token, ok := strings.CutPrefix(authHeader, "Negotiate ")
+	if !ok {
 		return nil, fmt.Errorf("authorization header must use Negotiate scheme")
 	}
-
-	token := strings.TrimPrefix(authHeader, "Negotiate ")
 	logging.Debug("Base64 token: %s", token)
 	spnegoToken, err := base64.StdEncoding.DecodeString(token)
 	if err != nil {
@@ -168,6 +172,20 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		Username: username,
 		Realm:    realm,
 	}, nil
+}
+
+// checkKeytabPermissions refuses to proceed if the keytab file is readable by
+// anyone other than the owner. A world-or-group-readable keytab hands the
+// service's Kerberos key to any local user, enabling token forgery.
+func checkKeytabPermissions(keytabPath string) error {
+	info, err := os.Stat(keytabPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat keytab %s: %w", keytabPath, err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return fmt.Errorf("keytab %s has insecure permissions %#o: must not be group- or world-readable", keytabPath, mode)
+	}
+	return nil
 }
 
 func (k *KerberosAuthenticator) Authenticate(token string) (string, error) {

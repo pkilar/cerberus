@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"cerberus/messages"
@@ -18,7 +20,13 @@ import (
 
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey contextKey = "user"
+
+	// maxSignRequestBytes caps /sign body size. An SSH RSA-4096 public key is
+	// ~750 bytes; with principals and JSON framing, 64 KB is generous.
+	maxSignRequestBytes = 64 * 1024
+)
 
 type Server struct {
 	config        *config.Config
@@ -88,8 +96,16 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxSignRequestBytes)
 	var req messages.SigningRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Request body too large"})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid request format"})
@@ -132,11 +148,11 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,
 		KeyID:            principal,
-		Principals:       result.CertificateRules.AllowedPrincipals,
+		Principals:       slices.Clone(result.CertificateRules.AllowedPrincipals),
 		Validity:         result.CertificateRules.Validity,
-		Permissions:      result.CertificateRules.Permissions,
+		Permissions:      maps.Clone(result.CertificateRules.Permissions),
 		CustomAttributes: customAttributes,
-		CriticalOptions:  result.CertificateRules.CriticalOptions,
+		CriticalOptions:  maps.Clone(result.CertificateRules.CriticalOptions),
 	}
 
 	// Sign the key
