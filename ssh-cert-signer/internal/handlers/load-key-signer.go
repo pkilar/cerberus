@@ -7,6 +7,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -40,7 +41,7 @@ import (
 func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest, attestProvider *attestation.Provider) (ssh.Signer, error) {
 	if attestationRequired() {
 		if attestProvider == nil || !attestProvider.IsAvailable() {
-			return nil, fmt.Errorf("attestation is required but unavailable; refusing to load CA key. Set REQUIRE_ATTESTATION=false to override (not recommended in production)")
+			return nil, errors.New("attestation is required but unavailable; refusing to load CA key (set REQUIRE_ATTESTATION=false to override — not recommended in production)")
 		}
 	}
 
