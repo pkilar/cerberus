@@ -90,9 +90,13 @@ func (p *Provider) GenerateAttestationDoc() ([]byte, error) {
 // DecryptCMSEnvelope decrypts a CMS EnvelopedData structure (RFC 5652) as
 // returned by KMS in the CiphertextForRecipient field. The envelope uses
 // RSA-OAEP-SHA256 key transport and AES-CBC content encryption.
+//
+// The gate is narrower than IsAvailable on purpose: decryption needs only
+// the RSA key, not the NSM session. Callers that require end-to-end
+// attestation (i.e. attestation doc generation) check IsAvailable separately.
 func (p *Provider) DecryptCMSEnvelope(data []byte) ([]byte, error) {
-	if !p.IsAvailable() {
-		return nil, errors.New("attestation not available")
+	if p == nil || p.rsaKey == nil {
+		return nil, errors.New("attestation RSA key not available")
 	}
 
 	encryptedKey, iv, encryptedContent, err := parseCMSEnvelopedData(data)
