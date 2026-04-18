@@ -33,6 +33,7 @@ type Server struct {
 	authenticator auth.Authenticator
 	authorizer    authz.Authorizer
 	enclaveClient enclave.Signer
+	limiter       *principalLimiter
 	router        *http.ServeMux
 }
 
@@ -42,6 +43,7 @@ func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer 
 		authenticator: authenticator,
 		authorizer:    authorizer,
 		enclaveClient: enclaveClient,
+		limiter:       newPrincipalLimiter(),
 		router:        http.NewServeMux(),
 	}
 
@@ -76,7 +78,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupRoutes() {
-	s.router.HandleFunc("/sign", s.handleSignRequest)
+	s.router.Handle("/sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
 	s.router.HandleFunc("/health", s.handleHealth)
 }
 
