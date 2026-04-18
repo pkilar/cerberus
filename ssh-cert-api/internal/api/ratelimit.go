@@ -21,10 +21,16 @@ const (
 // Limiters are created lazily on first use and retained for the process
 // lifetime. Footprint is O(unique principals) and bounded by the Kerberos
 // realm, so unbounded growth is not a practical concern.
+//
+// A typed map guarded by a Mutex is intentional over sync.Map: the
+// storage contract (values are always *rate.Limiter) is visible at the
+// type level, and the hot path (Allow) holds the mutex only for the
+// map lookup, not for the limiter evaluation itself.
 type principalLimiter struct {
-	rps      rate.Limit
-	burst    int
-	limiters sync.Map // principal (string) -> *rate.Limiter
+	rps   rate.Limit
+	burst int
+	mu    sync.Mutex
+	m     map[string]*rate.Limiter
 }
 
 func newPrincipalLimiter() *principalLimiter {
@@ -43,17 +49,21 @@ func newPrincipalLimiter() *principalLimiter {
 	return &principalLimiter{
 		rps:   rate.Limit(rps),
 		burst: burst,
+		m:     make(map[string]*rate.Limiter),
 	}
 }
 
 // allow reports whether one event is currently permitted for principal.
 // It is safe for concurrent use.
 func (p *principalLimiter) allow(principal string) bool {
-	if v, ok := p.limiters.Load(principal); ok {
-		return v.(*rate.Limiter).Allow()
+	p.mu.Lock()
+	lim, ok := p.m[principal]
+	if !ok {
+		lim = rate.NewLimiter(p.rps, p.burst)
+		p.m[principal] = lim
 	}
-	v, _ := p.limiters.LoadOrStore(principal, rate.NewLimiter(p.rps, p.burst))
-	return v.(*rate.Limiter).Allow()
+	p.mu.Unlock()
+	return lim.Allow()
 }
 
 // middleware wraps next and enforces per-principal rate limiting using the

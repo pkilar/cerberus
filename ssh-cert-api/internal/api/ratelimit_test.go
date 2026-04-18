@@ -9,7 +9,7 @@ import (
 func TestPrincipalLimiter_PerPrincipalBuckets(t *testing.T) {
 	// rps=0 means no replenishment within the test window; only the burst
 	// pool is available. Two hits allowed for alice, the third denied.
-	p := &principalLimiter{rps: 0, burst: 2}
+	p := &principalLimiter{rps: 0, burst: 2, m: make(map[string]*rate.Limiter)}
 
 	if !p.allow("alice@EXAMPLE.COM") {
 		t.Fatal("alice: first request should be allowed")
