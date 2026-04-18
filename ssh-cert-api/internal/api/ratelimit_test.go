@@ -61,10 +61,10 @@ func TestPrincipalLimiter_InvalidEnvFallsBackToDefault(t *testing.T) {
 // per principal regardless of scheduling.
 func TestPrincipalLimiter_Concurrent(t *testing.T) {
 	const (
-		burst       = 10
-		goroutines  = 50
+		burst        = 10
+		goroutines   = 50
 		perGoroutine = 4 // 50 * 4 = 200 requests per principal
-		principals  = 8
+		principals   = 8
 	)
 	p := &principalLimiter{rps: 0, burst: burst, m: make(map[string]*rate.Limiter)}
 

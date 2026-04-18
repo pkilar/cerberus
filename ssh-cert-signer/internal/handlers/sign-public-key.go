@@ -105,7 +105,7 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		// ssh.Certificate fields require uint64.
 		ValidAfter:  uint64(now.Unix()) - clockSkewSeconds,
 		ValidBefore: uint64(now.Add(validityDuration).Unix()),
-		Permissions:     permissions,
+		Permissions: permissions,
 	}
 
 	// Check for context cancellation before signing

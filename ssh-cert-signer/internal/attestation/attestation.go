@@ -42,7 +42,7 @@ func NewProvider() *Provider {
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		sess.Close()
+		_ = sess.Close()
 		log.Printf("Failed to generate RSA keypair for attestation: %v", err)
 		return &Provider{}
 	}
@@ -140,7 +140,7 @@ func (p *Provider) DecryptCMSEnvelope(data []byte) ([]byte, error) {
 // Close releases the NSM session.
 func (p *Provider) Close() {
 	if p != nil && p.session != nil {
-		p.session.Close()
+		_ = p.session.Close()
 	}
 }
 

@@ -204,7 +204,6 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

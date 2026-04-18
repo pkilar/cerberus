@@ -13,20 +13,37 @@ linters:
     - bodyclose
     - contextcheck
     - errorlint
-    - gosec
     - misspell
-    - modernize
     - nilerr
-    - prealloc
     - unconvert
+    # Intentionally NOT enabled:
+    # - gosec     — runs as a separate CI job with -severity=medium
+    # - modernize — style-level suggestions; we bump via /modernize
+    # - prealloc  — style-level; test files especially have many false positives
+
+  settings:
+    errcheck:
+      # HTTP response encoding and connection Close are best-effort — the
+      # client is gone, there's nothing useful to do with the error.
+      exclude-functions:
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (io.Closer).Close
+        - (*encoding/json.Encoder).Encode
+        - encoding/json.NewEncoder
+        - (net/http.ResponseWriter).Write
+        - io.Copy
+    staticcheck:
+      # QF1008 quick-fix nags about redundant embedded-field selectors —
+      # style quibble, not a bug. Keep the rest of staticcheck at full strength.
+      checks:
+        - "all"
+        - "-QF1008"
 
   exclusions:
     rules:
-      # Tests frequently ignore errors on cleanup paths and exercise edge cases
-      # that gosec flags as risky — those are intentional in test fixtures.
       - path: _test\.go
         linters:
-          - gosec
           - errcheck
 
 formatters:

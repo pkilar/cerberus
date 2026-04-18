@@ -35,12 +35,12 @@ func NewMockVSockServer(port uint32) (*MockVSockServer, error) {
 	// Create a test SSH signer
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate test key: %v", err)
+		return nil, fmt.Errorf("failed to generate test key: %w", err)
 	}
 
 	signer, err := ssh.NewSignerFromKey(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %v", err)
+		return nil, fmt.Errorf("failed to create signer: %w", err)
 	}
 
 	return &MockVSockServer{
@@ -54,7 +54,7 @@ func (s *MockVSockServer) Start() error {
 	// In a real integration test environment, this would need VSOCK support
 	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", s.port))
 	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
+		return fmt.Errorf("failed to listen: %w", err)
 	}
 
 	s.listener = listener

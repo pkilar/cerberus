@@ -46,20 +46,20 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 	// Create VSOCK connection to enclave
 	conn, err := vsock.Dial(enclaveCID, constants.ENCLAVE_LISTENING_PORT, nil)
 	if err != nil {
-		return fmt.Errorf("failed to connect to enclave: %v", err)
+		return fmt.Errorf("failed to connect to enclave: %w", err)
 	}
 	defer conn.Close()
 
 	// Set read/write timeouts
 	err = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	if err != nil {
-		return fmt.Errorf("failed to set connection deadline: %v", err)
+		return fmt.Errorf("failed to set connection deadline: %w", err)
 	}
 
 	// Marshal request to JSON
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %v", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	logging.Debug("Sending request to enclave: %s", redactRequest(request))

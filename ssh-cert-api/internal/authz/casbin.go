@@ -33,7 +33,7 @@ var _ Authorizer = (*CasbinAuthorizer)(nil)
 type CasbinAuthorizer struct {
 	enforcer   *casbin.Enforcer
 	groupRules map[string]*config.CertificateRules // group name -> certificate rules
-	userGroups map[string][]string                  // user principal -> groups in sorted order
+	userGroups map[string][]string                 // user principal -> groups in sorted order
 }
 
 // NewCasbinAuthorizer creates a CasbinAuthorizer with policies loaded from the given config.

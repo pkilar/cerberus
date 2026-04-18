@@ -139,9 +139,12 @@ func main() {
 			return nil
 		}
 
+		// Intentionally detach from gctx here: a grace-timeout for
+		// draining must not be cut short by the parent's cancellation.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
+		return httpServer.Shutdown(shutdownCtx) //nolint:contextcheck // graceful shutdown ctx is independent by design
+
 	})
 
 	if err := g.Wait(); err != nil {

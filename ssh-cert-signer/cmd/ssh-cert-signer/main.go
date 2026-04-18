@@ -45,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: failed to listen on vsock port %d: %v", constants.ENCLAVE_LISTENING_PORT, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	log.Printf("Listening on vsock port %d...", constants.ENCLAVE_LISTENING_PORT)
 
 	// Accept and handle connections in a loop.
@@ -62,7 +62,7 @@ func main() {
 
 // handleConnection reads a request, signs it, and writes a response.
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	logging.Debug("Accepted new connection from parent instance.")
 
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
