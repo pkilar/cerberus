@@ -100,8 +100,11 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		CertType:        ssh.UserCert,
 		KeyId:           req.KeyID,
 		ValidPrincipals: req.Principals,
-		ValidAfter:      uint64(now.Unix()) - clockSkewSeconds,
-		ValidBefore:     uint64(now.Add(validityDuration).Unix()),
+		// #nosec G115 -- Unix() is monotonically positive since the epoch;
+		// the uint64 cast cannot overflow until year 2262, and the
+		// ssh.Certificate fields require uint64.
+		ValidAfter:  uint64(now.Unix()) - clockSkewSeconds,
+		ValidBefore: uint64(now.Add(validityDuration).Unix()),
 		Permissions:     permissions,
 	}
 

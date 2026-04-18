@@ -87,6 +87,8 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 
 	// Read the encrypted CA key from file
 	logging.Debug("Reading encrypted CA key from file: %s", caKeyFilePath)
+	// #nosec G304,G703 -- caKeyFilePath comes from the CA_KEY_FILE_PATH env
+	// var set by the operator (or a packaged systemd unit), not untrusted input.
 	encryptedKeyBytes, err := os.ReadFile(caKeyFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted key file '%s': %w", caKeyFilePath, err)
