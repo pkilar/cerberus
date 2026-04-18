@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"cerberus/constants"
@@ -23,7 +26,10 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"golang.org/x/sync/errgroup"
 )
+
+const shutdownGrace = 10 * time.Second
 
 func main() {
 	log.Println("Starting SSH Certificate API...")
@@ -101,12 +107,41 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// --- 6. Start Server ---
+	// --- 6. Start Server with graceful shutdown ---
 	log.Printf("Server listening on https://%s", cfg.Listen)
 
-	err = httpServer.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey)
-	if err != nil {
-		log.Fatalf("Failed to start HTTPS server: %v. Ensure %s and %s are present.", err, cfg.TlsCert, cfg.TlsKey)
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	g, gctx := errgroup.WithContext(rootCtx)
+
+	g.Go(func() error {
+		if err := httpServer.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("https server: %w (ensure %s and %s are present)", err, cfg.TlsCert, cfg.TlsKey)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+
+		select {
+		case sig := <-sigChan:
+			log.Printf("Received %s — draining connections (deadline %s)", sig, shutdownGrace)
+		case <-gctx.Done():
+			// Server goroutine errored; propagate by returning nil here.
+			return nil
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	})
+
+	if err := g.Wait(); err != nil {
+		log.Fatalf("Server error: %v", err)
 	}
 }
 
