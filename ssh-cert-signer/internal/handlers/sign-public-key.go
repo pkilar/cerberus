@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
+	"log/slog"
 	"maps"
 	"math/big"
 	"strings"
@@ -116,8 +116,13 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		return nil, fmt.Errorf("cryptographic signing failed: %w", err)
 	}
 
-	log.Printf("Successfully signed certificate for KeyID: %s, Serial: %d, ValidAfter: %d, ValidBefore: %d",
-		req.KeyID, cert.Serial, cert.ValidAfter, cert.ValidBefore)
+	slog.Info("sign.cert_issued",
+		"key_id", req.KeyID,
+		"serial", cert.Serial,
+		"valid_after", cert.ValidAfter,
+		"valid_before", cert.ValidBefore,
+		"principals", req.Principals,
+	)
 
 	signedKeyBytes := ssh.MarshalAuthorizedKey(cert)
 

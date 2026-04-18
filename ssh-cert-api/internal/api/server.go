@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -62,7 +62,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		user, err := s.authenticator.AuthenticateRequest(r)
 		if err != nil {
-			log.Printf("Authentication failed: %v", err)
+			slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)
 			w.Header().Set("WWW-Authenticate", "Negotiate")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -120,18 +120,19 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	principal := user.Username + "@" + user.Realm
-	log.Printf("Signing request from user: %s", principal)
+	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals)
 
 	// Check authorization and get user's group configuration
 	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
 	if authzErr != nil {
-		log.Printf("Authorization error for %s: %v", principal, authzErr)
+		slog.Error("authz.error", "principal", principal, "error", authzErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
 		return
 	}
 	if !result.Allowed {
+		slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
@@ -158,13 +159,18 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// Sign the key
 	signedKey, err := s.enclaveClient.SignPublicKey(enclaveReq)
 	if err != nil {
-		log.Printf("Signing failed: %v", err)
+		slog.Error("sign.failed", "principal", principal, "group", result.GroupName, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Signing failed"})
 		return
 	}
 
+	slog.Info("sign.success",
+		"principal", principal,
+		"group", result.GroupName,
+		"granted_principals", result.CertificateRules.AllowedPrincipals,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
