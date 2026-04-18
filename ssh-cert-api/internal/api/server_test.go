@@ -268,8 +268,23 @@ func TestHealth_BypassesAuth(t *testing.T) {
 }
 
 func TestMetrics_BypassesAuthAndExposesCounters(t *testing.T) {
-	authN := &fakeAuthenticator{err: errors.New("should not be called")}
-	s := newServerForTest(t, authN, &fakeAuthorizer{}, &fakeSigner{})
+	// Drive one /sign request first. Prometheus CounterVec omits a series
+	// until at least one label combination has been observed, so without
+	// this warm-up the assertion below would depend on a prior test having
+	// exercised the counter — exactly the ordering dependency that
+	// go test -shuffle=on is meant to catch.
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: []string{"root"},
+	}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "metrics-warmup", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	warm := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	warm.Header.Set("Authorization", "Negotiate x")
+	s.Router().ServeHTTP(httptest.NewRecorder(), warm)
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()

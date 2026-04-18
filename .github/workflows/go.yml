@@ -29,9 +29,15 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go build -v ./...
 
-      - name: Test with race detector
+      - name: go mod tidy drift check
         working-directory: ${{ matrix.module }}
-        run: go test -race -count=1 ./...
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Test with race detector and shuffled order
+        working-directory: ${{ matrix.module }}
+        run: go test -race -shuffle=on -count=1 ./...
 
   lint:
     name: golangci-lint (${{ matrix.module }})
