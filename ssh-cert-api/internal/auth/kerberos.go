@@ -1,3 +1,8 @@
+// Package auth verifies SPNEGO Kerberos credentials on incoming HTTPS
+// requests and produces an authenticated principal for downstream authz.
+// The keytab is loaded once at startup; its file permissions are checked
+// to reject group- or world-readable keytabs before the service accepts
+// its first request.
 package auth
 
 import (

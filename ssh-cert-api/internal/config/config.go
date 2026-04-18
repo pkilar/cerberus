@@ -1,3 +1,6 @@
+// Package config loads and validates the YAML configuration at startup.
+// A running service never reloads config; the struct is effectively
+// immutable after LoadConfig returns.
 package config
 
 import (

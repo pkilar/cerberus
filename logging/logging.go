@@ -1,3 +1,8 @@
+// Package logging configures slog as the process-wide logger and bridges the
+// stdlib log package through it so every log line lands in the same sink with
+// a consistent format (text by default, JSON when LOG_FORMAT=json). DEBUG=true
+// raises the minimum level to Debug. New code should use slog.Info/Error with
+// structured attributes; logging.Debug is retained for back-compat printf callers.
 package logging
 
 import (

@@ -1,3 +1,8 @@
+// Package handlers implements the enclave-side request handlers:
+// LoadKeySignerHandler decrypts the KMS-encrypted CA key on startup (with
+// Nitro attestation when available), and SignPublicKey produces an SSH
+// certificate for a validated request. The CA private key lives in this
+// process's memory and never leaves the enclave.
 package handlers
 
 import (

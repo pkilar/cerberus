@@ -1,3 +1,7 @@
+// Command ssh-cert-api is the host-side HTTPS gateway. It authenticates users
+// via Kerberos SPNEGO, enforces per-group authorization via Casbin, rate-limits
+// per principal, and forwards approved signing requests over VSOCK to the
+// ssh-cert-signer running in a Nitro Enclave.
 package main
 
 import (

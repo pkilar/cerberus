@@ -1,3 +1,8 @@
+// Package enclave is the host-side client for the Nitro Enclave signing
+// service. It dials the enclave over VSOCK, sends a JSON SignSshKey
+// request, and returns the signed certificate. Authentication and
+// authorization happen in the api package; this package assumes the
+// caller has already decided the signing should proceed.
 package enclave
 
 import (

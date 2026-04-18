@@ -1,3 +1,8 @@
+// Package proxy implements a VSOCK-to-TCP forwarder. Nitro Enclaves have no
+// network stack; the enclave dials a VSOCK address on the parent instance,
+// and this proxy forwards the bytes on to the target TCP endpoint
+// (typically kms.<region>.amazonaws.com:443). TLS is terminated inside the
+// enclave, so the host sees only ciphertext on the wire.
 package proxy
 
 import (

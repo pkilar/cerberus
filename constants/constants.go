@@ -1,3 +1,7 @@
+// Package constants defines the VSOCK CIDs and port numbers used for
+// communication between the ssh-cert-api host service and the ssh-cert-signer
+// enclave. These values are fixed by the deployment topology; changing them
+// requires a coordinated update on both sides.
 package constants
 
 // Context identifier for the parent instance. This is always 3.

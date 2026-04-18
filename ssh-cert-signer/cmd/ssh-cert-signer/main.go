@@ -1,3 +1,7 @@
+// Command ssh-cert-signer runs inside an AWS Nitro Enclave. It loads the
+// KMS-encrypted CA key on startup (using NSM attestation when /dev/nsm is
+// available) and then accepts SSH-certificate signing requests over VSOCK
+// from the parent instance's ssh-cert-api.
 package main
 
 import (

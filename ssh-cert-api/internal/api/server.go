@@ -1,3 +1,6 @@
+// Package api implements the HTTPS surface of ssh-cert-api: Kerberos SPNEGO
+// authentication, per-principal rate limiting, Casbin-backed authorization,
+// the /sign and /health endpoints, and Prometheus metrics at /metrics.
 package api
 
 import (

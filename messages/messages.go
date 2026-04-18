@@ -1,3 +1,6 @@
+// Package messages defines the JSON wire protocol between ssh-cert-api (the
+// host-side HTTPS gateway) and ssh-cert-signer (the Nitro Enclave signer).
+// Every request/response crossing VSOCK is encoded as one of these types.
 package messages
 
 // These messages define the API between the ssh-cert-signer and ssh-cert-api.

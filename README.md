@@ -65,13 +65,24 @@ This is the user-facing component that runs on the parent EC2 instance.
   - Authenticates users via Kerberos/SPNEGO
   - Parses and validates configuration
   - Authorizes requests using Casbin policy engine with per-group enforcement
-  - Communicates with the enclave service
+  - Enforces a per-principal rate limit on `/sign`
+  - Forwards approved signing requests to the enclave over VSOCK
+  - Exposes Prometheus metrics at `/metrics` (unauthenticated — protect at the network layer)
+- **HTTP endpoints**:
+  - `POST /sign` — Kerberos-authenticated signing endpoint
+  - `GET /health` — liveness probe (unauthenticated)
+  - `GET /metrics` — Prometheus scrape target (unauthenticated)
 - **Configuration**:
   - `configs/config.yaml`: Defines user groups and permissions
   - **Environment Variables**:
     - `CONFIG_PATH`: Path to config.yaml (default: `configs/config.yaml`)
-    - `KERBEROS_KEYTAB_PATH`: Path to the service's keytab file
+    - `KERBEROS_KEYTAB_PATH`: Path to the service's keytab file. Must be mode `0600` or `0400` (group/world-readable keytabs are refused at startup).
     - `AWS_REGION`: AWS region for KMS operations
+    - `ENCLAVE_VSOCK_PORT`: VSOCK port used to reach the signer (default: `5000`)
+    - `RATE_LIMIT_RPS`: Per-principal rate limit in requests per second (default: `5`)
+    - `RATE_LIMIT_BURST`: Per-principal burst allowance (default: `10`)
+    - `LOG_FORMAT`: `json` emits structured slog JSON; anything else (default) emits text
+    - `DEBUG`: `true` raises the log level to Debug
 
 ### **2. ssh-cert-signer (Enclave Signing Service)**
 
@@ -86,6 +97,9 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
   - **Environment Variables**:
     - `CA_KEY_FILE_PATH`: Path to the encrypted CA key file (default: `/app/ca_key.enc`)
     - `AWS_REGION`: AWS region for KMS operations (default: `us-east-1`)
+    - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device.
+    - `LOG_FORMAT`: `json` for structured slog JSON; anything else (default) emits text
+    - `DEBUG`: `true` raises the log level to Debug
 
 ## **Prerequisites**
 
