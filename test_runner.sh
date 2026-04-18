@@ -133,7 +133,7 @@ run_security_tests() {
         gosec ./...
     else
         print_warning "gosec not installed, skipping security scan"
-        echo "  Install with: go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest"
+        echo "  Install with: go install github.com/securego/gosec/v2/cmd/gosec@latest"
     fi
     
     # Check for vulnerable dependencies
@@ -244,7 +244,7 @@ main() {
     echo "  • Benchmarks:        go test -bench=. ./..."
     echo ""
     echo "🛡️  Security tools recommended:"
-    echo "  • gosec:       go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest"
+    echo "  • gosec:       go install github.com/securego/gosec/v2/cmd/gosec@latest"
     echo "  • govulncheck: go install golang.org/x/vuln/cmd/govulncheck@latest"
     echo "  • golangci-lint: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
     
