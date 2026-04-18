@@ -10,8 +10,11 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +28,7 @@ type MockVSockServer struct {
 	listener net.Listener
 	signer   ssh.Signer
 	port     uint32
-	running  bool
+	running  atomic.Bool
 }
 
 func NewMockVSockServer(port uint32) (*MockVSockServer, error) {
@@ -55,14 +58,14 @@ func (s *MockVSockServer) Start() error {
 	}
 
 	s.listener = listener
-	s.running = true
+	s.running.Store(true)
 
 	go s.acceptConnections()
 	return nil
 }
 
 func (s *MockVSockServer) Stop() error {
-	s.running = false
+	s.running.Store(false)
 	if s.listener != nil {
 		return s.listener.Close()
 	}
@@ -70,10 +73,10 @@ func (s *MockVSockServer) Stop() error {
 }
 
 func (s *MockVSockServer) acceptConnections() {
-	for s.running {
+	for s.running.Load() {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if s.running {
+			if s.running.Load() {
 				fmt.Printf("Accept error: %v\n", err)
 			}
 			continue
@@ -121,18 +124,9 @@ func (s *MockVSockServer) signPublicKey(req messages.EnclaveSigningRequest) (str
 		CriticalOptions: make(map[string]string),
 	}
 
-	// Copy permissions and custom attributes to extensions
-	for k, v := range req.Permissions {
-		permissions.Extensions[k] = v
-	}
-	for k, v := range req.CustomAttributes {
-		permissions.Extensions[k] = v
-	}
-
-	// Copy critical options
-	for k, v := range req.CriticalOptions {
-		permissions.CriticalOptions[k] = v
-	}
+	maps.Copy(permissions.Extensions, req.Permissions)
+	maps.Copy(permissions.Extensions, req.CustomAttributes)
+	maps.Copy(permissions.CriticalOptions, req.CriticalOptions)
 
 	cert := &ssh.Certificate{
 		Key:             publicKey,
@@ -355,6 +349,138 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 	}
 
 	t.Logf("Successfully created and verified SSH certificate with KeyID: %s", cert.KeyId)
+}
+
+// TestIntegration_ConcurrentSigning drives N goroutines each through a
+// full signing round-trip against the mock enclave. The mock spawns a
+// per-connection goroutine so this also exercises that path. Combined
+// with `go test -race`, this catches regressions in JSON framing,
+// connection lifecycle, or shared state under load.
+func TestIntegration_ConcurrentSigning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mockServer, err := NewMockVSockServer(15001)
+	if err != nil {
+		t.Fatalf("failed to create mock server: %v", err)
+	}
+	if err := mockServer.Start(); err != nil {
+		t.Fatalf("failed to start mock server: %v", err)
+	}
+	defer mockServer.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	pub, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("failed to create public key: %v", err)
+	}
+	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+
+	const N = 10
+	var wg sync.WaitGroup
+	errs := make(chan error, N)
+
+	for i := range N {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			conn, err := net.Dial("tcp", "localhost:15001")
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d: dial: %w", idx, err)
+				return
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+			req := messages.Request{
+				SignSshKey: &messages.EnclaveSigningRequest{
+					SSHKey:     pubStr,
+					KeyID:      fmt.Sprintf("concurrent-user-%d", idx),
+					Principals: []string{"admin"},
+					Validity:   "1h",
+				},
+			}
+			if err := json.NewEncoder(conn).Encode(req); err != nil {
+				errs <- fmt.Errorf("goroutine %d: encode: %w", idx, err)
+				return
+			}
+
+			buf := make([]byte, 4096)
+			n, err := conn.Read(buf)
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d: read: %w", idx, err)
+				return
+			}
+			var resp messages.Response
+			if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &resp); err != nil {
+				errs <- fmt.Errorf("goroutine %d: unmarshal: %w", idx, err)
+				return
+			}
+			if resp.Error != nil {
+				errs <- fmt.Errorf("goroutine %d: enclave error: %s", idx, *resp.Error)
+				return
+			}
+			if resp.SignSshKey == nil || resp.SignSshKey.SignedKey == "" {
+				errs <- fmt.Errorf("goroutine %d: empty signed key", idx)
+				return
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// TestIntegration_MalformedRequest verifies the mock enclave returns a
+// structured error response on garbled input rather than hanging or closing
+// silently. This mirrors the enclave's actual handler behaviour.
+func TestIntegration_MalformedRequest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	mockServer, err := NewMockVSockServer(15002)
+	if err != nil {
+		t.Fatalf("failed to create mock server: %v", err)
+	}
+	if err := mockServer.Start(); err != nil {
+		t.Fatalf("failed to start mock server: %v", err)
+	}
+	defer mockServer.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", "localhost:15002")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if _, err := conn.Write([]byte("this is definitely not JSON\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	var resp messages.Response
+	if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Error == nil || *resp.Error == "" {
+		t.Errorf("expected error response, got: %+v", resp)
+	}
 }
 
 func TestIntegration_EnclaveConnectionFailure(t *testing.T) {
