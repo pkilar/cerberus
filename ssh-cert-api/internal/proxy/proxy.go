@@ -1,7 +1,13 @@
+// Package proxy implements a VSOCK-to-TCP forwarder. Nitro Enclaves have no
+// network stack; the enclave dials a VSOCK address on the parent instance,
+// and this proxy forwards the bytes on to the target TCP endpoint
+// (typically kms.<region>.amazonaws.com:443). TLS is terminated inside the
+// enclave, so the host sees only ciphertext on the wire.
 package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -83,7 +89,8 @@ func (p *Proxy) run(ctx context.Context) {
 			default:
 				log.Printf("Proxy failed to accept vsock connection: %v", err)
 				// If the listener is closed for other reasons, we should exit.
-				if _, ok := err.(*net.OpError); ok {
+				var opErr *net.OpError
+				if errors.As(err, &opErr) {
 					return
 				}
 				continue
@@ -113,13 +120,11 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	logging.Debug("Proxy connected to TCP endpoint %s", tcpConn.RemoteAddr().String())
 
 	// Goroutine to copy data from VSOCK to TCP.
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		defer tcpConn.Close()
 		defer vsockConn.Close()
 		io.Copy(tcpConn, vsockConn)
-	}()
+	})
 
 	// Copy data from TCP to VSOCK.
 	io.Copy(vsockConn, tcpConn)

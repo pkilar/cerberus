@@ -10,16 +10,7 @@ import (
 )
 
 func TestLoadKeySignerHandler_MissingFile(t *testing.T) {
-	// Set a non-existent file path
-	originalPath := os.Getenv("CA_KEY_FILE_PATH")
-	os.Setenv("CA_KEY_FILE_PATH", "/nonexistent/path/to/key.enc")
-	defer func() {
-		if originalPath != "" {
-			os.Setenv("CA_KEY_FILE_PATH", originalPath)
-		} else {
-			os.Unsetenv("CA_KEY_FILE_PATH")
-		}
-	}()
+	t.Setenv("CA_KEY_FILE_PATH", "/nonexistent/path/to/key.enc")
 
 	req := messages.LoadKeySignerRequest{
 		Credentials: messages.Credentials{
@@ -76,16 +67,7 @@ func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
 
-	// Set the file path to our empty temp file
-	originalPath := os.Getenv("CA_KEY_FILE_PATH")
-	os.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
-	defer func() {
-		if originalPath != "" {
-			os.Setenv("CA_KEY_FILE_PATH", originalPath)
-		} else {
-			os.Unsetenv("CA_KEY_FILE_PATH")
-		}
-	}()
+	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
 
 	req := messages.LoadKeySignerRequest{
 		Credentials: messages.Credentials{
@@ -108,19 +90,63 @@ func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	}
 }
 
+func TestAttestationRequired(t *testing.T) {
+	tests := []struct {
+		envValue string
+		want     bool
+	}{
+		{"true", true},
+		{"1", true},
+		{"yes", true},
+		{"false", false},
+		{"0", false},
+		{"no", false},
+	}
+
+	for _, tt := range tests {
+		t.Run("REQUIRE_ATTESTATION="+tt.envValue, func(t *testing.T) {
+			t.Setenv("REQUIRE_ATTESTATION", tt.envValue)
+			if got := attestationRequired(); got != tt.want {
+				t.Errorf("attestationRequired() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// Unrecognized value falls through to /dev/nsm detection.
+	t.Run("REQUIRE_ATTESTATION=garbage falls through", func(t *testing.T) {
+		t.Setenv("REQUIRE_ATTESTATION", "garbage")
+		_, nsmErr := os.Stat("/dev/nsm")
+		wantAuto := nsmErr == nil
+		if got := attestationRequired(); got != wantAuto {
+			t.Errorf("attestationRequired() = %v, want %v (auto-detect)", got, wantAuto)
+		}
+	})
+}
+
+func TestLoadKeySignerHandler_AttestationRequiredButUnavailable(t *testing.T) {
+	t.Setenv("REQUIRE_ATTESTATION", "true")
+
+	req := messages.LoadKeySignerRequest{
+		Credentials: messages.Credentials{
+			AccessKeyId:     "test-access-key",
+			SecretAccessKey: "test-secret-key",
+			Token:           "test-token",
+		},
+	}
+
+	_, err := LoadKeySignerHandler(context.Background(), req, nil)
+	if err == nil {
+		t.Fatal("expected error when attestation is required but provider is nil")
+	}
+	if !strings.Contains(err.Error(), "attestation is required") {
+		t.Errorf("expected attestation-required error, got: %v", err)
+	}
+}
+
 // Test the environment variable handling
 func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
-	// Test AWS_REGION environment variable
-	originalRegion := os.Getenv("AWS_REGION")
 	testRegion := "us-west-2"
-	os.Setenv("AWS_REGION", testRegion)
-	defer func() {
-		if originalRegion != "" {
-			os.Setenv("AWS_REGION", originalRegion)
-		} else {
-			os.Unsetenv("AWS_REGION")
-		}
-	}()
+	t.Setenv("AWS_REGION", testRegion)
 
 	// Create a temporary file with some content (not a real encrypted key)
 	tmpFile, err := os.CreateTemp("", "test_key_*.enc")
@@ -131,15 +157,7 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 	tmpFile.WriteString("fake encrypted content")
 	tmpFile.Close()
 
-	originalPath := os.Getenv("CA_KEY_FILE_PATH")
-	os.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
-	defer func() {
-		if originalPath != "" {
-			os.Setenv("CA_KEY_FILE_PATH", originalPath)
-		} else {
-			os.Unsetenv("CA_KEY_FILE_PATH")
-		}
-	}()
+	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
 
 	req := messages.LoadKeySignerRequest{
 		Credentials: messages.Credentials{

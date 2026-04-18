@@ -224,8 +224,7 @@ func BenchmarkSshSigningRequest_Marshal(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := json.Marshal(req)
 		if err != nil {
 			b.Fatalf("marshal failed: %v", err)
@@ -252,8 +251,7 @@ func BenchmarkSshSigningRequest_Unmarshal(b *testing.B) {
 		b.Fatalf("failed to marshal request: %v", err)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		var decoded EnclaveSigningRequest
 		err = json.Unmarshal(data, &decoded)
 		if err != nil {

@@ -1,14 +1,21 @@
+// Command ssh-cert-api is the host-side HTTPS gateway. It authenticates users
+// via Kerberos SPNEGO, enforces per-group authorization via Casbin, rate-limits
+// per principal, and forwards approved signing requests over VSOCK to the
+// ssh-cert-signer running in a Nitro Enclave.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"cerberus/constants"
@@ -23,7 +30,10 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"golang.org/x/sync/errgroup"
 )
+
+const shutdownGrace = 10 * time.Second
 
 func main() {
 	log.Println("Starting SSH Certificate API...")
@@ -49,7 +59,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize enclave client: %v", err)
 	}
-	defer enclaveClient.Close()
+	defer func() { _ = enclaveClient.Close() }()
 
 	// --- 3. Start VSOCK Proxy for AWS Services ---
 	// This proxy allows the enclave to communicate with AWS services
@@ -93,18 +103,52 @@ func main() {
 
 	// --- 5. Define the HTTP server with authentication middleware ---
 	httpServer := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      server.Router(), // The router now includes the middleware
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:              cfg.Listen,
+		Handler:           server.Router(), // The router now includes the middleware
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
-	// --- 6. Start Server ---
+	// --- 6. Start Server with graceful shutdown ---
 	log.Printf("Server listening on https://%s", cfg.Listen)
 
-	err = httpServer.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey)
-	if err != nil {
-		log.Fatalf("Failed to start HTTPS server: %v. Ensure %s and %s are present.", err, cfg.TlsCert, cfg.TlsKey)
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	g, gctx := errgroup.WithContext(rootCtx)
+
+	g.Go(func() error {
+		if err := httpServer.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("https server: %w (ensure %s and %s are present)", err, cfg.TlsCert, cfg.TlsKey)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+
+		select {
+		case sig := <-sigChan:
+			log.Printf("Received %s — draining connections (deadline %s)", sig, shutdownGrace)
+		case <-gctx.Done():
+			// Server goroutine errored; propagate by returning nil here.
+			return nil
+		}
+
+		// Intentionally detach from gctx here: a grace-timeout for
+		// draining must not be cut short by the parent's cancellation.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx) //nolint:contextcheck // graceful shutdown ctx is independent by design
+
+	})
+
+	if err := g.Wait(); err != nil {
+		log.Fatalf("Server error: %v", err)
 	}
 }
 

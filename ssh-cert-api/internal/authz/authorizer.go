@@ -1,3 +1,9 @@
+// Package authz resolves authenticated Kerberos principals to their
+// configured certificate rules via a Casbin enforcer. Enforcement is
+// strictly per-group: if a user is a member of multiple groups, they
+// cannot combine principals across groups within a single signing
+// request — the first group in alphabetical order whose allowed
+// principals cover the full request wins.
 package authz
 
 import "ssh-cert-api/internal/config"

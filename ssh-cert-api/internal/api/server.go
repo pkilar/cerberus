@@ -1,12 +1,17 @@
+// Package api implements the HTTPS surface of ssh-cert-api: Kerberos SPNEGO
+// authentication, per-principal rate limiting, Casbin-backed authorization,
+// the /sign and /health endpoints, and Prometheus metrics at /metrics.
 package api
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"cerberus/messages"
@@ -14,17 +19,26 @@ import (
 	"ssh-cert-api/internal/authz"
 	"ssh-cert-api/internal/config"
 	"ssh-cert-api/internal/enclave"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey contextKey = "user"
+
+	// maxSignRequestBytes caps /sign body size. An SSH RSA-4096 public key is
+	// ~750 bytes; with principals and JSON framing, 64 KB is generous.
+	maxSignRequestBytes = 64 * 1024
+)
 
 type Server struct {
 	config        *config.Config
 	authenticator auth.Authenticator
 	authorizer    authz.Authorizer
 	enclaveClient enclave.Signer
+	limiter       *principalLimiter
 	router        *http.ServeMux
 }
 
@@ -34,6 +48,7 @@ func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer 
 		authenticator: authenticator,
 		authorizer:    authorizer,
 		enclaveClient: enclaveClient,
+		limiter:       newPrincipalLimiter(),
 		router:        http.NewServeMux(),
 	}
 
@@ -47,14 +62,17 @@ func (s *Server) Router() http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		// /health and /metrics are intentionally unauthenticated so
+		// load balancers and Prometheus scrapers can reach them without
+		// Kerberos tickets. Protect /metrics via network-level ACLs.
+		if r.URL.Path == "/health" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		user, err := s.authenticator.AuthenticateRequest(r)
 		if err != nil {
-			log.Printf("Authentication failed: %v", err)
+			slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)
 			w.Header().Set("WWW-Authenticate", "Negotiate")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -68,12 +86,21 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupRoutes() {
-	s.router.HandleFunc("/sign", s.handleSignRequest)
+	s.router.Handle("/sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
 	s.router.HandleFunc("/health", s.handleHealth)
+	s.router.Handle("/metrics", promhttp.Handler())
 }
 
 func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := outcomeFailed
+	defer func() {
+		signDurationSeconds.Observe(time.Since(start).Seconds())
+		signRequestsTotal.WithLabelValues(outcome).Inc()
+	}()
+
 	if r.Method != http.MethodPost {
+		outcome = outcomeInvalidMethod
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Method not allowed"})
@@ -82,14 +109,25 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	user, ok := r.Context().Value(userContextKey).(*auth.AuthenticatedUser)
 	if !ok {
+		outcome = outcomeNoAuth
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Failed to get authenticated user"})
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxSignRequestBytes)
 	var req messages.SigningRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			outcome = outcomeTooLarge
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Request body too large"})
+			return
+		}
+		outcome = outcomeInvalidBody
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid request format"})
@@ -97,6 +135,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.SSHKey == "" {
+		outcome = outcomeMissingKey
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing SSH key"})
@@ -104,18 +143,21 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	principal := user.Username + "@" + user.Realm
-	log.Printf("Signing request from user: %s", principal)
+	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals)
 
 	// Check authorization and get user's group configuration
 	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
 	if authzErr != nil {
-		log.Printf("Authorization error for %s: %v", principal, authzErr)
+		outcome = outcomeAuthzError
+		slog.Error("authz.error", "principal", principal, "error", authzErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
 		return
 	}
 	if !result.Allowed {
+		outcome = outcomeDenied
+		slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
@@ -132,28 +174,35 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,
 		KeyID:            principal,
-		Principals:       result.CertificateRules.AllowedPrincipals,
+		Principals:       slices.Clone(result.CertificateRules.AllowedPrincipals),
 		Validity:         result.CertificateRules.Validity,
-		Permissions:      result.CertificateRules.Permissions,
+		Permissions:      maps.Clone(result.CertificateRules.Permissions),
 		CustomAttributes: customAttributes,
-		CriticalOptions:  result.CertificateRules.CriticalOptions,
+		CriticalOptions:  maps.Clone(result.CertificateRules.CriticalOptions),
 	}
 
 	// Sign the key
 	signedKey, err := s.enclaveClient.SignPublicKey(enclaveReq)
 	if err != nil {
-		log.Printf("Signing failed: %v", err)
+		outcome = outcomeFailed
+		enclaveErrorsTotal.Inc()
+		slog.Error("sign.failed", "principal", principal, "group", result.GroupName, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Signing failed"})
 		return
 	}
 
+	outcome = outcomeSuccess
+	slog.Info("sign.success",
+		"principal", principal,
+		"group", result.GroupName,
+		"granted_principals", result.CertificateRules.AllowedPrincipals,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
-
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

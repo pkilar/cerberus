@@ -1,7 +1,13 @@
+// Package handlers implements the enclave-side request handlers:
+// LoadKeySignerHandler decrypts the KMS-encrypted CA key on startup (with
+// Nitro attestation when available), and SignPublicKey produces an SSH
+// certificate for a validated request. The CA private key lives in this
+// process's memory and never leaves the enclave.
 package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,7 +33,18 @@ import (
 // If attestProvider is non-nil and available, an NSM attestation document is attached
 // to the KMS Decrypt call for full enclave attestation. Pass nil to skip attestation
 // (development mode or testing).
+//
+// When running inside a Nitro Enclave (detected via /dev/nsm) or when
+// REQUIRE_ATTESTATION=true, the handler refuses to decrypt without a working
+// attestation provider. This prevents silent downgrade to plaintext KMS Decrypt
+// if the NSM device becomes unavailable.
 func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest, attestProvider *attestation.Provider) (ssh.Signer, error) {
+	if attestationRequired() {
+		if attestProvider == nil || !attestProvider.IsAvailable() {
+			return nil, errors.New("attestation is required but unavailable; refusing to load CA key (set REQUIRE_ATTESTATION=false to override — not recommended in production)")
+		}
+	}
+
 	// Set default region to us-east-1 if not specified
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
@@ -70,6 +87,8 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 
 	// Read the encrypted CA key from file
 	logging.Debug("Reading encrypted CA key from file: %s", caKeyFilePath)
+	// #nosec G304,G703 -- caKeyFilePath comes from the CA_KEY_FILE_PATH env
+	// var set by the operator (or a packaged systemd unit), not untrusted input.
 	encryptedKeyBytes, err := os.ReadFile(caKeyFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted key file '%s': %w", caKeyFilePath, err)
@@ -133,4 +152,18 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	}
 
 	return signer, nil
+}
+
+// attestationRequired reports whether KMS Decrypt must use a Recipient attestation
+// document. Defaults to true when /dev/nsm is present (i.e. running inside a Nitro
+// Enclave). REQUIRE_ATTESTATION=true|false overrides the auto-detection.
+func attestationRequired() bool {
+	switch os.Getenv("REQUIRE_ATTESTATION") {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	_, err := os.Stat("/dev/nsm")
+	return err == nil
 }

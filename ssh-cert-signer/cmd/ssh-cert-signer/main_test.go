@@ -438,8 +438,7 @@ func BenchmarkSignPublicKey(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := handlers.SignPublicKey(context.Background(), signer, req)
 		if err != nil {
 			b.Fatalf("signing failed: %v", err)
@@ -461,8 +460,7 @@ func BenchmarkJSONMarshalUnmarshal(b *testing.B) {
 		},
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		data, err := json.Marshal(req)
 		if err != nil {
 			b.Fatalf("marshal failed: %v", err)

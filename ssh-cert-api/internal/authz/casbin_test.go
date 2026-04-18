@@ -208,7 +208,7 @@ func TestAuthorize_DeterministicOrder(t *testing.T) {
 	})
 
 	// Run multiple times to verify determinism
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		a, err := NewCasbinAuthorizer(cfg)
 		if err != nil {
 			t.Fatalf("NewCasbinAuthorizer (iteration %d): %v", i, err)

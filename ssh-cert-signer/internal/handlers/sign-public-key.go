@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
+	"log/slog"
 	"maps"
 	"math/big"
 	"strings"
@@ -100,9 +100,11 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		CertType:        ssh.UserCert,
 		KeyId:           req.KeyID,
 		ValidPrincipals: req.Principals,
-		ValidAfter:      uint64(now.Unix()) - clockSkewSeconds,
-		ValidBefore:     uint64(now.Add(validityDuration).Unix()),
-		Permissions:     permissions,
+		// Unix() is monotonically positive since the epoch; the uint64 cast
+		// cannot overflow until year 2262, and ssh.Certificate requires uint64.
+		ValidAfter:  uint64(now.Unix()) - clockSkewSeconds,    //#nosec G115
+		ValidBefore: uint64(now.Add(validityDuration).Unix()), //#nosec G115
+		Permissions: permissions,
 	}
 
 	// Check for context cancellation before signing
@@ -116,8 +118,13 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		return nil, fmt.Errorf("cryptographic signing failed: %w", err)
 	}
 
-	log.Printf("Successfully signed certificate for KeyID: %s, Serial: %d, ValidAfter: %d, ValidBefore: %d",
-		req.KeyID, cert.Serial, cert.ValidAfter, cert.ValidBefore)
+	slog.Info("sign.cert_issued",
+		"key_id", req.KeyID,
+		"serial", cert.Serial,
+		"valid_after", cert.ValidAfter,
+		"valid_before", cert.ValidBefore,
+		"principals", req.Principals,
+	)
 
 	signedKeyBytes := ssh.MarshalAuthorizedKey(cert)
 

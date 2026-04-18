@@ -1,0 +1,62 @@
+# golangci-lint v2 configuration.
+# Run: golangci-lint run ./...
+# Docs: https://golangci-lint.run/usage/configuration/
+
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - misspell
+    - nilerr
+    - unconvert
+    # Intentionally NOT enabled:
+    # - gosec     — runs as a separate CI job with -severity=medium
+    # - modernize — style-level suggestions; we bump via /modernize
+    # - prealloc  — style-level; test files especially have many false positives
+
+  settings:
+    errcheck:
+      # HTTP response encoding and connection Close are best-effort — the
+      # client is gone, there's nothing useful to do with the error.
+      exclude-functions:
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (io.Closer).Close
+        - (*encoding/json.Encoder).Encode
+        - encoding/json.NewEncoder
+        - (net/http.ResponseWriter).Write
+        - io.Copy
+    staticcheck:
+      # Disabled staticcheck checks (style-level, not correctness):
+      # - QF1008: redundant embedded-field selector
+      # - ST1003: name convention (ALL_CAPS const, AccessKeyId vs AccessKeyID).
+      #           The existing naming is consistent across the codebase and
+      #           part of the public messages.* wire types — renaming would
+      #           break JSON tags for downstream consumers and is not worth
+      #           the churn for a style preference.
+      # - ST1021: exported-type comment must start with type name.
+      # - ST1022: exported-const comment must start with const name.
+      checks:
+        - "all"
+        - "-QF1008"
+        - "-ST1003"
+        - "-ST1021"
+        - "-ST1022"
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

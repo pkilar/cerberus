@@ -2,7 +2,7 @@ package authz
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
@@ -24,6 +24,8 @@ e = some(where (p.eft == allow))
 m = r.sub == p.sub && (p.obj == "*" || r.obj == p.obj) && r.act == p.act
 `
 
+var _ Authorizer = (*CasbinAuthorizer)(nil)
+
 // CasbinAuthorizer implements Authorizer using Casbin as the policy engine.
 // User-to-group mappings are managed explicitly (not via Casbin RBAC grouping)
 // to ensure that authorization decisions and CertificateRules always come from
@@ -31,7 +33,7 @@ m = r.sub == p.sub && (p.obj == "*" || r.obj == p.obj) && r.act == p.act
 type CasbinAuthorizer struct {
 	enforcer   *casbin.Enforcer
 	groupRules map[string]*config.CertificateRules // group name -> certificate rules
-	userGroups map[string][]string                  // user principal -> groups in sorted order
+	userGroups map[string][]string                 // user principal -> groups in sorted order
 }
 
 // NewCasbinAuthorizer creates a CasbinAuthorizer with policies loaded from the given config.
@@ -66,7 +68,7 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 	for name := range cfg.Groups {
 		groupNames = append(groupNames, name)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 
 	for _, groupName := range groupNames {
 		group := cfg.Groups[groupName]
