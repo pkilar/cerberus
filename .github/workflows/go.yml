@@ -54,7 +54,7 @@ jobs:
           go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.6.0
           working-directory: ${{ matrix.module }}
@@ -98,13 +98,19 @@ jobs:
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
+      # -severity=medium filters LOW-severity noise: G104 (unchecked
+      # json.NewEncoder(w).Encode — best-effort HTTP response writes) and
+      # G706 (log-injection via taint — slog text/JSON handlers already
+      # escape structured attrs, so this is a false positive at scale).
+      # MEDIUM+ findings still fail the build and are fixed inline with
+      # #nosec comments carrying a justification.
       - name: gosec (root)
-        run: gosec ./...
+        run: gosec -severity=medium ./...
 
       - name: gosec (ssh-cert-api)
         working-directory: ssh-cert-api
-        run: gosec ./...
+        run: gosec -severity=medium ./...
 
       - name: gosec (ssh-cert-signer)
         working-directory: ssh-cert-signer
-        run: gosec ./...
+        run: gosec -severity=medium ./...

@@ -38,6 +38,8 @@ type CertificateRules struct {
 
 // LoadConfig reads the YAML file from the given path and unmarshals it.
 func LoadConfig(path string) (*Config, error) {
+	// #nosec G304 -- path comes from the CONFIG_PATH env var set by the
+	// operator (or a packaged systemd unit), not from untrusted input.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file at %s: %w", path, err)
