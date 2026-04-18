@@ -59,7 +59,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize enclave client: %v", err)
 	}
-	defer enclaveClient.Close()
+	defer func() { _ = enclaveClient.Close() }()
 
 	// --- 3. Start VSOCK Proxy for AWS Services ---
 	// This proxy allows the enclave to communicate with AWS services

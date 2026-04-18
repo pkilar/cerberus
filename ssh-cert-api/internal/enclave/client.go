@@ -48,7 +48,7 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 	if err != nil {
 		return fmt.Errorf("failed to connect to enclave: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set read/write timeouts
 	err = conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -65,20 +65,20 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 	logging.Debug("Sending request to enclave: %s", redactRequest(request))
 	_, err = conn.Write(append(requestBytes, '\n')) // Send request to enclave with newline delimiter
 	if err != nil {
-		return fmt.Errorf("failed to send request to enclave: %v", err)
+		return fmt.Errorf("failed to send request to enclave: %w", err)
 	}
 
 	reader := bufio.NewReader(conn) // Use buffered reader to read line-by-line response
 	responseBytes, err := reader.ReadBytes('\n')
 	if err != nil {
-		return fmt.Errorf("failed to read response from enclave: %v", err)
+		return fmt.Errorf("failed to read response from enclave: %w", err)
 	}
 	logging.Debug("Received response from enclave: %s", string(responseBytes))
 
 	// Parse response into the provided struct
 	err = json.Unmarshal(responseBytes, response)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshal response: %v", err)
+		return fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
 	return nil
