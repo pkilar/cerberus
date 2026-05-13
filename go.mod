@@ -4,11 +4,11 @@ go 1.26.0
 
 toolchain go1.26.2
 
-require golang.org/x/crypto v0.50.0
+require golang.org/x/crypto v0.51.0
 
 replace ssh-cert-api => ./ssh-cert-api
 
-require golang.org/x/sys v0.43.0 // indirect
+require golang.org/x/sys v0.44.0 // indirect
 
 replace github.com/aws/aws-sdk-go-v2/service/kms => github.com/edgebitio/nitro-enclaves-sdk-go/kms v0.0.0-20221110205443-8a5476ff3cc2
 
