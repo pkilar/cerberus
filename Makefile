@@ -10,6 +10,13 @@ build:
 	@echo "Building ssh-cert-signer..."
 	$(MAKE) -C ssh-cert-signer build
 
+# Build the stress-testing CLI (cerberus-stress)
+stress:
+	@echo "Building cerberus-stress..."
+	@mkdir -p bin
+	go build -o bin/cerberus-stress ./cmd/cerberus-stress
+	@echo "  -> bin/cerberus-stress"
+
 # Run all tests
 test:
 	@echo "Running tests for ssh-cert-api..."
@@ -92,4 +99,4 @@ run-enclave-debug:
 		--debug-mode \
 		--attach-console
 
-.PHONY: all build test test-coverage clean eif eif-amd64 eif-arm64 run-api run-enclave-debug
+.PHONY: all build stress test test-coverage clean eif eif-amd64 eif-arm64 run-api run-enclave-debug
