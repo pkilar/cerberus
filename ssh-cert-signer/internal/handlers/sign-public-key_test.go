@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"strings"
@@ -163,7 +162,7 @@ func TestSignPublicKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, err := SignPublicKey(context.Background(), tt.signer, tt.request)
+			response, err := SignPublicKey(t.Context(), tt.signer, tt.request)
 
 			if tt.expectError {
 				if err == nil {
@@ -252,7 +251,7 @@ func TestSignPublicKey_CertificateFields(t *testing.T) {
 		},
 	}
 
-	response, err := SignPublicKey(context.Background(), signer, req)
+	response, err := SignPublicKey(t.Context(), signer, req)
 	if err != nil {
 		t.Fatalf("signing failed: %v", err)
 	}
@@ -309,7 +308,7 @@ func BenchmarkSignPublicKey(b *testing.B) {
 	}
 
 	for b.Loop() {
-		_, err := SignPublicKey(context.Background(), signer, req)
+		_, err := SignPublicKey(b.Context(), signer, req)
 		if err != nil {
 			b.Fatalf("signing failed: %v", err)
 		}
@@ -366,7 +365,7 @@ func TestSignPublicKey_CriticalOptions(t *testing.T) {
 		},
 	}
 
-	response, err := SignPublicKey(context.Background(), signer, req)
+	response, err := SignPublicKey(t.Context(), signer, req)
 	if err != nil {
 		t.Fatalf("signing failed: %v", err)
 	}

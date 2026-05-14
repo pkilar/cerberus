@@ -5,6 +5,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,11 +40,8 @@ func main() {
 	log.Println("Starting SSH Certificate API...")
 
 	// --- 1. Load Configuration ---
-	configPath := os.Getenv("CONFIG_PATH")
-	if configPath == "" {
-		configPath = "configs/config.yaml" // Default for local development
-		logging.Debug("CONFIG_PATH not set, using default: %s", configPath)
-	}
+	configPath := cmp.Or(os.Getenv("CONFIG_PATH"), "configs/config.yaml")
+	logging.Debug("Using config path: %s", configPath)
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
@@ -64,12 +62,7 @@ func main() {
 	// --- 3. Start VSOCK Proxy for AWS Services ---
 	// This proxy allows the enclave to communicate with AWS services
 	// Get the current AWS region for KMS endpoint
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = "us-east-1"
-		logging.Debug("AWS_REGION not set, defaulting to %s for KMS proxy", region)
-	}
-
+	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
 	kmsEndpoint := fmt.Sprintf("kms.%s.amazonaws.com:443", region)
 	vsockProxy := proxy.New(constants.INSTANCE_LISTENING_PORT, kmsEndpoint)
 

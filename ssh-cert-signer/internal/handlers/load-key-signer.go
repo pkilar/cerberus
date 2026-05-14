@@ -6,6 +6,7 @@
 package handlers
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -46,11 +47,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	}
 
 	// Set default region to us-east-1 if not specified
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = "us-east-1"
-		logging.Debug("AWS_REGION not set, defaulting to us-east-1")
-	}
+	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
 
 	// Create custom HTTP client that routes through VSOCK proxy
 	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
@@ -79,11 +76,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 		return nil, fmt.Errorf("failed to load AWS default config: %w", err)
 	}
 
-	caKeyFilePath := os.Getenv("CA_KEY_FILE_PATH")
-	if caKeyFilePath == "" {
-		caKeyFilePath = "/app/ca_key.enc"
-		logging.Debug("CA_KEY_FILE_PATH not set, defaulting to %s", caKeyFilePath)
-	}
+	caKeyFilePath := cmp.Or(os.Getenv("CA_KEY_FILE_PATH"), "/app/ca_key.enc")
 
 	// Read the encrypted CA key from file
 	logging.Debug("Reading encrypted CA key from file: %s", caKeyFilePath)

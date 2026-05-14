@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"os"
 	"strings"
 	"testing"
@@ -20,7 +19,7 @@ func TestLoadKeySignerHandler_MissingFile(t *testing.T) {
 		},
 	}
 
-	_, err := LoadKeySignerHandler(context.Background(), req, nil)
+	_, err := LoadKeySignerHandler(t.Context(), req, nil)
 	if err == nil {
 		t.Error("expected error when file doesn't exist")
 	}
@@ -32,13 +31,7 @@ func TestLoadKeySignerHandler_MissingFile(t *testing.T) {
 
 func TestLoadKeySignerHandler_EmptyFilePath(t *testing.T) {
 	// Test with default file path (should not exist)
-	originalPath := os.Getenv("CA_KEY_FILE_PATH")
-	os.Unsetenv("CA_KEY_FILE_PATH")
-	defer func() {
-		if originalPath != "" {
-			os.Setenv("CA_KEY_FILE_PATH", originalPath)
-		}
-	}()
+	t.Setenv("CA_KEY_FILE_PATH", "")
 
 	req := messages.LoadKeySignerRequest{
 		Credentials: messages.Credentials{
@@ -48,7 +41,7 @@ func TestLoadKeySignerHandler_EmptyFilePath(t *testing.T) {
 		},
 	}
 
-	_, err := LoadKeySignerHandler(context.Background(), req, nil)
+	_, err := LoadKeySignerHandler(t.Context(), req, nil)
 	if err == nil {
 		t.Error("expected error when default file doesn't exist")
 	}
@@ -60,11 +53,10 @@ func TestLoadKeySignerHandler_EmptyFilePath(t *testing.T) {
 
 func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	// Create a temporary empty file
-	tmpFile, err := os.CreateTemp("", "test_key_*.enc")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test_key_*.enc")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
 
 	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
@@ -78,7 +70,7 @@ func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	}
 
 	// This should fail at the KMS decryption step since we can't connect to AWS in tests
-	_, err = LoadKeySignerHandler(context.Background(), req, nil)
+	_, err = LoadKeySignerHandler(t.Context(), req, nil)
 	if err == nil {
 		t.Error("expected error when trying to decrypt empty file")
 	}
@@ -134,7 +126,7 @@ func TestLoadKeySignerHandler_AttestationRequiredButUnavailable(t *testing.T) {
 		},
 	}
 
-	_, err := LoadKeySignerHandler(context.Background(), req, nil)
+	_, err := LoadKeySignerHandler(t.Context(), req, nil)
 	if err == nil {
 		t.Fatal("expected error when attestation is required but provider is nil")
 	}
@@ -149,11 +141,10 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 	t.Setenv("AWS_REGION", testRegion)
 
 	// Create a temporary file with some content (not a real encrypted key)
-	tmpFile, err := os.CreateTemp("", "test_key_*.enc")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test_key_*.enc")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
 	tmpFile.WriteString("fake encrypted content")
 	tmpFile.Close()
 
@@ -168,7 +159,7 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 	}
 
 	// This will fail at AWS connection, but we can verify the region was set
-	_, err = LoadKeySignerHandler(context.Background(), req, nil)
+	_, err = LoadKeySignerHandler(t.Context(), req, nil)
 	if err == nil {
 		t.Error("expected error due to AWS connection failure")
 	}
