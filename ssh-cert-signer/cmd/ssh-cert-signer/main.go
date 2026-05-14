@@ -8,9 +8,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os/signal"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/mdlayher/vsock"
@@ -23,8 +28,24 @@ import (
 	"ssh-cert-signer/internal/handlers"
 )
 
+const (
+	// maxConcurrentConnections caps in-flight signing requests so a
+	// misbehaving host cannot exhaust enclave memory by opening many
+	// simultaneous VSOCK connections.
+	maxConcurrentConnections = 32
+	// connDeadline bounds each request's read and write window. The host
+	// client (see ssh-cert-api/internal/enclave/client.go) sets a 30s
+	// connection deadline; this is the per-message slice within that.
+	connDeadline = 5 * time.Second
+)
+
 var (
-	caSigner       ssh.Signer
+	// caSigner is written by handleLoadKeySigner and read by every
+	// concurrent handleSignSshKey. atomic.Pointer prevents a data race
+	// between a (re-)load and an in-flight sign on the hot path.
+	caSigner atomic.Pointer[ssh.Signer]
+	// attestProvider is initialized in main before any goroutines spawn,
+	// so the goroutine-spawn happens-before edge makes plain access safe.
 	attestProvider *attestation.Provider
 )
 
@@ -39,8 +60,9 @@ func main() {
 		log.Println("NSM device not found — running without attestation (development mode)")
 	}
 
-	// Listen for connections on a VSOCK port.
-	// The parent EC2 instance will connect to this listener.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	listener, err := vsock.Listen(constants.ENCLAVE_LISTENING_PORT, nil)
 	if err != nil {
 		log.Fatalf("FATAL: failed to listen on vsock port %d: %v", constants.ENCLAVE_LISTENING_PORT, err)
@@ -48,53 +70,87 @@ func main() {
 	defer func() { _ = listener.Close() }()
 	log.Printf("Listening on vsock port %d...", constants.ENCLAVE_LISTENING_PORT)
 
-	// Accept and handle connections in a loop.
+	// Close the listener when ctx is cancelled to unblock Accept.
+	context.AfterFunc(ctx, func() { _ = listener.Close() })
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrentConnections)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				log.Println("Shutdown signal received — stopping accept loop")
+				break
+			}
 			log.Printf("ERROR: failed to accept connection: %v", err)
 			continue
 		}
-		// Handle each connection in a new goroutine to allow concurrent processing.
-		go handleConnection(conn)
+
+		// Bounded concurrency: block here if at the per-process limit.
+		// During shutdown, drop the just-accepted conn instead of queueing.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			_ = conn.Close()
+			continue
+		}
+
+		wg.Go(func() {
+			defer func() { <-sem }()
+			handleConnection(ctx, conn)
+		})
 	}
+
+	log.Println("Draining in-flight connections...")
+	wg.Wait()
+	log.Println("Enclave signing service stopped cleanly")
 }
 
-// handleConnection reads a request, signs it, and writes a response.
-func handleConnection(conn net.Conn) {
+// handleConnection reads requests from conn, signing each one and writing the
+// response, until the peer closes, the deadline expires, or ctx is cancelled.
+func handleConnection(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	logging.Debug("Accepted new connection from parent instance.")
 
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		log.Printf("ERROR: failed to set read deadline: %v", err)
-		return
-	}
-
 	scanner := bufio.NewScanner(conn)
 
-	for scanner.Scan() {
-		response := processRequest(scanner.Bytes())
+	for {
+		// Reset the read deadline at the top of every iteration so a
+		// connection that serves multiple requests doesn't burn its
+		// budget on processing time of the previous one.
+		if err := conn.SetReadDeadline(time.Now().Add(connDeadline)); err != nil {
+			log.Printf("ERROR: failed to set read deadline: %v", err)
+			return
+		}
+
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Printf("ERROR: scanner.Scan() failed: %s", err)
+			}
+			return
+		}
+
+		response := processRequest(ctx, scanner.Bytes())
 		if err := sendResponse(conn, response); err != nil {
 			log.Printf("ERROR: failed to send response: %v", err)
 			return
 		}
-	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("ERROR: scanner.Scan() failed: %s", err)
+		if ctx.Err() != nil {
+			return
+		}
 	}
 }
 
-// processRequest handles a single request and returns the response
-func processRequest(requestBytes []byte) messages.Response {
+// processRequest handles a single request and returns the response.
+func processRequest(ctx context.Context, requestBytes []byte) messages.Response {
 	logging.Debug("recv: %s", string(requestBytes))
 
 	var req messages.Request
 	if err := json.Unmarshal(requestBytes, &req); err != nil {
 		return createErrorResponse(fmt.Errorf("json.Unmarshal failed: %w", err))
 	}
-
-	ctx := context.TODO()
 
 	switch {
 	case req.LoadKeySigner != nil:
@@ -106,22 +162,25 @@ func processRequest(requestBytes []byte) messages.Response {
 	}
 }
 
-// handleLoadKeySigner processes a load key signer request
 func handleLoadKeySigner(ctx context.Context, req messages.LoadKeySignerRequest) messages.Response {
-	var err error
-	caSigner, err = handlers.LoadKeySignerHandler(ctx, req, attestProvider)
+	signer, err := handlers.LoadKeySignerHandler(ctx, req, attestProvider)
 	if err != nil {
 		return createErrorResponse(err)
 	}
+	caSigner.Store(&signer)
 
 	return messages.Response{
 		LoadKeySigner: &messages.LoadKeySignerResponse{Success: true},
 	}
 }
 
-// handleSignSshKey processes an SSH key signing request
 func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) messages.Response {
-	signResponse, err := handlers.SignPublicKey(ctx, caSigner, req)
+	signer := caSigner.Load()
+	if signer == nil {
+		return createErrorResponse(errors.New("CA signer is not initialized; call LoadKeySigner first"))
+	}
+
+	signResponse, err := handlers.SignPublicKey(ctx, *signer, req)
 	if err != nil {
 		return createErrorResponse(err)
 	}
@@ -132,7 +191,6 @@ func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) m
 	}
 }
 
-// createErrorResponse creates a response with an error message
 func createErrorResponse(err error) messages.Response {
 	log.Printf("request failed: %s", err)
 	errMsg := err.Error()
@@ -141,14 +199,13 @@ func createErrorResponse(err error) messages.Response {
 	}
 }
 
-// sendResponse marshals and sends a response over the connection
 func sendResponse(conn net.Conn, response messages.Response) error {
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
 		return fmt.Errorf("failed to marshal response: %w", err)
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(connDeadline)); err != nil {
 		return fmt.Errorf("failed to set write deadline: %w", err)
 	}
 

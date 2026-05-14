@@ -232,9 +232,6 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 	}
 	defer mockServer.Stop()
 
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
-
 	// Create test public key
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -369,7 +366,6 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 		t.Fatalf("failed to start mock server: %v", err)
 	}
 	defer mockServer.Stop()
-	time.Sleep(100 * time.Millisecond)
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -455,7 +451,6 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 		t.Fatalf("failed to start mock server: %v", err)
 	}
 	defer mockServer.Stop()
-	time.Sleep(100 * time.Millisecond)
 
 	conn, err := net.Dial("tcp", "localhost:15002")
 	if err != nil {

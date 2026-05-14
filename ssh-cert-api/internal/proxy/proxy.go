@@ -71,11 +71,8 @@ func (p *Proxy) Stop() {
 func (p *Proxy) run(ctx context.Context) {
 	defer p.listener.Close()
 
-	// Goroutine to close the listener when the context is cancelled.
-	go func() {
-		<-ctx.Done()
-		p.listener.Close()
-	}()
+	// Close the listener when ctx is cancelled to unblock Accept.
+	context.AfterFunc(ctx, func() { _ = p.listener.Close() })
 
 	for {
 		conn, err := p.listener.Accept()
@@ -87,8 +84,7 @@ func (p *Proxy) run(ctx context.Context) {
 			default:
 				log.Printf("Proxy failed to accept vsock connection: %v", err)
 				// If the listener is closed for other reasons, we should exit.
-				var opErr *net.OpError
-				if errors.As(err, &opErr) {
+				if _, ok := errors.AsType[*net.OpError](err); ok {
 					return
 				}
 				continue
@@ -105,8 +101,10 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 
 	logging.Debug("Proxy accepted connection from %s", vsockConn.RemoteAddr().String())
 
-	// Dial the target TCP endpoint.
-	tcpConn, err := net.Dial("tcp", p.targetAddr)
+	// Dial the target TCP endpoint with the proxy's lifecycle context so
+	// shutdown cancels in-flight dials instead of waiting on TCP timeouts.
+	var dialer net.Dialer
+	tcpConn, err := dialer.DialContext(ctx, "tcp", p.targetAddr)
 	if err != nil {
 		log.Printf("Proxy failed to dial TCP endpoint %s: %v", p.targetAddr, err)
 		return
@@ -119,9 +117,13 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	p.wg.Go(func() {
 		defer tcpConn.Close()
 		defer vsockConn.Close()
-		io.Copy(tcpConn, vsockConn)
+		if _, err := io.Copy(tcpConn, vsockConn); err != nil && !errors.Is(err, net.ErrClosed) {
+			logging.Debug("proxy vsock→tcp copy ended: %v", err)
+		}
 	})
 
 	// Copy data from TCP to VSOCK.
-	io.Copy(vsockConn, tcpConn)
+	if _, err := io.Copy(vsockConn, tcpConn); err != nil && !errors.Is(err, net.ErrClosed) {
+		logging.Debug("proxy tcp→vsock copy ended: %v", err)
+	}
 }

@@ -80,6 +80,12 @@ func main() {
 		log.Fatalf("Failed to initialize enclave: %v", err)
 	}
 	logging.Debug("Enclave initialized successfully")
+
+	// The KMS proxy exists only so the enclave can decrypt the CA key on
+	// startup. Once LoadKeySigner returns, the plaintext key lives in the
+	// enclave's memory and KMS is never needed again — tearing the proxy
+	// down removes the host→AWS network path. If you add code that
+	// requires the enclave to call AWS at runtime, leave the proxy running.
 	vsockProxy.Stop()
 
 	// --- 4. Initialize Authorizer ---
