@@ -2,7 +2,7 @@ module cerberus
 
 go 1.26.0
 
-toolchain go1.26.2
+toolchain go1.26.3
 
 require golang.org/x/crypto v0.51.0
 

@@ -58,7 +58,10 @@ jobs:
         with:
           # Pinned so a surprise upstream rule release can't red a PR.
           # Dependabot's github-actions ecosystem bumps this PR-by-PR.
-          version: v2.6.0
+          # Must be built with Go >= our toolchain directive, otherwise
+          # the action errors with "Go language version ... lower than
+          # the targeted Go version".
+          version: v2.12.2
           working-directory: ${{ matrix.module }}
 
   vuln:
