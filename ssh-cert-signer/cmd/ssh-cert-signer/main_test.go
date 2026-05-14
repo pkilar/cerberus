@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -171,7 +170,7 @@ func TestSignPublicKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, err := handlers.SignPublicKey(context.Background(), signer, tt.request)
+			response, err := handlers.SignPublicKey(t.Context(), signer, tt.request)
 
 			if tt.expectError {
 				if err == nil {
@@ -383,7 +382,7 @@ func TestCertificateFields(t *testing.T) {
 		},
 	}
 
-	response, err := handlers.SignPublicKey(context.Background(), signer, req)
+	response, err := handlers.SignPublicKey(t.Context(), signer, req)
 	if err != nil {
 		t.Fatalf("signing failed: %v", err)
 	}
@@ -439,7 +438,7 @@ func BenchmarkSignPublicKey(b *testing.B) {
 	}
 
 	for b.Loop() {
-		_, err := handlers.SignPublicKey(context.Background(), signer, req)
+		_, err := handlers.SignPublicKey(b.Context(), signer, req)
 		if err != nil {
 			b.Fatalf("signing failed: %v", err)
 		}
@@ -486,7 +485,7 @@ func TestSignPublicKey_NilSigner(t *testing.T) {
 	}
 
 	// Test with nil signer
-	_, err := handlers.SignPublicKey(context.Background(), nil, req)
+	_, err := handlers.SignPublicKey(t.Context(), nil, req)
 	if err == nil {
 		t.Error("expected error with nil signer")
 	}

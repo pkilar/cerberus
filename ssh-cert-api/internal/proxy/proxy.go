@@ -52,8 +52,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 
 	logging.Debug("Proxy listening on vsock port %d, forwarding to %s", p.vsockPort, p.targetAddr)
 
-	p.wg.Add(1)
-	go p.run(proxyCtx)
+	p.wg.Go(func() { p.run(proxyCtx) })
 
 	return nil
 }
@@ -70,7 +69,6 @@ func (p *Proxy) Stop() {
 
 // run is the main loop that accepts and handles connections.
 func (p *Proxy) run(ctx context.Context) {
-	defer p.wg.Done()
 	defer p.listener.Close()
 
 	// Goroutine to close the listener when the context is cancelled.
@@ -97,14 +95,12 @@ func (p *Proxy) run(ctx context.Context) {
 			}
 		}
 
-		p.wg.Add(1)
-		go p.handleConnection(ctx, conn)
+		p.wg.Go(func() { p.handleConnection(ctx, conn) })
 	}
 }
 
 // handleConnection forwards data between the VSOCK client and the TCP target.
 func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
-	defer p.wg.Done()
 	defer vsockConn.Close()
 
 	logging.Debug("Proxy accepted connection from %s", vsockConn.RemoteAddr().String())

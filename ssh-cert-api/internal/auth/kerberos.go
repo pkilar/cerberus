@@ -168,12 +168,7 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 
 	log.Printf("Authenticated principal: %s", principal)
 
-	parts := strings.Split(principal, "@")
-	username := parts[0]
-	realm := ""
-	if len(parts) > 1 {
-		realm = parts[1]
-	}
+	username, realm, _ := strings.Cut(principal, "@")
 
 	return &AuthenticatedUser{
 		Username: username,
