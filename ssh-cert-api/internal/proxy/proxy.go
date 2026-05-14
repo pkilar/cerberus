@@ -117,9 +117,13 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	p.wg.Go(func() {
 		defer tcpConn.Close()
 		defer vsockConn.Close()
-		io.Copy(tcpConn, vsockConn)
+		if _, err := io.Copy(tcpConn, vsockConn); err != nil && !errors.Is(err, net.ErrClosed) {
+			logging.Debug("proxy vsock→tcp copy ended: %v", err)
+		}
 	})
 
 	// Copy data from TCP to VSOCK.
-	io.Copy(vsockConn, tcpConn)
+	if _, err := io.Copy(vsockConn, tcpConn); err != nil && !errors.Is(err, net.ErrClosed) {
+		logging.Debug("proxy tcp→vsock copy ended: %v", err)
+	}
 }
