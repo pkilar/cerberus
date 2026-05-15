@@ -16,6 +16,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"sort"
@@ -129,11 +130,14 @@ func runner(ctx context.Context, c commonFlags, label string, do func(ctx contex
 	s.run(results, c.progressTick)
 }
 
-// stats accumulates latency samples and error counts.
+// stats accumulates latency samples and error counts. Samples flow into a
+// bounded log-linear histogram so memory stays flat across arbitrarily long
+// stress runs — the unbounded-slice approach previously OOMed on multi-hour
+// or high-RPS jobs and lost the final report entirely.
 type stats struct {
 	label   string
 	started time.Time
-	samples []time.Duration
+	hist    *histogram
 	errors  map[string]int
 	success int64
 	total   int64
@@ -143,13 +147,14 @@ func newStats(label string) *stats {
 	return &stats{
 		label:   label,
 		started: time.Now(),
+		hist:    newHistogram(),
 		errors:  make(map[string]int),
 	}
 }
 
 func (s *stats) add(r result) {
 	s.total++
-	s.samples = append(s.samples, r.elapsed)
+	s.hist.record(r.elapsed)
 	if r.err != nil {
 		s.errors[r.err.Error()]++
 	} else {
@@ -196,16 +201,14 @@ func (s *stats) printFinal() {
 	fmt.Printf("Successful: %d (%.2f%%)\n", s.success, percent(s.success, s.total))
 	fmt.Printf("Errors:     %d (%.2f%%)\n", s.total-s.success, percent(s.total-s.success, s.total))
 
-	if len(s.samples) > 0 {
-		sorted := append([]time.Duration(nil), s.samples...)
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	if s.hist.count > 0 {
 		fmt.Println("Latency:")
-		fmt.Printf("  min:  %s\n", sorted[0])
-		fmt.Printf("  p50:  %s\n", percentile(sorted, 50))
-		fmt.Printf("  p95:  %s\n", percentile(sorted, 95))
-		fmt.Printf("  p99:  %s\n", percentile(sorted, 99))
-		fmt.Printf("  p999: %s\n", percentile(sorted, 99.9))
-		fmt.Printf("  max:  %s\n", sorted[len(sorted)-1])
+		fmt.Printf("  min:  %s\n", s.hist.min)
+		fmt.Printf("  p50:  %s\n", s.hist.percentile(50))
+		fmt.Printf("  p95:  %s\n", s.hist.percentile(95))
+		fmt.Printf("  p99:  %s\n", s.hist.percentile(99))
+		fmt.Printf("  p999: %s\n", s.hist.percentile(99.9))
+		fmt.Printf("  max:  %s\n", s.hist.max)
 	}
 
 	if len(s.errors) > 0 {
@@ -229,16 +232,70 @@ func (s *stats) printFinal() {
 	}
 }
 
-func percentile(sorted []time.Duration, p float64) time.Duration {
-	if len(sorted) == 0 {
+// histogram is a bounded log-linear latency histogram with 9 buckets per
+// decade from 100ns up — ~11% resolution at decade boundaries, finer within.
+// Total memory is fixed (~1.5 KB) so a multi-hour stress run cannot OOM on
+// the latency buffer. min/max are tracked exactly; percentiles read out of
+// the buckets and are clamped at the observed max so sparse runs don't
+// report inflated tails.
+type histogram struct {
+	bounds  []time.Duration
+	buckets []uint64
+	count   uint64
+	min     time.Duration
+	max     time.Duration
+}
+
+func newHistogram() *histogram {
+	var bounds []time.Duration
+	for decade := time.Duration(100); decade <= time.Duration(1e11); decade *= 10 {
+		for m := time.Duration(1); m <= 9; m++ {
+			bounds = append(bounds, decade*m)
+		}
+	}
+	bounds = append(bounds, time.Duration(math.MaxInt64))
+	return &histogram{
+		bounds:  bounds,
+		buckets: make([]uint64, len(bounds)),
+		min:     time.Duration(math.MaxInt64),
+	}
+}
+
+func (h *histogram) record(d time.Duration) {
+	h.count++
+	if d < h.min {
+		h.min = d
+	}
+	if d > h.max {
+		h.max = d
+	}
+	for i, b := range h.bounds {
+		if d <= b {
+			h.buckets[i]++
+			return
+		}
+	}
+}
+
+func (h *histogram) percentile(p float64) time.Duration {
+	if h.count == 0 {
 		return 0
 	}
-	rank := p / 100.0 * float64(len(sorted)-1)
-	idx := int(rank)
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
+	target := uint64(p / 100 * float64(h.count))
+	if target == 0 {
+		target = 1
 	}
-	return sorted[idx]
+	var cum uint64
+	for i, c := range h.buckets {
+		cum += c
+		if cum >= target {
+			if h.bounds[i] > h.max {
+				return h.max
+			}
+			return h.bounds[i]
+		}
+	}
+	return h.max
 }
 
 func percent(num, denom int64) float64 {

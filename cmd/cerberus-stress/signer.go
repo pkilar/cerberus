@@ -97,10 +97,8 @@ func buildSignerDialer(transport, target string) (dialFunc, error) {
 		if err != nil {
 			return nil, err
 		}
-		// vsock.Dial does not accept a context; the per-request deadline
-		// (set after dial) bounds the overall operation.
-		return func(_ context.Context) (net.Conn, error) {
-			return vsock.Dial(cid, port, nil)
+		return func(ctx context.Context) (net.Conn, error) {
+			return vsockDialContext(ctx, cid, port)
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown transport %q (want tcp or vsock)", transport)
@@ -123,17 +121,53 @@ func parseVsock(target string) (uint32, uint32, error) {
 	return uint32(cid), uint32(port), nil
 }
 
+// vsockDialContext races vsock.Dial against ctx. The library's Dial takes no
+// context, so we run it in a goroutine and select on ctx.Done(). If ctx wins,
+// a drainer goroutine closes any connection the dial subsequently produces
+// (the kernel finishes the connect attempt on its own); without it we'd leak
+// an FD per timed-out worker, which compounds quickly under stress.
+func vsockDialContext(ctx context.Context, cid, port uint32) (net.Conn, error) {
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		c, err := vsock.Dial(cid, port, nil)
+		ch <- res{c, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.c, r.err
+	case <-ctx.Done():
+		go func() {
+			r := <-ch
+			if r.c != nil {
+				_ = r.c.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
 // signOnce performs one full request/response round-trip on a fresh
 // connection, matching the wire protocol used by ssh-cert-api/internal/enclave.
+// The whole operation is bounded by a context derived from timeout so a stuck
+// dial cannot wedge a worker past the user-advertised -timeout.
 func signOnce(ctx context.Context, dial dialFunc, req messages.Request, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	conn, err := dial(ctx)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("set deadline: %w", err)
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set deadline: %w", err)
+		}
 	}
 
 	body, err := json.Marshal(req)
