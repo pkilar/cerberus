@@ -178,6 +178,12 @@ func doSpnegoRequest(ctx context.Context, cli *spnego.Client, url string, body [
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
+	// Decoder may stop at the end of the JSON object and leave trailing bytes
+	// (typically a newline). Without this drain the conn can't return to the
+	// keepalive pool, silently negating the Transport's connection sizing and
+	// charging a TLS handshake per request — exactly the kind of perturbation
+	// a stress tool must not introduce into its own measurements.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if sr.Error != "" {
 		return fmt.Errorf("server error: %s", sr.Error)
 	}

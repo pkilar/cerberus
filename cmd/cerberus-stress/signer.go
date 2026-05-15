@@ -121,19 +121,27 @@ func parseVsock(target string) (uint32, uint32, error) {
 	return uint32(cid), uint32(port), nil
 }
 
-// vsockDialContext races vsock.Dial against ctx. The library's Dial takes no
-// context, so we run it in a goroutine and select on ctx.Done(). If ctx wins,
-// a drainer goroutine closes any connection the dial subsequently produces
-// (the kernel finishes the connect attempt on its own); without it we'd leak
-// an FD per timed-out worker, which compounds quickly under stress.
+// vsockDialContext is a context-aware adapter over vsock.Dial. The library's
+// Dial takes no context; dialRaceCtx supplies the race-and-drain pattern so
+// the racing logic is testable in isolation from the unmockable vsock syscall.
 func vsockDialContext(ctx context.Context, cid, port uint32) (net.Conn, error) {
+	return dialRaceCtx(ctx, func() (net.Conn, error) {
+		return vsock.Dial(cid, port, nil)
+	})
+}
+
+// dialRaceCtx races a context-unaware dial against ctx. If ctx wins, a
+// drainer goroutine waits for the dial to finish and closes any connection
+// it produced — without that, every timed-out worker would leak the FD the
+// kernel eventually hands back when its own connect attempt completes.
+func dialRaceCtx(ctx context.Context, dial func() (net.Conn, error)) (net.Conn, error) {
 	type res struct {
 		c   net.Conn
 		err error
 	}
 	ch := make(chan res, 1)
 	go func() {
-		c, err := vsock.Dial(cid, port, nil)
+		c, err := dial()
 		ch <- res{c, err}
 	}()
 	select {
