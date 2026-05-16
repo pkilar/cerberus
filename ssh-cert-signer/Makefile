@@ -7,7 +7,13 @@ GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 
 # Nitro Enclave CLI tool
-# This Makefile assumes 'nitro-cli' is installed and in the system's PATH.
+# This Makefile assumes 'nitro-cli' and 'python3' are installed and in the
+# system's PATH. python3 parses the build-enclave JSON output to emit the
+# PCR manifest used to pin the KMS attestation policy.
+#
+# The eif-* targets also require 'ca_key.enc' to be present in this directory
+# (the docker build context) before invocation, since the Dockerfile COPYs it
+# into the image. Use `make encrypt-ca-key KMS_KEY_ARN=...` to create it.
 NITRO_CLI=nitro-cli
 
 # Output names for the binary and the final Enclave Image File
@@ -40,7 +46,7 @@ eif-amd64: build
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:amd64 --output-file $(EIF_NAME_AMD64) | tee /dev/stderr | \
 		python3 -c "import sys,json; d=json.load(sys.stdin); m=d.get('Measurements',{}); \
 		json.dump({'Architecture':'amd64','EIF':'$(EIF_NAME_AMD64)','PCR0':m.get('PCR0',''),'PCR1':m.get('PCR1',''),'PCR2':m.get('PCR2','')}, \
-		open('pcr-manifest-amd64.json','w'),indent=2)" || true
+		open('pcr-manifest-amd64.json','w'),indent=2)"
 	@echo "Successfully created $(EIF_NAME_AMD64)."
 	@if [ -f pcr-manifest-amd64.json ]; then echo "PCR manifest: pcr-manifest-amd64.json"; cat pcr-manifest-amd64.json; fi
 
@@ -50,7 +56,7 @@ eif-arm64: build
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:arm64 --output-file $(EIF_NAME_ARM64) | tee /dev/stderr | \
 		python3 -c "import sys,json; d=json.load(sys.stdin); m=d.get('Measurements',{}); \
 		json.dump({'Architecture':'arm64','EIF':'$(EIF_NAME_ARM64)','PCR0':m.get('PCR0',''),'PCR1':m.get('PCR1',''),'PCR2':m.get('PCR2','')}, \
-		open('pcr-manifest-arm64.json','w'),indent=2)" || true
+		open('pcr-manifest-arm64.json','w'),indent=2)"
 	@echo "Successfully created $(EIF_NAME_ARM64)."
 	@if [ -f pcr-manifest-arm64.json ]; then echo "PCR manifest: pcr-manifest-arm64.json"; cat pcr-manifest-arm64.json; fi
 

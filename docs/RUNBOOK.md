@@ -95,11 +95,24 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 
 ### Software Dependencies
 
-- Go 1.26+ (for building from source)
-- Docker (for building EIF images)
-- `nitro-cli` (for enclave management)
-- `aws` CLI (for credential verification)
-- `golangci-lint`, `gosec`, `govulncheck` (for development/testing)
+**Build host** (compiling binaries and producing EIF files):
+
+- Go 1.26+
+- Docker, including the `buildx` plugin (`docker buildx version` to verify)
+- Python 3 (the EIF build pipes `nitro-cli build-enclave` JSON output through `python3` to write the PCR manifest)
+- `nitro-cli` (the AWS Nitro Enclaves CLI)
+- For cross-architecture EIF builds, QEMU `binfmt_misc` (`docker run --privileged --rm tonistiigi/binfmt --install all`)
+- `aws` CLI (for credential verification and `kms encrypt` of the CA key)
+
+**Runtime host** (where the enclave runs):
+
+- `nitro-cli` (provided by `aws-nitro-enclaves-cli`)
+- `nitro-enclaves-allocator.service` running
+- Docker is **only** required on the runtime host if you intend to rebuild the EIF in place using the shipped `/usr/share/cerberus/Dockerfile` (see [Updating the EIF](#updating-the-eif-enclave-image)). The `cerberus-signer` RPM does **not** pull docker in as a dependency, so install it separately if needed.
+
+**Development / CI:**
+
+- `golangci-lint`, `gosec`, `govulncheck`
 
 ---
 
@@ -117,11 +130,13 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 
 ### ssh-cert-signer Environment Variables
 
-| Variable           | Default           | Description                          |
-| ------------------ | ----------------- | ------------------------------------ |
-| `CA_KEY_FILE_PATH` | `/app/ca_key.enc` | Path to KMS-encrypted CA private key |
-| `AWS_REGION`       | `us-east-1`       | AWS region for KMS operations        |
-| `DEBUG`            | `false`           | Enable debug-level logging           |
+| Variable              | Default                       | Description                                                                                                                                                                                                                              |
+| --------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key                                                                                                                                                                                                     |
+| `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations                                                                                                                                                                                                            |
+| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production.                     |
+| `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                                              |
+| `DEBUG`               | `false`                       | Enable debug-level logging                                                                                                                                                                                                               |
 
 ### Authorization Config (config.yaml)
 
@@ -196,6 +211,16 @@ make -C ssh-cert-signer build
 
 ### Build Enclave Image Files (EIF)
 
+**Prerequisite — the encrypted CA key must already exist at `ssh-cert-signer/ca_key.enc`.** The `Dockerfile` `COPY`s this file into the image, so the encrypted key is baked into the EIF. Without it, `docker buildx build` will fail with a `COPY` error. To create it:
+
+```bash
+make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key-id>
+# or, if you already have ca_key.enc somewhere else:
+cp /path/to/ca_key.enc ssh-cert-signer/
+```
+
+Then build:
+
 ```bash
 # Both architectures
 make eif
@@ -211,7 +236,7 @@ make eif-arm64
 - `ssh-cert-signer/pcr-manifest-amd64.json` — Contains PCR0, PCR1, PCR2 values
 - `ssh-cert-signer/pcr-manifest-arm64.json`
 
-> **Important**: After building a new EIF, update the KMS key policy with the new PCR values from the manifest if using attestation-based conditions.
+> **Important**: Because `ca_key.enc` is baked into the EIF, any CA key rotation (or any code/binary change) produces a new PCR0. After building a new EIF, update the KMS key policy with the new PCR values from the manifest **before** deploying the new EIF if using attestation-based conditions — see [Updating the EIF](#updating-the-eif-enclave-image).
 
 ### Clean Build Artifacts
 
@@ -527,6 +552,8 @@ Signing failed: <error details>
 
 ### Rotating the CA Key
 
+Because `ca_key.enc` is baked into the EIF at Docker build time (the signer Dockerfile `COPY`s it into the image), CA-key rotation **always requires rebuilding the EIF**. This in turn changes PCR0, so attestation-based KMS policies must be updated before the new enclave can decrypt.
+
 1. Generate a new SSH CA key pair:
    ```bash
    ssh-keygen -t rsa -b 4096 -f ca_key -N ""
@@ -542,9 +569,15 @@ Signing failed: <error details>
    ```bash
    shred -u ca_key
    ```
-4. Deploy `ca_key.enc` to the enclave image or mount point.
-5. Distribute the new `ca_key.pub` to all SSH servers that trust the CA.
-6. Restart the enclave (the signer loads the key at startup).
+4. Place the encrypted key into the build context and rebuild the EIF:
+   ```bash
+   cp ca_key.enc ssh-cert-signer/
+   make eif-amd64       # or eif-arm64
+   ```
+5. Update the KMS key policy with the new PCR0 from `ssh-cert-signer/pcr-manifest-<arch>.json` if you are using attestation-based conditions. Apply this **before** deploying the new EIF, or the new enclave will fail KMS Decrypt.
+6. Copy the new EIF to the host (e.g. `/usr/share/cerberus/` for RPM installs, `/opt/cerberus/` for manual installs).
+7. Distribute the new `ca_key.pub` to all SSH servers that trust the CA.
+8. Restart the enclave (`sudo systemctl restart cerberus-signer` for RPM installs, or follow [Restarting the Enclave](#restarting-the-enclave)). The signer loads the key at startup.
 
 ### Rotating the TLS Certificate
 
@@ -590,14 +623,17 @@ After restarting the enclave, the API service will automatically send a `LoadKey
 
 ### Updating the EIF (Enclave Image)
 
-1. Build a new EIF:
+EIF builds can be done on any build host that has Go, Docker (with `buildx`), `nitro-cli`, and Python 3 installed — see [Software Dependencies](#software-dependencies). If you are rebuilding the EIF directly on the runtime EC2 instance using the shipped `/usr/share/cerberus/Dockerfile`, install Docker first (the `cerberus-signer` RPM does not require it): `sudo dnf install docker docker-buildx-plugin && sudo systemctl enable --now docker`.
+
+1. Ensure `ssh-cert-signer/ca_key.enc` exists in the build context (see [Build Enclave Image Files (EIF)](#build-enclave-image-files-eif) for how to produce it).
+2. Build a new EIF:
    ```bash
    make eif-amd64
    ```
-2. Note the new PCR values from `ssh-cert-signer/pcr-manifest-amd64.json`.
-3. If using attestation-based KMS policy, update the KMS key policy with the new PCR values **before** deploying the new EIF.
-4. Copy the new EIF to the instance.
-5. Terminate and relaunch the enclave.
+3. Note the new PCR values from `ssh-cert-signer/pcr-manifest-amd64.json`.
+4. If using attestation-based KMS policy, update the KMS key policy with the new PCR values **before** deploying the new EIF.
+5. Copy the new EIF to the instance.
+6. Terminate and relaunch the enclave (`sudo systemctl restart cerberus-signer` on RPM installs, or follow [Restarting the Enclave](#restarting-the-enclave)).
 
 ---
 
