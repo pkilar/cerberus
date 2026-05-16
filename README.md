@@ -103,11 +103,19 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 
 ## **Prerequisites**
 
+**Build host (for compiling binaries and producing the EIF):**
+
 - Go 1.26+
-- Docker
+- Docker, including the `buildx` plugin (used for multi-platform builds)
+- Python 3 (the EIF Makefile parses the `nitro-cli build-enclave` JSON output to emit the PCR manifest)
+- [AWS Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli.html) (`nitro-cli`)
 - AWS CLI
-- [AWS Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli.html)
+- For cross-architecture EIF builds (e.g. building `eif-arm64` on an x86 host), QEMU `binfmt_misc` must be registered. On most distros: `docker run --privileged --rm tonistiigi/binfmt --install all`.
+
+**Runtime host (where the enclave actually runs):**
+
 - An EC2 instance with Nitro Enclaves enabled (Amazon Linux 2, Amazon Linux 2023, RHEL, or Fedora)
+- `aws-nitro-enclaves-cli` and the `nitro-enclaves-allocator` service
 - A Kerberos Key Distribution Center (KDC) and a keytab file for the API service
 
 ## **Installation**
@@ -202,6 +210,10 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
    make -C ssh-cert-signer build
    make -C ssh-cert-signer eif
    ```
+
+   > **Prerequisite for `eif`/`eif-amd64`/`eif-arm64`**: `ssh-cert-signer/ca_key.enc` must exist before invoking these targets — the `Dockerfile` `COPY`s it into the image, so the encrypted CA key is baked into the EIF. If you skipped Step 1, run `make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=arn:aws:kms:…` first, or `cp ca_key.enc ssh-cert-signer/`.
+   >
+   > Each EIF build also produces `ssh-cert-signer/pcr-manifest-<arch>.json`. If you use attestation-based KMS policies (see [docs/kms-attestation-policy.md](docs/kms-attestation-policy.md)), update the policy's PCR0 value from this manifest **before** deploying the new EIF.
 
 #### **Step 4: Deploy and Run**
 

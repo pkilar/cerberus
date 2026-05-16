@@ -58,6 +58,23 @@ stop() {
 
     echo "Terminating enclave ${enclave_id}..."
     nitro-cli terminate-enclave --enclave-id "${enclave_id}"
+
+    # terminate-enclave returns as soon as the request is accepted; allocator
+    # teardown (freeing the CID and memory) is asynchronous. Without this
+    # poll, a `systemctl restart` (stop immediately followed by start) can
+    # race the previous teardown and fail with "CID already in use" or
+    # "Insufficient resources".
+    local waited=0
+    local timeout="${ENCLAVE_STOP_TIMEOUT_SECONDS:-30}"
+    while [ -n "$(get_enclave_id)" ]; do
+        if [ "${waited}" -ge "${timeout}" ]; then
+            echo "WARNING: enclave ${enclave_id} still present after ${timeout}s" >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
     echo "Enclave terminated."
 }
 
