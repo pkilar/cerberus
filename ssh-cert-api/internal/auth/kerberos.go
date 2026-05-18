@@ -143,4 +143,3 @@ func checkKeytabPermissions(keytabPath string) error {
 	}
 	return nil
 }
-

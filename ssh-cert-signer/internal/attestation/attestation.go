@@ -260,7 +260,11 @@ func removePKCS7Padding(data []byte) ([]byte, error) {
 		return nil, errors.New("invalid PKCS#7 padding")
 	}
 
-	padLen := int(data[len(data)-1])
+	// padLen is the raw trailing byte; keep it as a byte so the AES-block-size
+	// bound check covers conversions implicitly. The int alias is used only
+	// for subtle.ConstantTimeLessOrEq (which operates on ints).
+	want := data[len(data)-1]
+	padLen := int(want)
 	lenOK := subtle.ConstantTimeLessOrEq(1, padLen) &
 		subtle.ConstantTimeLessOrEq(padLen, aes.BlockSize) &
 		subtle.ConstantTimeLessOrEq(padLen, len(data))
@@ -270,13 +274,14 @@ func removePKCS7Padding(data []byte) ([]byte, error) {
 	// padding-length byte. inWindow is 1 for indices that should hold the
 	// padding byte and 0 otherwise; the byte mask 0x00/0xFF zeros out
 	// non-window contributions.
-	want := byte(padLen)
 	diff := byte(0)
 	scan := min(aes.BlockSize, len(data))
 	for i := 1; i <= scan; i++ {
 		idx := len(data) - i
-		inWindow := subtle.ConstantTimeLessOrEq(i, padLen) // 1 inside, 0 outside
-		mask := byte(0) - byte(inWindow)                   // 0xFF inside, 0x00 outside
+		// ConstantTimeLessOrEq is documented to return 0 or 1, so masking
+		// to a single bit makes the int→byte truncation provably safe.
+		inWindow := byte(subtle.ConstantTimeLessOrEq(i, padLen) & 1)
+		mask := byte(0) - inWindow // 0xFF inside, 0x00 outside
 		diff |= mask & (data[idx] ^ want)
 	}
 
