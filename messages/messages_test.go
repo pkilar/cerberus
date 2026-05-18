@@ -2,6 +2,7 @@ package messages
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -175,6 +176,48 @@ func TestResponse_WithError(t *testing.T) {
 	}
 	if *decoded.Error != errorMsg {
 		t.Errorf("expected Error %s, got %s", errorMsg, *decoded.Error)
+	}
+}
+
+func TestCredentials_Redacted(t *testing.T) {
+	creds := Credentials{
+		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
+		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		Token:           "FwoGZXIvYXdzEKL//////////wEa",
+	}
+
+	red := creds.Redacted()
+	if red.AccessKeyId != creds.AccessKeyId {
+		t.Errorf("AccessKeyId should be preserved, got %q", red.AccessKeyId)
+	}
+	if red.SecretAccessKey != "***" {
+		t.Errorf("SecretAccessKey not fully redacted: %q", red.SecretAccessKey)
+	}
+	if red.Token != "***" {
+		t.Errorf("Token not fully redacted: %q", red.Token)
+	}
+
+	// Empty secrets stay empty so callers can tell unset apart from set-but-redacted.
+	empty := Credentials{AccessKeyId: "AKIAEXAMPLE"}.Redacted()
+	if empty.SecretAccessKey != "" || empty.Token != "" {
+		t.Errorf("empty secrets should not be redacted: %+v", empty)
+	}
+}
+
+func TestCredentials_String_NoSecretLeak(t *testing.T) {
+	secret := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	token := "FwoGZXIvYXdzEKL//////////wEa"
+	creds := Credentials{
+		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
+		SecretAccessKey: secret,
+		Token:           token,
+	}
+
+	s := creds.String()
+	for _, frag := range []string{secret, secret[:4], token, token[:4]} {
+		if strings.Contains(s, frag) {
+			t.Errorf("String() leaked secret material %q in %q", frag, s)
+		}
 	}
 }
 

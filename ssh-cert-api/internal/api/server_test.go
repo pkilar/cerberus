@@ -91,11 +91,12 @@ func TestHandleSignRequest(t *testing.T) {
 			wantBodyPart: `"signed_key":`,
 		},
 		{
-			name:         "method_not_allowed",
-			method:       http.MethodGet,
-			body:         "",
-			wantStatus:   http.StatusMethodNotAllowed,
-			wantBodyPart: "Method not allowed",
+			name:       "method_not_allowed",
+			method:     http.MethodGet,
+			body:       "",
+			wantStatus: http.StatusMethodNotAllowed,
+			// Default ServeMux 405 body is "Method Not Allowed\n".
+			wantBodyPart: "Method Not Allowed",
 		},
 		{
 			name:         "invalid_json",

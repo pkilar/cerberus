@@ -14,7 +14,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +26,10 @@ import (
 type MockVSockServer struct {
 	listener net.Listener
 	signer   ssh.Signer
-	port     uint32
-	running  atomic.Bool
+	addr     string
 }
 
-func NewMockVSockServer(port uint32) (*MockVSockServer, error) {
+func NewMockVSockServer() (*MockVSockServer, error) {
 	// Create a test SSH signer
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -43,29 +41,29 @@ func NewMockVSockServer(port uint32) (*MockVSockServer, error) {
 		return nil, fmt.Errorf("failed to create signer: %w", err)
 	}
 
-	return &MockVSockServer{
-		signer: signer,
-		port:   port,
-	}, nil
+	return &MockVSockServer{signer: signer}, nil
 }
 
 func (s *MockVSockServer) Start() error {
-	// Note: This would normally use vsock.ListenContextID, but for testing we'll use TCP
-	// In a real integration test environment, this would need VSOCK support
-	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", s.port))
+	// Real builds use vsock.Listen; the mock uses TCP on an ephemeral port to
+	// avoid clashing with anything else on the host or in CI.
+	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
 	s.listener = listener
-	s.running.Store(true)
+	s.addr = listener.Addr().String()
 
 	go s.acceptConnections()
 	return nil
 }
 
+// Addr returns the loopback address the mock is listening on, including the
+// dynamically-assigned port. Only valid after Start.
+func (s *MockVSockServer) Addr() string { return s.addr }
+
 func (s *MockVSockServer) Stop() error {
-	s.running.Store(false)
 	if s.listener != nil {
 		return s.listener.Close()
 	}
@@ -73,13 +71,12 @@ func (s *MockVSockServer) Stop() error {
 }
 
 func (s *MockVSockServer) acceptConnections() {
-	for s.running.Load() {
+	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if s.running.Load() {
-				fmt.Printf("Accept error: %v\n", err)
-			}
-			continue
+			// Closed listener (clean Stop) or any other failure ends the loop;
+			// retrying on a half-broken listener just spins.
+			return
 		}
 		go s.handleConnection(conn)
 	}
@@ -222,7 +219,7 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 	}
 
 	// Start mock enclave server
-	mockServer, err := NewMockVSockServer(15000)
+	mockServer, err := NewMockVSockServer()
 	if err != nil {
 		t.Fatalf("failed to create mock server: %v", err)
 	}
@@ -269,7 +266,7 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 	}
 
 	// Connect to mock server and send request
-	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", 15000))
+	conn, err := net.Dial("tcp", mockServer.Addr())
 	if err != nil {
 		t.Fatalf("failed to connect to mock server: %v", err)
 	}
@@ -358,7 +355,7 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	mockServer, err := NewMockVSockServer(15001)
+	mockServer, err := NewMockVSockServer()
 	if err != nil {
 		t.Fatalf("failed to create mock server: %v", err)
 	}
@@ -366,6 +363,7 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 		t.Fatalf("failed to start mock server: %v", err)
 	}
 	defer mockServer.Stop()
+	addr := mockServer.Addr()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -385,7 +383,7 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			conn, err := net.Dial("tcp", "localhost:15001")
+			conn, err := net.Dial("tcp", addr)
 			if err != nil {
 				errs <- fmt.Errorf("goroutine %d: dial: %w", idx, err)
 				return
@@ -443,7 +441,7 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	mockServer, err := NewMockVSockServer(15002)
+	mockServer, err := NewMockVSockServer()
 	if err != nil {
 		t.Fatalf("failed to create mock server: %v", err)
 	}
@@ -452,7 +450,7 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 	}
 	defer mockServer.Stop()
 
-	conn, err := net.Dial("tcp", "localhost:15002")
+	conn, err := net.Dial("tcp", mockServer.Addr())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

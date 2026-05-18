@@ -9,7 +9,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"cerberus/constants"
@@ -32,7 +32,7 @@ type Client struct {
 
 func NewClient() (*Client, error) {
 	return &Client{
-		vsockPort: constants.ENCLAVE_LISTENING_PORT,
+		vsockPort: constants.EnclaveListeningPort,
 	}, nil
 }
 
@@ -41,10 +41,12 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// CommunicateWithEnclave sends a JSON request to the enclave and returns the response
-func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error {
+// CommunicateWithEnclave sends a JSON request to the enclave and decodes the
+// response into response. The typed parameters guarantee redactRequest sees
+// the shape it knows how to redact.
+func CommunicateWithEnclave(enclaveCID uint32, request messages.Request, response *messages.Response) error {
 	// Create VSOCK connection to enclave
-	conn, err := vsock.Dial(enclaveCID, constants.ENCLAVE_LISTENING_PORT, nil)
+	conn, err := vsock.Dial(enclaveCID, constants.EnclaveListeningPort, nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to enclave: %w", err)
 	}
@@ -84,17 +86,15 @@ func CommunicateWithEnclave(enclaveCID uint32, request any, response any) error 
 	return nil
 }
 
-// redactRequest returns a JSON string safe for logging, with credentials truncated.
-func redactRequest(request any) string {
-	r, ok := request.(messages.Request)
-	if ok && r.LoadKeySigner != nil {
+// redactRequest returns a JSON string safe for logging, with credentials replaced.
+func redactRequest(r messages.Request) string {
+	if r.LoadKeySigner != nil {
 		r.LoadKeySigner = &messages.LoadKeySignerRequest{
 			EncryptedKey: r.LoadKeySigner.EncryptedKey,
 			Credentials:  r.LoadKeySigner.Credentials.Redacted(),
 		}
-		request = r
 	}
-	b, err := json.Marshal(request)
+	b, err := json.Marshal(r)
 	if err != nil {
 		return fmt.Sprintf("<marshal error: %v>", err)
 	}
@@ -107,7 +107,7 @@ func (c *Client) SignPublicKey(req *messages.EnclaveSigningRequest) (string, err
 	}
 
 	var response messages.Response
-	err := CommunicateWithEnclave(constants.ENCLAVE_CID, request, &response)
+	err := CommunicateWithEnclave(constants.EnclaveCID, request, &response)
 	if err != nil {
 		return "", err
 	}
@@ -119,7 +119,7 @@ func (c *Client) SignPublicKey(req *messages.EnclaveSigningRequest) (string, err
 
 	// Extract signed key from response
 	if response.SignSshKey != nil && response.SignSshKey.SignedKey != "" {
-		log.Printf("Successfully signed SSH key ID: %s", req.KeyID)
+		slog.Info("sign.signed", "key_id", req.KeyID)
 		return response.SignSshKey.SignedKey, nil
 	}
 

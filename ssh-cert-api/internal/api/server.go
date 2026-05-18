@@ -7,11 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"cerberus/messages"
@@ -86,9 +86,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) setupRoutes() {
-	s.router.Handle("/sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
-	s.router.HandleFunc("/health", s.handleHealth)
-	s.router.Handle("/metrics", promhttp.Handler())
+	// 1.22+ method-prefixed patterns: a non-POST to /sign returns 405 from the
+	// mux automatically, so the handler does not need to re-check r.Method.
+	s.router.Handle("POST /sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
+	s.router.HandleFunc("GET /health", s.handleHealth)
+	s.router.Handle("GET /metrics", promhttp.Handler())
 }
 
 func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
@@ -98,14 +100,6 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		signDurationSeconds.Observe(time.Since(start).Seconds())
 		signRequestsTotal.WithLabelValues(outcome).Inc()
 	}()
-
-	if r.Method != http.MethodPost {
-		outcome = outcomeInvalidMethod
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Method not allowed"})
-		return
-	}
 
 	user, ok := r.Context().Value(userContextKey).(*auth.AuthenticatedUser)
 	if !ok {
@@ -169,7 +163,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	customAttributes := make(map[string]string)
 	maps.Copy(customAttributes, result.CertificateRules.StaticAttributes)
 	// Add audit trail attributes
-	customAttributes["issued_at"] = fmt.Sprintf("%d", time.Now().Unix())
+	customAttributes["issued_at"] = strconv.FormatInt(time.Now().Unix(), 10)
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,

@@ -8,7 +8,7 @@ package auth
 import (
 	"encoding/base64"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -89,86 +89,40 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 	logging.Debug("SPNEGO token length: %d bytes", len(spnegoToken))
 	logging.Debug("SPNEGO token (first 32 bytes): %x", spnegoToken[:min(32, len(spnegoToken))])
 
-	// Try alternative SPNEGO parsing approach
-	// Some clients send malformed tokens, so we'll try to be more lenient
-	var principal string
-
-	// First, try the standard approach
 	isInit, negToken, err := spnego.UnmarshalNegToken(spnegoToken)
 	if err != nil {
-		logging.Debug("Standard SPNEGO unmarshaling failed: %v", err)
-
-		// Try to extract Kerberos AP-REQ directly from the token
-		// Skip SPNEGO wrapper and look for Kerberos AP-REQ pattern
-		if len(spnegoToken) > 20 {
-			// Look for AP-REQ tag (0x6e) in the token
-			for i := 0; i < len(spnegoToken)-4; i++ {
-				if spnegoToken[i] == 0x6e {
-					apReqStart := i
-					logging.Debug("Found potential AP-REQ at offset %d", apReqStart)
-
-					// Try to parse as AP-REQ directly
-					var apReq messages.APReq
-					err = apReq.Unmarshal(spnegoToken[apReqStart:])
-					if err == nil {
-						logging.Debug("Successfully parsed AP-REQ directly")
-						// Verify the AP-REQ using the service settings
-						valid, creds, err := service.VerifyAPREQ(&apReq, k.settings)
-						if err == nil && valid {
-							principal = creds.CName().PrincipalNameString()
-							if creds.Realm() != "" {
-								principal = fmt.Sprintf("%s@%s", principal, creds.Realm())
-							}
-							break
-						} else {
-							logging.Debug("AP-REQ verification failed: %v", err)
-						}
-					}
-				}
-			}
-		}
-
-		if principal == "" {
-			return nil, fmt.Errorf("failed to parse SPNEGO token and extract AP-REQ: %w", err)
-		}
-	} else {
-		// Standard SPNEGO processing worked
-		if !isInit {
-			return nil, fmt.Errorf("expected NegTokenInit, got NegTokenResp")
-		}
-
-		negInit, ok := negToken.(spnego.NegTokenInit)
-		if !ok {
-			return nil, fmt.Errorf("failed to cast to NegTokenInit")
-		}
-
-		if len(negInit.MechTokenBytes) == 0 {
-			return nil, fmt.Errorf("no mechanism token in SPNEGO")
-		}
-
-		// Parse the AP-REQ from the mechanism token
-		var apReq messages.APReq
-		err = apReq.Unmarshal(negInit.MechTokenBytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal AP-REQ: %w", err)
-		}
-
-		// Verify the AP-REQ using the service settings
-		valid, creds, err := service.VerifyAPREQ(&apReq, k.settings)
-		if err != nil || !valid {
-			return nil, fmt.Errorf("AP-REQ verification failed: %w", err)
-		}
-
-		// Extract the client principal from the credentials
-		principal = creds.CName().PrincipalNameString()
-		if creds.Realm() != "" {
-			principal = fmt.Sprintf("%s@%s", principal, creds.Realm())
-		}
+		return nil, fmt.Errorf("failed to parse SPNEGO token: %w", err)
+	}
+	if !isInit {
+		return nil, fmt.Errorf("expected NegTokenInit, got NegTokenResp")
 	}
 
-	log.Printf("Authenticated principal: %s", principal)
+	negInit, ok := negToken.(spnego.NegTokenInit)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast to NegTokenInit")
+	}
+
+	if len(negInit.MechTokenBytes) == 0 {
+		return nil, fmt.Errorf("no mechanism token in SPNEGO")
+	}
+
+	var apReq messages.APReq
+	if err := apReq.Unmarshal(negInit.MechTokenBytes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal AP-REQ: %w", err)
+	}
+
+	valid, creds, err := service.VerifyAPREQ(&apReq, k.settings)
+	if err != nil || !valid {
+		return nil, fmt.Errorf("AP-REQ verification failed: %w", err)
+	}
+
+	principal := creds.CName().PrincipalNameString()
+	if creds.Realm() != "" {
+		principal = fmt.Sprintf("%s@%s", principal, creds.Realm())
+	}
 
 	username, realm, _ := strings.Cut(principal, "@")
+	slog.Info("auth.success", "principal", principal)
 
 	return &AuthenticatedUser{
 		Username: username,
@@ -188,22 +142,4 @@ func checkKeytabPermissions(keytabPath string) error {
 		return fmt.Errorf("keytab %s has insecure permissions %#o: must not be group- or world-readable", keytabPath, mode)
 	}
 	return nil
-}
-
-func (k *KerberosAuthenticator) Authenticate(token string) (string, error) {
-	req, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Negotiate "+token)
-
-	user, err := k.AuthenticateRequest(req)
-	if err != nil {
-		return "", err
-	}
-
-	if user.Realm != "" {
-		return fmt.Sprintf("%s@%s", user.Username, user.Realm), nil
-	}
-	return user.Username, nil
 }
