@@ -7,6 +7,7 @@ toolchain go1.26.3
 require (
 	cerberus v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.23
 	github.com/casbin/casbin/v2 v2.135.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
@@ -20,7 +21,6 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.16 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
