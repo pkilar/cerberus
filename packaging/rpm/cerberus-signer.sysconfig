@@ -1,11 +1,12 @@
 # Configuration for the Cerberus SSH Certificate Signer enclave.
 # This file is sourced by the run-enclave.sh wrapper script.
 
-# Architecture of the EIF to run (amd64 or arm64).
-ARCH=amd64
-
-# Path to the Enclave Image File.
-EIF_PATH=/usr/share/cerberus/ssh-cert-signer-${ARCH}.eif
+# Path to the Enclave Image File. The EIF is not bundled in the RPM because
+# it bakes in the KMS-encrypted CA key (per-deployment artifact); operators
+# build it with `make eif-<arch>` and copy it here, renaming to drop the
+# arch suffix (the RPM is per-arch, so only one EIF arch is ever valid):
+#   sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif
+EIF_PATH=/usr/share/cerberus/ssh-cert-signer.eif
 
 # Enclave CID (must match the value expected by ssh-cert-api).
 ENCLAVE_CID=16

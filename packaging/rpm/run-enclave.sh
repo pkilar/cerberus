@@ -4,8 +4,7 @@
 set -euo pipefail
 
 # Source configuration defaults.
-ARCH="${ARCH:-amd64}"
-EIF_PATH="${EIF_PATH:-/usr/share/cerberus/ssh-cert-signer-${ARCH}.eif}"
+EIF_PATH="${EIF_PATH:-/usr/share/cerberus/ssh-cert-signer.eif}"
 ENCLAVE_CID="${ENCLAVE_CID:-16}"
 ENCLAVE_CPU_COUNT="${ENCLAVE_CPU_COUNT:-1}"
 ENCLAVE_MEMORY_MIB="${ENCLAVE_MEMORY_MIB:-1024}"

@@ -22,6 +22,11 @@ go.work.sum
 ssh-cert-api.*
 ssh-cert-signer.*
 
+# Enclave Image Files and their PCR manifests (produced by `make eif-<arch>`,
+# staged into the RPM source tarball by packaging/rpm/build-rpm.sh).
+ssh-cert-signer/ssh-cert-signer-*.eif
+ssh-cert-signer/pcr-manifest-*.json
+
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
 # A template or example file (e.g., config.example.yaml) should be committed instead.

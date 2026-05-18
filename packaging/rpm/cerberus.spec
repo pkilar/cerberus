@@ -112,7 +112,11 @@ install -D -m 0755 packaging/rpm/run-enclave.sh \
 install -D -m 0644 ssh-cert-signer/Dockerfile \
     %{buildroot}%{_datadir}/cerberus/Dockerfile
 
-# Directory for EIF files (populated post-install or via CI).
+# Stage the EIF directory but leave it empty. The Enclave Image File
+# bakes in the KMS-encrypted CA key (Dockerfile COPYs ca_key.enc), so the
+# EIF is per-deployment and must NOT be shipped inside the generic RPM.
+# Operators build the EIF separately and drop it into this directory
+# (see docs/RUNBOOK.md, Post-Install Setup).
 install -d -m 0755 %{buildroot}%{_datadir}/cerberus
 
 # ---------------------------------------------------------------------------
@@ -171,7 +175,11 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
-* Sat Mar 22 2026 Cerberus Maintainers <cerberus@example.com> - 0.1.0-1
+* Mon May 18 2026 Paul Kilar <pkilar@gmail.com> - 0.1.1-1
+- Fix ARM64 install failure: drop the hardcoded ARCH=amd64 variable from
+  /etc/sysconfig/cerberus-signer.
+
+* Sat Mar 22 2026 Paul Kilar <pkilar@gmail.com> - 0.1.0-1
 - Initial RPM packaging
 - Separate subpackages for API and signer services
 - Systemd integration with security hardening

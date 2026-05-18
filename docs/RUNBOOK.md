@@ -130,13 +130,13 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 
 ### ssh-cert-signer Environment Variables
 
-| Variable              | Default                       | Description                                                                                                                                                                                                                              |
-| --------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key                                                                                                                                                                                                     |
-| `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations                                                                                                                                                                                                            |
-| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production.                     |
-| `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                                              |
-| `DEBUG`               | `false`                       | Enable debug-level logging                                                                                                                                                                                                               |
+| Variable              | Default                       | Description                                                                                                                                                                                                         |
+| --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key                                                                                                                                                                                |
+| `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations                                                                                                                                                                                       |
+| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production. |
+| `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                         |
+| `DEBUG`               | `false`                       | Enable debug-level logging                                                                                                                                                                                          |
 
 ### Authorization Config (config.yaml)
 
@@ -255,6 +255,8 @@ Cerberus provides RPM packaging for Amazon Linux 2, Amazon Linux 2023, RHEL, and
 | `cerberus-api`    | API binary, systemd unit, sysconfig, example config, `cerberus` user/group   |
 | `cerberus-signer` | Signer binary, Dockerfile, systemd unit, sysconfig, enclave lifecycle script |
 
+> The `cerberus-signer` RPM intentionally does **not** ship the Enclave Image File. The EIF bakes in the KMS-encrypted CA key (the `Dockerfile` `COPY`s `ca_key.enc` into the image) and pins a deployment-specific PCR0, so it is a per-deployment artifact rather than a redistributable one. Build it with `make eif-<arch>` and drop it into `/usr/share/cerberus/` after installing the RPM (see [Post-Install Setup](#post-install-setup-rpm), step 4).
+
 ### Building RPMs
 
 **Prerequisites:**
@@ -297,19 +299,19 @@ sudo yum install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
 
 When installed via RPM, files are placed at standard FHS paths:
 
-| File                | RPM Path                                          | Notes                    |
-| ------------------- | ------------------------------------------------- | ------------------------ |
-| API binary          | `/usr/bin/ssh-cert-api`                           | —                        |
-| Signer binary       | `/usr/bin/ssh-cert-signer`                        | —                        |
-| API systemd unit    | `/usr/lib/systemd/system/cerberus-api.service`    | —                        |
-| Signer systemd unit | `/usr/lib/systemd/system/cerberus-signer.service` | —                        |
-| API sysconfig       | `/etc/sysconfig/cerberus-api`                     | `%config(noreplace)`     |
-| Signer sysconfig    | `/etc/sysconfig/cerberus-signer`                  | `%config(noreplace)`     |
-| Example config      | `/etc/cerberus/config.yaml.example`               | Copy to `config.yaml`    |
-| Enclave wrapper     | `/usr/libexec/cerberus/run-enclave.sh`            | Used by systemd          |
-| Dockerfile          | `/usr/share/cerberus/Dockerfile`                  | For building EIFs        |
-| EIF directory       | `/usr/share/cerberus/`                            | Place EIF files here     |
-| Log directory       | `/var/log/cerberus/`                              | Owned by `cerberus` user |
+| File                  | RPM Path                                          | Notes                                                    |
+| --------------------- | ------------------------------------------------- | -------------------------------------------------------- |
+| API binary            | `/usr/bin/ssh-cert-api`                           | —                                                        |
+| Signer binary         | `/usr/bin/ssh-cert-signer`                        | —                                                        |
+| API systemd unit      | `/usr/lib/systemd/system/cerberus-api.service`    | —                                                        |
+| Signer systemd unit   | `/usr/lib/systemd/system/cerberus-signer.service` | —                                                        |
+| API sysconfig         | `/etc/sysconfig/cerberus-api`                     | `%config(noreplace)`                                     |
+| Signer sysconfig      | `/etc/sysconfig/cerberus-signer`                  | `%config(noreplace)`                                     |
+| Example config        | `/etc/cerberus/config.yaml.example`               | Copy to `config.yaml`                                    |
+| Enclave wrapper       | `/usr/libexec/cerberus/run-enclave.sh`            | Used by systemd                                          |
+| Dockerfile            | `/usr/share/cerberus/Dockerfile`                  | For building EIFs                                        |
+| EIF (operator-placed) | `/usr/share/cerberus/ssh-cert-signer.eif`         | Operator copies post-install (RPM does not ship the EIF) |
+| Log directory         | `/var/log/cerberus/`                              | Owned by `cerberus` user                                 |
 
 ### Post-Install Setup (RPM)
 
@@ -325,10 +327,14 @@ When installed via RPM, files are placed at standard FHS paths:
    sudo chmod 640 /etc/cerberus/krb5.keytab
    ```
 3. Place TLS certificate and key (update paths in `config.yaml`).
-4. Build or copy the EIF into `/usr/share/cerberus/`:
+4. Build (or copy) the EIF into `/usr/share/cerberus/`, **renaming on copy** to `ssh-cert-signer.eif`. The RPM is per-architecture, so only one EIF arch is ever valid for a given host — the sysconfig points at a single arch-less path:
    ```bash
-   sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/
+   # x86_64 host
+   sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif
+   # aarch64 host
+   sudo cp ssh-cert-signer-arm64.eif /usr/share/cerberus/ssh-cert-signer.eif
    ```
+   The EIF is not bundled because it carries the KMS-encrypted CA key — see the note under [RPM Packaging](#rpm-packaging).
 5. Start the services:
    ```bash
    sudo systemctl enable --now cerberus-signer
@@ -357,7 +363,7 @@ Environment variables are managed via sysconfig files rather than inline in the 
 
 **`/etc/sysconfig/cerberus-api`**: `CONFIG_PATH`, `KERBEROS_KEYTAB_PATH`, `AWS_REGION`, `ENCLAVE_VSOCK_PORT`, `DEBUG`
 
-**`/etc/sysconfig/cerberus-signer`**: `ARCH`, `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG`
+**`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
 
 ### Versioning
 
@@ -703,13 +709,13 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 
 ### RPM Package Issues
 
-| Symptom                                     | Likely Cause                             | Resolution                                                                                       |
-| ------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `cerberus` user doesn't exist after install | `%pre` scriptlet failed                  | Run `sudo useradd -r -g cerberus -d /etc/cerberus -s /sbin/nologin cerberus`                     |
-| Config overwritten on upgrade               | Config not marked `noreplace`            | Reinstall; configs use `%config(noreplace)` so this should not happen                            |
-| Service won't start after RPM install       | Missing config.yaml                      | Copy `/etc/cerberus/config.yaml.example` to `/etc/cerberus/config.yaml` and edit it              |
-| `run-enclave.sh: EIF file not found`        | EIF not placed in `/usr/share/cerberus/` | Build and copy the EIF: `sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/`                 |
-| Permission denied on keytab                 | Wrong ownership                          | `sudo chown root:cerberus /etc/cerberus/krb5.keytab && sudo chmod 640 /etc/cerberus/krb5.keytab` |
+| Symptom                                     | Likely Cause                                                                                                              | Resolution                                                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `cerberus` user doesn't exist after install | `%pre` scriptlet failed                                                                                                   | Run `sudo useradd -r -g cerberus -d /etc/cerberus -s /sbin/nologin cerberus`                                         |
+| Config overwritten on upgrade               | Config not marked `noreplace`                                                                                             | Reinstall; configs use `%config(noreplace)` so this should not happen                                                |
+| Service won't start after RPM install       | Missing config.yaml                                                                                                       | Copy `/etc/cerberus/config.yaml.example` to `/etc/cerberus/config.yaml` and edit it                                  |
+| `run-enclave.sh: EIF file not found`        | EIF not placed at `/usr/share/cerberus/ssh-cert-signer.eif` (the RPM does not ship it — it bakes in the encrypted CA key) | Copy and rename the matching arch's EIF: `sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif` |
+| Permission denied on keytab                 | Wrong ownership                                                                                                           | `sudo chown root:cerberus /etc/cerberus/krb5.keytab && sudo chmod 640 /etc/cerberus/krb5.keytab`                     |
 
 ### Diagnostic Commands
 
