@@ -7,15 +7,12 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +27,7 @@ import (
 	"ssh-cert-api/internal/proxy"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"golang.org/x/sync/errgroup"
 )
@@ -182,7 +180,9 @@ func LoadKeySigner() error {
 	return nil
 }
 
-// fetchAWSCredentials retrieves AWS credentials from the EC2 instance metadata service
+// fetchAWSCredentials retrieves AWS credentials from the EC2 instance metadata
+// service. It defers the IMDSv2 token dance, role discovery, and JSON decodeing
+// to the  SDK's ec2rolecreds provider rather than hand-rolling the IMDS calls.
 func fetchAWSCredentials() (*messages.Credentials, error) {
 	ctx := context.Background()
 
@@ -191,39 +191,19 @@ func fetchAWSCredentials() (*messages.Credentials, error) {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	metadataClient := imds.NewFromConfig(cfg)
-
-	roleNameResp, err := metadataClient.GetMetadata(ctx, &imds.GetMetadataInput{
-		Path: "iam/security-credentials/",
+	imdsClient := imds.NewFromConfig(cfg)
+	provider := ec2rolecreds.New(func(o *ec2rolecreds.Options) {
+		o.Client = imdsClient
 	})
+
+	creds, err := provider.Retrieve(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IAM role name: %w", err)
-	}
-	defer roleNameResp.Content.Close()
-
-	roleNameBytes, err := io.ReadAll(roleNameResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read IAM role name: %w", err)
-	}
-	roleName := strings.TrimSpace(string(roleNameBytes))
-
-	credentialsResp, err := metadataClient.GetMetadata(ctx, &imds.GetMetadataInput{
-		Path: "iam/security-credentials/" + roleName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get IAM credentials: %w", err)
-	}
-	defer credentialsResp.Content.Close()
-
-	credentialsBytes, err := io.ReadAll(credentialsResp.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read IAM credentials: %w", err)
+		return nil, fmt.Errorf("failed to retrieve EC2 role credentials: %w", err)
 	}
 
-	var creds messages.Credentials
-	if err := json.Unmarshal(credentialsBytes, &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse credentials JSON: %w", err)
-	}
-
-	return &creds, nil
+	return &messages.Credentials{
+		AccessKeyId:     creds.AccessKeyID,
+		SecretAccessKey: creds.SecretAccessKey,
+		Token:           creds.SessionToken,
+	}, nil
 }
