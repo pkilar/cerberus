@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
 	"errors"
@@ -248,21 +249,39 @@ func parseEncryptedContentInfo(data []byte) (iv, encryptedContent []byte, err er
 }
 
 // removePKCS7Padding removes PKCS#7 padding from decrypted plaintext.
+//
+// The trailing-byte comparison runs in time independent of the padding
+// contents to avoid leaking whether the failure was an out-of-range length
+// or a mismatched trailing byte. RSA-OAEP on the wrapping CEK already
+// prevents an attacker from feeding chosen ciphertexts here, so this is
+// defense in depth at a trust boundary.
 func removePKCS7Padding(data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return nil, errors.New("empty data")
+		return nil, errors.New("invalid PKCS#7 padding")
 	}
 
 	padLen := int(data[len(data)-1])
-	if padLen == 0 || padLen > aes.BlockSize || padLen > len(data) {
-		return nil, fmt.Errorf("invalid PKCS#7 padding length: %d", padLen)
+	lenOK := subtle.ConstantTimeLessOrEq(1, padLen) &
+		subtle.ConstantTimeLessOrEq(padLen, aes.BlockSize) &
+		subtle.ConstantTimeLessOrEq(padLen, len(data))
+
+	// Walk the trailing block's worth of bytes regardless of padLen so the
+	// loop count is independent of the (possibly attacker-influenced)
+	// padding-length byte. inWindow is 1 for indices that should hold the
+	// padding byte and 0 otherwise; the byte mask 0x00/0xFF zeros out
+	// non-window contributions.
+	want := byte(padLen)
+	diff := byte(0)
+	scan := min(aes.BlockSize, len(data))
+	for i := 1; i <= scan; i++ {
+		idx := len(data) - i
+		inWindow := subtle.ConstantTimeLessOrEq(i, padLen) // 1 inside, 0 outside
+		mask := byte(0) - byte(inWindow)                   // 0xFF inside, 0x00 outside
+		diff |= mask & (data[idx] ^ want)
 	}
 
-	for i := len(data) - padLen; i < len(data); i++ {
-		if data[i] != byte(padLen) {
-			return nil, errors.New("invalid PKCS#7 padding bytes")
-		}
+	if lenOK == 0 || diff != 0 {
+		return nil, errors.New("invalid PKCS#7 padding")
 	}
-
 	return data[:len(data)-padLen], nil
 }

@@ -37,6 +37,11 @@ const (
 	// client (see ssh-cert-api/internal/enclave/client.go) sets a 30s
 	// connection deadline; this is the per-message slice within that.
 	connDeadline = 5 * time.Second
+	// maxRequestBytes is the largest single request the scanner accepts.
+	// The host caps inbound /sign bodies at 64 KiB; the enclave envelope
+	// adds principals/permissions/audit attributes on top, so 256 KiB
+	// gives generous headroom while still bounding memory per connection.
+	maxRequestBytes = 256 * 1024
 )
 
 var (
@@ -54,6 +59,7 @@ func main() {
 
 	// Initialize attestation provider (gracefully degrades outside enclaves)
 	attestProvider = attestation.NewProvider()
+	defer attestProvider.Close()
 	if attestProvider.IsAvailable() {
 		log.Println("NSM device detected — attestation enabled")
 	} else {
@@ -63,12 +69,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	listener, err := vsock.Listen(constants.ENCLAVE_LISTENING_PORT, nil)
+	listener, err := vsock.Listen(constants.EnclaveListeningPort, nil)
 	if err != nil {
-		log.Fatalf("FATAL: failed to listen on vsock port %d: %v", constants.ENCLAVE_LISTENING_PORT, err)
+		log.Fatalf("FATAL: failed to listen on vsock port %d: %v", constants.EnclaveListeningPort, err)
 	}
 	defer func() { _ = listener.Close() }()
-	log.Printf("Listening on vsock port %d...", constants.ENCLAVE_LISTENING_PORT)
+	log.Printf("Listening on vsock port %d...", constants.EnclaveListeningPort)
 
 	// Close the listener when ctx is cancelled to unblock Accept.
 	context.AfterFunc(ctx, func() { _ = listener.Close() })
@@ -111,9 +117,14 @@ func main() {
 // response, until the peer closes, the deadline expires, or ctx is cancelled.
 func handleConnection(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	// Tear the connection down immediately on shutdown rather than waiting
+	// up to connDeadline for the in-flight Scan to time out.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopOnCancel()
 	logging.Debug("Accepted new connection from parent instance.")
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBytes)
 
 	for {
 		// Reset the read deadline at the top of every iteration so a

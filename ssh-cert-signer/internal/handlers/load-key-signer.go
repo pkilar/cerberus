@@ -53,8 +53,8 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
 		tr.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
 			logging.Debug("KMS SDK attempting to connect to: %s (network: %s)", addr, network)
-			logging.Debug("Intercepting connection via vsock (cid=%d, port=%d)", constants.INSTANCE_CID, constants.INSTANCE_LISTENING_PORT)
-			conn, err := vsock.Dial(constants.INSTANCE_CID, constants.INSTANCE_LISTENING_PORT, nil)
+			logging.Debug("Intercepting connection via vsock (cid=%d, port=%d)", constants.InstanceCID, constants.InstanceListeningPort)
+			conn, err := vsock.Dial(constants.InstanceCID, constants.InstanceListeningPort, nil)
 			if err != nil {
 				log.Printf("VSOCK dial failed: %v", err)
 				return nil, err

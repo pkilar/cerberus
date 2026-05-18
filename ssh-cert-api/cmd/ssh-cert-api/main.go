@@ -62,14 +62,14 @@ func main() {
 	// Get the current AWS region for KMS endpoint
 	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
 	kmsEndpoint := fmt.Sprintf("kms.%s.amazonaws.com:443", region)
-	vsockProxy := proxy.New(constants.INSTANCE_LISTENING_PORT, kmsEndpoint)
+	vsockProxy := proxy.New(constants.InstanceListeningPort, kmsEndpoint)
 
 	ctx := context.Background()
 	err = vsockProxy.Start(ctx)
 	if err != nil {
 		log.Fatalf("Failed to start VSOCK proxy: %v", err)
 	}
-	logging.Debug("Started VSOCK proxy on port %d forwarding to %s", constants.INSTANCE_LISTENING_PORT, kmsEndpoint)
+	logging.Debug("Started VSOCK proxy on port %d forwarding to %s", constants.InstanceListeningPort, kmsEndpoint)
 
 	// Initialize the enclave with AWS credentials
 	logging.Debug("Initializing enclave with AWS credentials...")
@@ -167,7 +167,7 @@ func LoadKeySigner() error {
 	}
 
 	var response messages.Response
-	err = enclave.CommunicateWithEnclave(constants.ENCLAVE_CID, request, &response)
+	err = enclave.CommunicateWithEnclave(constants.EnclaveCID, request, &response)
 	if err != nil {
 		return fmt.Errorf("error communicating with enclave: %w", err)
 	}
