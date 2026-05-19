@@ -11,8 +11,12 @@ ENCLAVE_MEMORY_MIB="${ENCLAVE_MEMORY_MIB:-1024}"
 ENCLAVE_DEBUG="${ENCLAVE_DEBUG:-false}"
 
 get_enclave_id() {
+    # `nitro-cli describe-enclaves` prints `[]` when nothing is running, so
+    # grep finds no match and exits 1; combined with `set -eo pipefail` that
+    # would abort the script before start() can decide there is no existing
+    # enclave to skip. Treat "no match" as a normal empty result.
     nitro-cli describe-enclaves \
-        | grep -o '"EnclaveID"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | { grep -o '"EnclaveID"[[:space:]]*:[[:space:]]*"[^"]*"' || true; } \
         | head -1 \
         | sed 's/.*"EnclaveID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
 }
