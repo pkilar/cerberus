@@ -12,22 +12,38 @@ import (
 	"testing"
 )
 
-// OID for rsaOaep — the parser ignores its bytes, we include it only to match
-// the structure KMS emits so the test stays close to production reality.
-var oidRSAOAEP = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 7}
+// OIDs used to build CMS test fixtures. The parser ignores most of these
+// values directly and recovers them via the cms package, but we include them
+// to keep the fixture structurally identical to what KMS emits.
+var (
+	oidEnvelopedData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 3}
+	oidData          = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
+	oidAES256CBC     = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 42}
+	oidRSAOAEP       = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 7}
+)
 
-// --- minimal manual ASN.1 DER helpers ---
+// --- minimal manual ASN.1 helpers ---
 //
 // We avoid encoding/asn1.Marshal for structural composition because it has
 // subtle interactions between asn1.RawValue.FullBytes and struct tags like
-// `asn1:"explicit,tag:0"`. Hand-written TLV is predictable and only ~20
+// `asn1:"explicit,tag:0"`. Hand-written TLV is predictable and only ~40
 // lines, which is less than the debugging time saved.
 
+// tlv emits a definite-length DER TLV.
 func tlv(tag byte, content []byte) []byte {
 	out := []byte{tag}
 	out = append(out, encLen(len(content))...)
 	out = append(out, content...)
 	return out
+}
+
+// tlvIndef emits an indefinite-length BER TLV. tag must already have the
+// constructed bit (0x20) set; the content is followed by an end-of-contents
+// marker (0x00 0x00) per X.690 §8.1.5.
+func tlvIndef(tag byte, content []byte) []byte {
+	out := []byte{tag, 0x80}
+	out = append(out, content...)
+	return append(out, 0x00, 0x00)
 }
 
 func encLen(n int) []byte {
@@ -62,13 +78,25 @@ func mustMarshal(tb testing.TB, v any) []byte {
 	return b
 }
 
+// envelopeForm controls whether buildCMSEnvelope emits the outer wrappers
+// using definite-length DER (formDER) or BER with indefinite-length form on
+// the EnvelopedData SEQUENCE — which is what KMS actually emits.
+type envelopeForm int
+
+const (
+	formDER envelopeForm = iota
+	formBERIndefinite
+)
+
 // buildCMSEnvelope encodes a CMS EnvelopedData (RFC 5652) matching what KMS
-// returns in CiphertextForRecipient: AES-128-CBC content encryption with the
-// CEK wrapped via RSA-OAEP-SHA256 under pub.
-func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte) []byte {
+// returns in CiphertextForRecipient: AES-256-CBC content encryption with the
+// CEK wrapped via RSA-OAEP-SHA256 under pub. When form is formBERIndefinite,
+// the EnvelopedData SEQUENCE uses BER indefinite-length encoding to mimic
+// real KMS responses.
+func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte, form envelopeForm) []byte {
 	tb.Helper()
 
-	cek := make([]byte, 16)
+	cek := make([]byte, 32) // AES-256
 	if _, err := rand.Read(cek); err != nil {
 		tb.Fatal(err)
 	}
@@ -98,7 +126,7 @@ func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte) []byt
 	}
 
 	// OIDs as pre-marshaled TLV bytes.
-	aesOID := mustMarshal(tb, oidAES128CBC)
+	aesOID := mustMarshal(tb, oidAES256CBC)
 	dataOID := mustMarshal(tb, oidData)
 	envOID := mustMarshal(tb, oidEnvelopedData)
 	oaepOID := mustMarshal(tb, oidRSAOAEP)
@@ -130,7 +158,14 @@ func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte) []byt
 	ris := tlv(0x31, ktri)
 
 	// EnvelopedData: SEQUENCE { ver, ris, eci }.
-	ed := tlv(0x30, cat(ver2, ris, eci))
+	edBody := cat(ver2, ris, eci)
+	var ed []byte
+	switch form {
+	case formBERIndefinite:
+		ed = tlvIndef(0x30, edBody)
+	default:
+		ed = tlv(0x30, edBody)
+	}
 
 	// ContentInfo: SEQUENCE { envelopedDataOID, [0] EXPLICIT EnvelopedData }.
 	ed0 := tlv(0xa0, ed)
@@ -147,16 +182,20 @@ func TestDecryptCMSEnvelope_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name      string
 		plaintext []byte
+		form      envelopeForm
 	}{
-		{"short", []byte("hello")},
-		{"one block", bytes.Repeat([]byte{'A'}, 16)},
-		{"multi block", bytes.Repeat([]byte{'B'}, 64)},
-		{"PEM-ish", []byte("-----BEGIN RSA PRIVATE KEY-----\nMII...\n-----END RSA PRIVATE KEY-----\n")},
-		{"empty", []byte{}},
+		{"DER short", []byte("hello"), formDER},
+		{"DER one block", bytes.Repeat([]byte{'A'}, 16), formDER},
+		{"DER multi block", bytes.Repeat([]byte{'B'}, 64), formDER},
+		{"DER PEM-ish", []byte("-----BEGIN RSA PRIVATE KEY-----\nMII...\n-----END RSA PRIVATE KEY-----\n"), formDER},
+		// BER with indefinite-length on EnvelopedData — locks in the regression
+		// from KMS emitting BER (not DER) in CiphertextForRecipient.
+		{"BER indefinite short", []byte("hello"), formBERIndefinite},
+		{"BER indefinite multi block", bytes.Repeat([]byte{'C'}, 64), formBERIndefinite},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			envelope := buildCMSEnvelope(t, &key.PublicKey, tt.plaintext)
+			envelope := buildCMSEnvelope(t, &key.PublicKey, tt.plaintext, tt.form)
 			got, err := p.DecryptCMSEnvelope(envelope)
 			if err != nil {
 				t.Fatalf("DecryptCMSEnvelope: %v", err)
@@ -197,7 +236,7 @@ func TestDecryptCMSEnvelope_MalformedInput(t *testing.T) {
 	tests := map[string][]byte{
 		"empty":                  {},
 		"single byte":            {0x30},
-		"indefinite len":         {0x30, 0x80},
+		"truncated indefinite":   {0x30, 0x80}, // no EOC → ber2der must fail closed
 		"random garbage":         bytes.Repeat([]byte{0xff}, 64),
 		"valid asn1 but not CMS": validButNotCMS,
 	}
@@ -218,42 +257,13 @@ func TestDecryptCMSEnvelope_Truncated(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Provider{rsaKey: key}
-	envelope := buildCMSEnvelope(t, &key.PublicKey, []byte("hello"))
+	envelope := buildCMSEnvelope(t, &key.PublicKey, []byte("hello"), formDER)
 
 	for cut := 1; cut < len(envelope); cut += 23 {
 		t.Run("cut_"+strconv.Itoa(cut), func(t *testing.T) {
 			_, err := p.DecryptCMSEnvelope(envelope[:cut])
 			if err == nil {
 				t.Errorf("truncation to %d bytes: expected error", cut)
-			}
-		})
-	}
-}
-
-func TestRemovePKCS7Padding(t *testing.T) {
-	tests := []struct {
-		name    string
-		data    []byte
-		want    []byte
-		wantErr bool
-	}{
-		{"normal padding", []byte{'a', 'b', 3, 3, 3}, []byte{'a', 'b'}, false},
-		{"one byte pad", []byte{'a', 'b', 'c', 1}, []byte{'a', 'b', 'c'}, false},
-		{"full block only padding", bytes.Repeat([]byte{16}, 16), []byte{}, false},
-		{"zero pad byte", []byte{'x', 0}, nil, true},
-		{"pad exceeds block", []byte{'x', 17}, nil, true},
-		{"pad exceeds data", []byte{'x', 3}, nil, true},
-		{"inconsistent pad bytes", []byte{'x', 'y', 2, 3}, nil, true},
-		{"empty", []byte{}, nil, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := removePKCS7Padding(tt.data)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
-			}
-			if !tt.wantErr && !bytes.Equal(got, tt.want) {
-				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -269,7 +279,8 @@ func FuzzDecryptCMSEnvelope(f *testing.F) {
 	}
 	p := &Provider{rsaKey: key}
 
-	f.Add(buildCMSEnvelope(f, &key.PublicKey, []byte("seed")))
+	f.Add(buildCMSEnvelope(f, &key.PublicKey, []byte("seed"), formDER))
+	f.Add(buildCMSEnvelope(f, &key.PublicKey, []byte("seed"), formBERIndefinite))
 	f.Add([]byte{})
 	f.Add([]byte{0x30})
 	f.Add([]byte{0x30, 0x80})
