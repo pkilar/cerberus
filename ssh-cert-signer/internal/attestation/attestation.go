@@ -6,18 +6,15 @@
 package attestation
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/x509"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 
+	"github.com/edgebitio/nitro-enclaves-sdk-go/crypto/cms"
 	"github.com/hf/nsm"
 	"github.com/hf/nsm/request"
 )
@@ -90,51 +87,44 @@ func (p *Provider) GenerateAttestationDoc() ([]byte, error) {
 
 // DecryptCMSEnvelope decrypts a CMS EnvelopedData structure (RFC 5652) as
 // returned by KMS in the CiphertextForRecipient field. The envelope uses
-// RSA-OAEP-SHA256 key transport and AES-CBC content encryption.
+// RSA-OAEP-SHA256 key transport and AES-256-CBC content encryption.
+//
+// KMS emits BER (with indefinite-length wrappers and occasionally a
+// constructed encrypted-content OCTET STRING), which Go's encoding/asn1
+// rejects. We delegate to the edgebit Nitro SDK's cms package, which performs
+// a BER→DER pass and concatenates constructed OCTET STRINGs before
+// unmarshaling — the same path AWS's reference implementations take.
 //
 // The gate is narrower than IsAvailable on purpose: decryption needs only
 // the RSA key, not the NSM session. Callers that require end-to-end
 // attestation (i.e. attestation doc generation) check IsAvailable separately.
-func (p *Provider) DecryptCMSEnvelope(data []byte) ([]byte, error) {
+func (p *Provider) DecryptCMSEnvelope(data []byte) (plaintext []byte, err error) {
 	if p == nil || p.rsaKey == nil {
 		return nil, errors.New("attestation RSA key not available")
 	}
 
-	encryptedKey, iv, encryptedContent, err := parseCMSEnvelopedData(data)
+	// Trust-boundary defense: the upstream BER parser has at least one
+	// known panic on adversarial input (off-by-one bound check in
+	// readObject's multi-byte-tag loop). Since the input here is the KMS
+	// response body proxied via VSOCK from the parent instance, a
+	// compromised host could inject crafted bytes. Convert any panic into
+	// an error so the enclave fails closed instead of crashing — and log
+	// it, because a panic here is a strong signal of a hostile host and
+	// operators need to see it (the raw bytes are intentionally not
+	// logged; input_len is the signal-to-noise floor).
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("attestation.cms.parser_panic",
+				"panic", fmt.Sprintf("%v", r),
+				"input_len", len(data))
+			err = fmt.Errorf("CMS envelope parser panicked on input: %v", r)
+		}
+	}()
+
+	plaintext, err = cms.DecryptEnvelopedKey(p.rsaKey, data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse CMS envelope: %w", err)
+		return nil, fmt.Errorf("failed to decrypt CMS envelope: %w", err)
 	}
-
-	// Decrypt the content encryption key (CEK) with our RSA private key.
-	cek, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, p.rsaKey, encryptedKey, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt content encryption key: %w", err)
-	}
-
-	// Decrypt the content with AES-CBC.
-	block, err := aes.NewCipher(cek)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
-	}
-
-	if len(iv) != aes.BlockSize {
-		return nil, fmt.Errorf("IV length %d does not match AES block size %d", len(iv), aes.BlockSize)
-	}
-
-	if len(encryptedContent)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("encrypted content length %d is not a multiple of AES block size", len(encryptedContent))
-	}
-
-	plaintext := make([]byte, len(encryptedContent))
-	mode := cipher.NewCBCDecrypter(block, iv)
-	mode.CryptBlocks(plaintext, encryptedContent)
-
-	// Remove PKCS#7 padding.
-	plaintext, err = removePKCS7Padding(plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to remove PKCS#7 padding: %w", err)
-	}
-
 	return plaintext, nil
 }
 
@@ -143,150 +133,4 @@ func (p *Provider) Close() {
 	if p != nil && p.session != nil {
 		_ = p.session.Close()
 	}
-}
-
-// --- CMS ASN.1 parsing ---
-//
-// KMS returns a CMS EnvelopedData (RFC 5652) with:
-//   - KeyTransRecipientInfo using RSA-OAEP-SHA256
-//   - EncryptedContentInfo using AES-CBC (128 or 256)
-
-// OIDs used in CMS parsing.
-var (
-	oidEnvelopedData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 3}
-	oidData          = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
-	oidAES256CBC     = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 42}
-	oidAES128CBC     = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 1, 2}
-)
-
-// parseCMSEnvelopedData extracts the encrypted key, IV, and encrypted content
-// from a CMS EnvelopedData structure.
-func parseCMSEnvelopedData(data []byte) (encryptedKey, iv, encryptedContent []byte, err error) {
-	// ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT ANY }
-	var contentInfo struct {
-		ContentType asn1.ObjectIdentifier
-		Content     asn1.RawValue `asn1:"explicit,tag:0"`
-	}
-	if _, err = asn1.Unmarshal(data, &contentInfo); err != nil {
-		return nil, nil, nil, fmt.Errorf("unmarshal ContentInfo: %w", err)
-	}
-	if !contentInfo.ContentType.Equal(oidEnvelopedData) {
-		return nil, nil, nil, fmt.Errorf("unexpected content type: %v", contentInfo.ContentType)
-	}
-
-	// EnvelopedData ::= SEQUENCE { version INTEGER, recipientInfos SET OF, encryptedContentInfo SEQUENCE }
-	var envelopedData struct {
-		Version        int
-		RecipientInfos asn1.RawValue `asn1:"set"`
-		EncryptedCI    asn1.RawValue
-	}
-	if _, err = asn1.Unmarshal(contentInfo.Content.Bytes, &envelopedData); err != nil {
-		return nil, nil, nil, fmt.Errorf("unmarshal EnvelopedData: %w", err)
-	}
-
-	// Parse the first RecipientInfo (KeyTransRecipientInfo).
-	encryptedKey, err = parseKeyTransRecipientInfo(envelopedData.RecipientInfos.Bytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Parse EncryptedContentInfo.
-	iv, encryptedContent, err = parseEncryptedContentInfo(envelopedData.EncryptedCI.FullBytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	return encryptedKey, iv, encryptedContent, nil
-}
-
-// parseKeyTransRecipientInfo extracts the encrypted key from a KeyTransRecipientInfo.
-func parseKeyTransRecipientInfo(data []byte) ([]byte, error) {
-	// KeyTransRecipientInfo ::= SEQUENCE { version INTEGER, rid ANY, keyEncAlg AlgorithmIdentifier, encryptedKey OCTET STRING }
-	var ktri struct {
-		Version      int
-		Rid          asn1.RawValue
-		KeyEncAlg    asn1.RawValue
-		EncryptedKey []byte
-	}
-	if _, err := asn1.Unmarshal(data, &ktri); err != nil {
-		return nil, fmt.Errorf("unmarshal KeyTransRecipientInfo: %w", err)
-	}
-	return ktri.EncryptedKey, nil
-}
-
-// parseEncryptedContentInfo extracts the IV and encrypted content.
-func parseEncryptedContentInfo(data []byte) (iv, encryptedContent []byte, err error) {
-	// EncryptedContentInfo ::= SEQUENCE { contentType OID, contentEncAlg AlgorithmIdentifier, encryptedContent [0] IMPLICIT OCTET STRING }
-	var eci struct {
-		ContentType    asn1.ObjectIdentifier
-		ContentEncAlg  asn1.RawValue
-		EncryptedBytes asn1.RawValue `asn1:"tag:0,optional"`
-	}
-	if _, err = asn1.Unmarshal(data, &eci); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal EncryptedContentInfo: %w", err)
-	}
-
-	// Parse AlgorithmIdentifier to get the IV.
-	var algID struct {
-		Algorithm  asn1.ObjectIdentifier
-		Parameters asn1.RawValue `asn1:"optional"`
-	}
-	if _, err = asn1.Unmarshal(eci.ContentEncAlg.FullBytes, &algID); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal content encryption AlgorithmIdentifier: %w", err)
-	}
-
-	if !algID.Algorithm.Equal(oidAES256CBC) && !algID.Algorithm.Equal(oidAES128CBC) {
-		return nil, nil, fmt.Errorf("unsupported content encryption algorithm: %v", algID.Algorithm)
-	}
-
-	// The IV is the parameter of the AES-CBC algorithm (OCTET STRING).
-	if _, err = asn1.Unmarshal(algID.Parameters.FullBytes, &iv); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal AES-CBC IV: %w", err)
-	}
-
-	encryptedContent = eci.EncryptedBytes.Bytes
-	return iv, encryptedContent, nil
-}
-
-// removePKCS7Padding removes PKCS#7 padding from decrypted plaintext.
-//
-// The trailing-byte comparison runs in time independent of the padding
-// contents to avoid leaking whether the failure was an out-of-range length
-// or a mismatched trailing byte. RSA-OAEP on the wrapping CEK already
-// prevents an attacker from feeding chosen ciphertexts here, so this is
-// defense in depth at a trust boundary.
-func removePKCS7Padding(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, errors.New("invalid PKCS#7 padding")
-	}
-
-	// padLen is the raw trailing byte; keep it as a byte so the AES-block-size
-	// bound check covers conversions implicitly. The int alias is used only
-	// for subtle.ConstantTimeLessOrEq (which operates on ints).
-	want := data[len(data)-1]
-	padLen := int(want)
-	lenOK := subtle.ConstantTimeLessOrEq(1, padLen) &
-		subtle.ConstantTimeLessOrEq(padLen, aes.BlockSize) &
-		subtle.ConstantTimeLessOrEq(padLen, len(data))
-
-	// Walk the trailing block's worth of bytes regardless of padLen so the
-	// loop count is independent of the (possibly attacker-influenced)
-	// padding-length byte. inWindow is 1 for indices that should hold the
-	// padding byte and 0 otherwise; the byte mask 0x00/0xFF zeros out
-	// non-window contributions.
-	diff := byte(0)
-	scan := min(aes.BlockSize, len(data))
-	for i := 1; i <= scan; i++ {
-		idx := len(data) - i
-		// ConstantTimeLessOrEq is documented to return 0 or 1, so masking
-		// to a single bit makes the int→byte truncation provably safe.
-		inWindow := byte(subtle.ConstantTimeLessOrEq(i, padLen) & 1)
-		mask := byte(0) - inWindow // 0xFF inside, 0x00 outside
-		diff |= mask & (data[idx] ^ want)
-	}
-
-	if lenOK == 0 || diff != 0 {
-		return nil, errors.New("invalid PKCS#7 padding")
-	}
-	return data[:len(data)-padLen], nil
 }
