@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 
 	"github.com/edgebitio/nitro-enclaves-sdk-go/crypto/cms"
 	"github.com/hf/nsm"
@@ -107,10 +108,15 @@ func (p *Provider) DecryptCMSEnvelope(data []byte) (plaintext []byte, err error)
 	// readObject's multi-byte-tag loop). Since the input here is the KMS
 	// response body proxied via VSOCK from the parent instance, a
 	// compromised host could inject crafted bytes. Convert any panic into
-	// an error so the enclave fails closed instead of crashing.
+	// an error so the enclave fails closed instead of crashing — and log
+	// it, because a panic here is a strong signal of a hostile host and
+	// operators need to see it (the raw bytes are intentionally not
+	// logged; input_len is the signal-to-noise floor).
 	defer func() {
 		if r := recover(); r != nil {
-			plaintext = nil
+			slog.Error("attestation.cms.parser_panic",
+				"panic", fmt.Sprintf("%v", r),
+				"input_len", len(data))
 			err = fmt.Errorf("CMS envelope parser panicked on input: %v", r)
 		}
 	}()
