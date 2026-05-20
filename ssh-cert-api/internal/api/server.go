@@ -39,16 +39,18 @@ type Server struct {
 	authenticator auth.Authenticator
 	authorizer    authz.Authorizer
 	enclaveClient enclave.Signer
+	healthMonitor *HealthMonitor
 	limiter       *principalLimiter
 	router        *http.ServeMux
 }
 
-func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer authz.Authorizer, enclaveClient enclave.Signer) (*Server, error) {
+func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer authz.Authorizer, enclaveClient enclave.Signer, healthMonitor *HealthMonitor) (*Server, error) {
 	s := &Server{
 		config:        cfg,
 		authenticator: authenticator,
 		authorizer:    authorizer,
 		enclaveClient: enclaveClient,
+		healthMonitor: healthMonitor,
 		limiter:       newPrincipalLimiter(),
 		router:        http.NewServeMux(),
 	}
@@ -232,24 +234,32 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
-// handleHealth probes the enclave so /health reflects the whole system, not
-// just whether this process is responsive. A short timeout caps the cost of
-// probing — if the enclave is hung, the load balancer should hear about it
-// quickly rather than after the global 10s WriteTimeout.
+// handleHealth reads the cached enclave health snapshot maintained by the
+// background healthMonitor. The handler never touches VSOCK directly, so a
+// flood of unauthenticated /health requests cannot consume the signer's
+// bounded connection budget — only the monitor's 5s background probe does.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-
 	w.Header().Set("Content-Type", "application/json")
 
-	pong, err := s.enclaveClient.Ping(ctx)
-	if err != nil {
-		slog.Warn("health.enclave_unreachable", "error", err)
+	snap := s.healthMonitor.Snapshot()
+	if snap == nil {
+		// Background monitor hasn't completed its first probe.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "starting up"})
+		return
+	}
+	if age := time.Since(snap.LastChecked); age > healthStaleAfter {
+		slog.Warn("health.stale", "age", age)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "health check stale"})
+		return
+	}
+	if snap.LastError != "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "enclave unreachable"})
 		return
 	}
-	if !pong.SignerLoaded {
+	if !snap.SignerLoaded {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "signer not loaded"})
 		return

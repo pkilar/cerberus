@@ -97,8 +97,17 @@ func main() {
 		log.Fatalf("Failed to initialize authorizer: %v", err)
 	}
 
+	// --- 4b. Start background enclave health monitor ---
+	// /health reads from the cached snapshot this populates, so flooding the
+	// unauthenticated /health endpoint can't consume signer capacity needed
+	// by /sign — only the monitor's background tick hits VSOCK.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	healthMonitor := api.NewHealthMonitor(enclaveClient)
+	healthMonitor.Start(rootCtx)
+
 	// --- 5. Setup API Server ---
-	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient)
+	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient, healthMonitor)
 	if err != nil {
 		log.Fatalf("Failed to initialize API server: %v", err)
 	}
@@ -131,9 +140,6 @@ func main() {
 
 	// --- 6. Start Server with graceful shutdown ---
 	log.Printf("Server listening on https://%s", cfg.Listen)
-
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
 
 	g, gctx := errgroup.WithContext(rootCtx)
 
