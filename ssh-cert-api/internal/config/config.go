@@ -38,6 +38,28 @@ type CertificateRules struct {
 	CriticalOptions   map[string]string `yaml:"critical_options"`
 }
 
+// flagOnlyExtensions are SSH cert extensions and critical options whose
+// presence enables the feature and whose data field must be a zero-length
+// string per OpenSSH's PROTOCOL.certkeys. Any non-empty value gets serialized
+// as "extra data" by the SSH wire format, and sshd rejects the certificate at
+// connect time with errors like:
+//
+//	error: Certificate option "permit-pty" corrupt (extra data)
+//	error: Invalid certificate options
+//
+// Catching this at config load turns a silent per-connection failure (hours
+// or days after a deploy, often only visible to the user trying to ssh in)
+// into a loud startup failure with a pointer to the offending group and key.
+var flagOnlyExtensions = map[string]struct{}{
+	"permit-X11-forwarding":   {},
+	"permit-agent-forwarding": {},
+	"permit-port-forwarding":  {},
+	"permit-pty":              {},
+	"permit-user-rc":          {},
+	"no-touch-required":       {},
+	"verify-required":         {},
+}
+
 // LoadConfig reads the YAML file from the given path and unmarshals it.
 func LoadConfig(path string) (*Config, error) {
 	// #nosec G304 -- path comes from the CONFIG_PATH env var set by the
@@ -113,6 +135,28 @@ func (c *Config) Validate() error {
 
 		if len(rules.AllowedPrincipals) == 0 {
 			return fmt.Errorf("group '%s' has no allowed_principals", name)
+		}
+
+		if err := validateFlagExtensions(name, "permissions", rules.Permissions); err != nil {
+			return err
+		}
+		if err := validateFlagExtensions(name, "critical_options", rules.CriticalOptions); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateFlagExtensions rejects non-empty values on extensions/options that
+// the SSH cert format requires to be empty. Unknown keys pass through — the
+// signer treats them as opaque, which lets operators add OpenSSH extensions
+// (e.g. force-command, source-address) without this code knowing about them.
+func validateFlagExtensions(group, field string, m map[string]string) error {
+	for k, v := range m {
+		if _, isFlag := flagOnlyExtensions[k]; isFlag && v != "" {
+			return fmt.Errorf("group %q: %s key %q must have empty value (got %q): "+
+				"flag-style SSH cert extensions carry no data and sshd rejects non-empty payloads as corrupt",
+				group, field, k, v)
 		}
 	}
 	return nil
