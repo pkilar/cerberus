@@ -98,7 +98,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("WWW-Authenticate", "Negotiate")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Authentication required"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Authentication required"})
 			return
 		}
 
@@ -128,7 +128,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		outcome = outcomeNoAuth
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Failed to get authenticated user"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Failed to get authenticated user"})
 		return
 	}
 
@@ -139,13 +139,13 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			outcome = outcomeTooLarge
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Request body too large"})
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Request body too large"})
 			return
 		}
 		outcome = outcomeInvalidBody
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid request format"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid request format"})
 		return
 	}
 
@@ -153,7 +153,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		outcome = outcomeMissingKey
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing SSH key"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing SSH key"})
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		outcome = outcomeInvalidBody
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
 		return
 	}
 
@@ -178,7 +178,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		slog.Error("authz.error", "principal", principal, "error", authzErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
 		return
 	}
 	if !result.Allowed {
@@ -186,7 +186,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
 		return
 	}
 
@@ -213,7 +213,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		slog.Error("sign.failed", "principal", principal, "group", result.GroupName, "error", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Signing failed"})
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Signing failed"})
 		return
 	}
 
@@ -226,7 +226,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
+	_ = json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
 // handleHealth reads the cached enclave health snapshot maintained by the

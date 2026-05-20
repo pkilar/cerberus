@@ -18,7 +18,11 @@ Optional (for enclave-level work):
 ## Repository layout
 
 This is a **multi-module Go project** with three `go.mod` files, not a Go
-workspace. See [CLAUDE.md](./CLAUDE.md) for the full architecture.
+workspace. See [README.md](./README.md) for an overview and
+[ARCHITECTURE-EXECUTIVE.md](./ARCHITECTURE-EXECUTIVE.md) for the deeper
+architecture write-up. (`CLAUDE.md` is intentionally gitignored — each
+contributor generates a local one for their coding agent if they use one;
+it is not the canonical project doc.)
 
 - `/` — shared packages (`constants`, `logging`, `messages`) + integration tests
 - `/ssh-cert-api/` — HTTPS API service
@@ -52,8 +56,11 @@ cd ssh-cert-signer && go test -fuzz=FuzzDecryptCMSEnvelope -fuzztime=10s ./inter
 
 ## Linting
 
-CI runs `golangci-lint v2.6+` with the config in `.golangci.yml` (modernize,
-gosec, errorlint, bodyclose, misspell, etc.). Run it locally before pushing:
+CI pins `golangci-lint v2.12.2` with the config in `.golangci.yml`
+(bodyclose, contextcheck, errorlint, misspell, nilerr, unconvert, plus
+`gofmt`/`goimports`). `gosec` is deliberately **not** in the linter set —
+it runs as a separate CI job at `-severity=medium`. Run the linter
+locally before pushing:
 
 ```bash
 golangci-lint run ./...

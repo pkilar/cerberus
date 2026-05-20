@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,6 +47,15 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	logging.Debug("Configuration loaded successfully.")
+
+	// Non-fatal config-hygiene warnings: static_attributes keys not namespaced
+	// per PROTOCOL.certkeys §4. Logged once at startup; the service continues.
+	for _, w := range cfg.Warnings() {
+		slog.Warn("config.static_attribute.not_namespaced",
+			"group", w.Group,
+			"key", w.Key,
+			"guidance", "rename to "+w.Key+"@<domain> per PROTOCOL.certkeys §4")
+	}
 
 	// --- 2. Initialize Dependencies ---
 	kerberosAuthenticator, err := auth.NewKerberosAuthenticator(cfg.KeytabPath, cfg.ServicePrincipal)

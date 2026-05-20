@@ -1,5 +1,10 @@
 # Root Makefile for Cerberus SSH Certificate Authority
 
+# Modules to iterate over for cross-cutting commands (upgrade-deps, etc.).
+# This list mirrors the matrix in .github/workflows/go.yml — keep it in sync
+# when adding a new go.mod.
+GO_MODULES := . ssh-cert-api ssh-cert-signer
+
 # Default target
 all: build
 
@@ -36,6 +41,35 @@ test-coverage:
 	go test -v -coverprofile=integration-coverage.out ./...
 	go tool cover -html=integration-coverage.out -o integration-coverage.html
 	@echo "Integration coverage report generated: integration-coverage.html"
+
+# Upgrade direct Go dependencies in every module to their latest minor/patch
+# release, then tidy. Runs per-module because there is no go.work file and
+# each go.mod pins its own dependency set. This is a deliberately manual
+# operation — Dependabot already handles routine bumps PR-by-PR; use this
+# for periodic sweeps or after a security advisory.
+#
+# After running:
+#   1. Review the go.mod/go.sum diff in each module.
+#   2. Run `make test` (and ideally `go test -race ./...` per module).
+#   3. Commit per-module to keep the bump reviewable.
+#
+# Use `make upgrade-deps-patch` for patch-only bumps (safer; never crosses
+# a minor version boundary).
+upgrade-deps:
+	@for mod in $(GO_MODULES); do \
+		echo "==> Upgrading dependencies in $$mod"; \
+		(cd $$mod && go get -u ./... && go mod tidy) || exit 1; \
+	done
+	@echo
+	@echo "Done. Review the diff, run 'make test', then commit per module."
+
+upgrade-deps-patch:
+	@for mod in $(GO_MODULES); do \
+		echo "==> Upgrading dependencies (patch only) in $$mod"; \
+		(cd $$mod && go get -u=patch ./... && go mod tidy) || exit 1; \
+	done
+	@echo
+	@echo "Done. Review the diff, run 'make test', then commit per module."
 
 # Clean all build artifacts
 clean:
@@ -99,4 +133,4 @@ run-enclave-debug:
 		--debug-mode \
 		--attach-console
 
-.PHONY: all build stress test test-coverage clean eif eif-amd64 eif-arm64 run-api run-enclave-debug
+.PHONY: all build stress test test-coverage upgrade-deps upgrade-deps-patch clean eif eif-amd64 eif-arm64 run-api run-enclave-debug

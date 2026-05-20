@@ -196,7 +196,7 @@ func TestIntegration_MessageSerialization(t *testing.T) {
 			"permit-pty": "",
 		},
 		CustomAttributes: map[string]string{
-			"environment": "test",
+			"environment@example.com": "test",
 		},
 		CriticalOptions: map[string]string{
 			"source-address": "192.168.1.0/24",
@@ -270,7 +270,7 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 			"permit-pty": "",
 		},
 		CustomAttributes: map[string]string{
-			"environment": "test",
+			"environment@example.com": "test",
 		},
 		CriticalOptions: map[string]string{
 			"source-address": "192.168.1.0/24",
@@ -343,8 +343,8 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 		t.Error("expected permit-pty permission")
 	}
 
-	if cert.Permissions.Extensions["environment"] != "test" {
-		t.Error("expected environment=test attribute")
+	if cert.Permissions.Extensions["environment@example.com"] != "test" {
+		t.Error("expected environment@example.com=test attribute")
 	}
 
 	// Verify critical options

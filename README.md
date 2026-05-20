@@ -10,7 +10,7 @@ Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to r
 - **Kerberos Authentication**: The public-facing API uses Kerberos (SPNEGO) to authenticate users, integrating seamlessly with existing enterprise identity systems like Active Directory or MIT Kerberos.
 - **Flexible, Group-Based Authorization**: A simple, powerful YAML file (config.yaml) defines which users belong to which groups and what permissions each group has (e.g., certificate validity, allowed server principals). Authorization is enforced by [Casbin](https://casbin.org/) with per-group policy evaluation and wildcard principal support.
 - **Secure Communication**: The API server communicates with the signing service in the enclave over a secure, isolated VSOCK connection, not the standard network stack.
-- **Auditable**: All issued certificates can be embedded with custom metadata, such as the requesting user's principal and a timestamp, for clear audit trails.
+- **Auditable**: Every signing request is logged with the authenticated principal and group; certificates can carry operator-defined custom metadata (e.g. `team@example.com`, `access-level@example.com`) for downstream audit and policy use. The principal itself is recorded as the cert's `KeyId`, and `ValidAfter`/`ValidBefore` bound the issuance window in the signed cert.
 - **Easy to Deploy**: Makefile automation simplifies building the application binaries and the Enclave Image File (.eif).
 
 ## **Architecture**
@@ -36,7 +36,7 @@ cerberus/
 ├── logging/                      # Logging component
 ├── messages/                     # Shared message types
 ├── packaging/rpm/                # RPM spec, systemd units, build script
-├── docs/                         # Operational runbook
+├── docs/                         # RUNBOOK, cssh howto, KMS attestation policy
 ├── ssh-cert-api/                 # API service
 │   ├── cmd/ssh-cert-api/         # Main entry point
 │   ├── internal/                 # Private application code
@@ -48,10 +48,10 @@ cerberus/
 │   │   └── proxy/                # VSOCK proxy
 │   └── configs/                  # Configuration files
 └── ssh-cert-signer/              # Enclave service
-    ├── cmd/ssh-cert-signer/      # Main entry point
+    ├── cmd/ssh-cert-signer/      # Main entry point (VSOCK accept loop, signer)
     └── internal/                 # Private application code
-        ├── handlers/             # Request handlers
-        └── server/               # VSOCK server
+        ├── attestation/          # NSM attestation + CMS envelope decrypt
+        └── handlers/             # LoadKeySigner / SignSshKey request handlers
 ```
 
 ## **Components**

@@ -208,23 +208,25 @@ This is why `permissions:` in a group's `certificate_rules` should only contain 
 
 #### Recognized by stock OpenSSH
 
-| Type                | Name                      | Effect                                                                                          |
-| ------------------- | ------------------------- | ----------------------------------------------------------------------------------------------- |
-| Extension           | `permit-X11-forwarding`   | Allow `ssh -X` / `-Y`                                                                           |
-| Extension           | `permit-agent-forwarding` | Allow `ssh -A`                                                                                  |
-| Extension           | `permit-port-forwarding`  | Allow `-L`, `-R`, `-D`                                                                          |
-| Extension           | `permit-pty`              | Allow PTY allocation (required for interactive shells)                                          |
-| Extension           | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                                            |
-| Extension           | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                                            |
-| Critical option     | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only)                     |
-| Critical option     | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses                              |
-| Critical option     | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence                     |
+| Type            | Name                      | Effect                                                                      |
+| --------------- | ------------------------- | --------------------------------------------------------------------------- |
+| Extension       | `permit-X11-forwarding`   | Allow `ssh -X` / `-Y`                                                       |
+| Extension       | `permit-agent-forwarding` | Allow `ssh -A`                                                              |
+| Extension       | `permit-port-forwarding`  | Allow `-L`, `-R`, `-D`                                                      |
+| Extension       | `permit-pty`              | Allow PTY allocation (required for interactive shells)                      |
+| Extension       | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                        |
+| Extension       | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                        |
+| Critical option | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only) |
+| Critical option | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses          |
+| Critical option | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence |
 
 Anything else — including names cerberus operators add via `static_attributes:` — falls through to the "not supported" branch. That's expected and harmless.
 
 #### Custom extension naming
 
 Per the SSH certificate spec ([PROTOCOL.certkeys §4, "Custom Extensions"](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.certkeys)), names that are not defined by OpenSSH **must** be namespaced as `name@domain` to avoid collisions with future standard extensions. Cerberus example configs use `name@example.com`; replace the domain with your organization's. Namespacing does **not** suppress the sshd warning — the dispatch table is still hardcoded — but it documents intent and prevents collisions if OpenSSH later adopts a standard extension with the same bare name.
+
+At startup, `ssh-cert-api` walks every group's `static_attributes:` and emits one structured `slog.Warn("config.static_attribute.not_namespaced", "group", ..., "key", ...)` per bare key. This is non-fatal — the service still starts — so legacy deployments can migrate gradually, but the warning surfaces the migration debt in operator logs.
 
 #### Acting on custom extensions server-side
 
@@ -902,15 +904,15 @@ You must `cd` into the correct directory before running `go test`, `go build`, o
 
 ### GitHub Actions
 
-The workflow at `.github/workflows/go.yml` runs four matrix jobs on every push and pull request to `main`. Each Go-version job picks the toolchain from the module's `go.mod` (currently 1.26):
+The workflow at `.github/workflows/go.yml` runs four jobs on every push and pull request to `main`. The first three use a per-module matrix (root, `ssh-cert-api`, `ssh-cert-signer`); the fourth iterates internally. Each job picks the toolchain from the target module's `go.mod` (currently 1.26):
 
-1. **Build & test** (per module: root, `ssh-cert-api`, `ssh-cert-signer`)
+1. **Build & test** (matrix per module)
    - `go build -v ./...`
-   - `go mod tidy` drift check (fails if checked-in `go.sum` is stale)
+   - `go mod tidy` drift check (fails if running `go mod tidy` would change `go.mod`/`go.sum`)
    - `go test -race -shuffle=on -count=1 ./...`
-2. **golangci-lint** (per module) — uses the project's `.golangci.yml` (bodyclose, contextcheck, errorlint, misspell, nilerr, unconvert, plus `gofmt`/`goimports`)
-3. **govulncheck** (per module) — `golang.org/x/vuln/cmd/govulncheck@latest`
-4. **gosec** — `github.com/securego/gosec/v2@latest` at `-severity=medium`, run separately on root, `ssh-cert-api`, and `ssh-cert-signer`
+2. **golangci-lint** (matrix per module) — pinned `v2.12.2` with `.golangci.yml` (bodyclose, contextcheck, errorlint, misspell, nilerr, unconvert, plus `gofmt`/`goimports`)
+3. **govulncheck** (matrix per module) — `golang.org/x/vuln/cmd/govulncheck@latest`
+4. **gosec** (single job, iterates) — `github.com/securego/gosec/v2@latest` at `-severity=medium`, run sequentially on root, `ssh-cert-api`, and `ssh-cert-signer`
 
 `gosec`, `golangci-lint`, and `govulncheck` are installed by the workflow (`go install`) rather than tracked as Go 1.24+ tool dependencies; this keeps them out of `go.sum` and shrinks the supply-chain surface of a signing service.
 

@@ -35,13 +35,13 @@ export CERBERUS_URL=https://cerberus.example.com:8443
 export CERBERUS_CACERT=/etc/pki/ca-trust/source/anchors/cerberus-ca.pem
 ```
 
-| Variable              | Default                       | Purpose                                                         |
-| --------------------- | ----------------------------- | --------------------------------------------------------------- |
-| `CERBERUS_URL`        | *(required)*                  | Base URL of the signing API. `/sign` is appended.               |
-| `CERBERUS_CACERT`     | system trust                  | CA bundle to trust for the API's TLS cert.                      |
-| `CSSH_PUBKEY`         | `~/.ssh/id_ed25519.pub`       | Public key to sign. The matching private key must exist.        |
-| `CSSH_REFRESH_BEFORE` | `300`                         | Re-sign if cert expires within this many seconds.               |
-| `CSSH_PRINCIPALS`     | *(unset)*                     | Comma-separated principals to request. If unset, the API picks. |
+| Variable              | Default                 | Purpose                                                         |
+| --------------------- | ----------------------- | --------------------------------------------------------------- |
+| `CERBERUS_URL`        | *(required)*            | Base URL of the signing API. `/sign` is appended.               |
+| `CERBERUS_CACERT`     | system trust            | CA bundle to trust for the API's TLS cert.                      |
+| `CSSH_PUBKEY`         | `~/.ssh/id_ed25519.pub` | Public key to sign. The matching private key must exist.        |
+| `CSSH_REFRESH_BEFORE` | `300`                   | Re-sign if cert expires within this many seconds.               |
+| `CSSH_PRINCIPALS`     | *(unset)*               | Comma-separated principals to request. If unset, the API picks. |
 
 ---
 
@@ -90,14 +90,14 @@ ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
 
 ## Troubleshooting
 
-| Symptom                                                         | Likely cause                                                                                            |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `cssh: no Kerberos credential cache (run: kinit)`                | No cache file. Run `kinit`.                                                                             |
-| `cssh: TGT for X@REALM is expired (...) — run: kinit`            | Cache exists but the TGT has expired. Re-`kinit`.                                                       |
-| `cssh: signing failed (HTTP 403): Not authorized for ...`        | The principal you requested isn't in any group you belong to in the Cerberus config.                    |
-| `cssh: signing failed (HTTP 401): ...`                           | SPNEGO auth was rejected. Common causes: keytab kvno mismatch with the KDC, clock skew >5 min, no TGT.  |
-| sshd rejects with `Certificate option "permit-pty" corrupt`     | Server-side config bug — a flag-style cert extension was given a non-empty value. Fix the YAML.         |
-| ssh asks for a password                                          | The cert was issued for a different principal than the SSH login name. Use `--principals <login>`.      |
+| Symptom                                                     | Likely cause                                                                                           |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `cssh: no Kerberos credential cache (run: kinit)`           | No cache file. Run `kinit`.                                                                            |
+| `cssh: TGT for X@REALM is expired (...) — run: kinit`       | Cache exists but the TGT has expired. Re-`kinit`.                                                      |
+| `cssh: signing failed (HTTP 403): Not authorized for ...`   | The principal you requested isn't in any group you belong to in the Cerberus config.                   |
+| `cssh: signing failed (HTTP 401): ...`                      | SPNEGO auth was rejected. Common causes: keytab kvno mismatch with the KDC, clock skew >5 min, no TGT. |
+| sshd rejects with `Certificate option "permit-pty" corrupt` | Server-side config bug — a flag-style cert extension was given a non-empty value. Fix the YAML.        |
+| ssh asks for a password                                     | The cert was issued for a different principal than the SSH login name. Use `--principals <login>`.     |
 
 If a cached cert seems wrong, the safest reset is:
 
