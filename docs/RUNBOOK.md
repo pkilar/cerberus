@@ -208,17 +208,17 @@ This is why `permissions:` in a group's `certificate_rules` should only contain 
 
 #### Recognized by stock OpenSSH
 
-| Type                | Name                      | Effect                                                                                          |
-| ------------------- | ------------------------- | ----------------------------------------------------------------------------------------------- |
-| Extension           | `permit-X11-forwarding`   | Allow `ssh -X` / `-Y`                                                                           |
-| Extension           | `permit-agent-forwarding` | Allow `ssh -A`                                                                                  |
-| Extension           | `permit-port-forwarding`  | Allow `-L`, `-R`, `-D`                                                                          |
-| Extension           | `permit-pty`              | Allow PTY allocation (required for interactive shells)                                          |
-| Extension           | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                                            |
-| Extension           | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                                            |
-| Critical option     | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only)                     |
-| Critical option     | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses                              |
-| Critical option     | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence                     |
+| Type            | Name                      | Effect                                                                      |
+| --------------- | ------------------------- | --------------------------------------------------------------------------- |
+| Extension       | `permit-X11-forwarding`   | Allow `ssh -X` / `-Y`                                                       |
+| Extension       | `permit-agent-forwarding` | Allow `ssh -A`                                                              |
+| Extension       | `permit-port-forwarding`  | Allow `-L`, `-R`, `-D`                                                      |
+| Extension       | `permit-pty`              | Allow PTY allocation (required for interactive shells)                      |
+| Extension       | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                        |
+| Extension       | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                        |
+| Critical option | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only) |
+| Critical option | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses          |
+| Critical option | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence |
 
 Anything else — including names cerberus operators add via `static_attributes:` — falls through to the "not supported" branch. That's expected and harmless.
 
