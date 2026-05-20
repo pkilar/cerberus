@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -497,5 +498,89 @@ func TestConfigValidation_MultipleGroups(t *testing.T) {
 	// Error should mention the specific group that failed
 	if err.Error() != "invalid validity duration for group 'invalid': time: invalid duration \"invalid-duration\"" {
 		t.Errorf("unexpected error message: %s", err.Error())
+	}
+}
+
+func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want []StaticAttributeWarning
+	}{
+		{
+			name: "no groups",
+			cfg:  Config{},
+			want: nil,
+		},
+		{
+			name: "all namespaced",
+			cfg: Config{
+				Groups: map[string]Group{
+					"admin": {
+						CertificateRules: CertificateRules{
+							StaticAttributes: map[string]string{
+								"team@example.com":         "platform",
+								"access-level@example.com": "prod",
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "mixed namespaced and bare across multiple groups",
+			cfg: Config{
+				Groups: map[string]Group{
+					"users": {
+						CertificateRules: CertificateRules{
+							StaticAttributes: map[string]string{
+								"tier@example.com": "gold",
+								"region":           "us-east-1",
+							},
+						},
+					},
+					"admin": {
+						CertificateRules: CertificateRules{
+							StaticAttributes: map[string]string{
+								"team":         "platform",
+								"access-level": "prod",
+							},
+						},
+					},
+					"clean": {
+						CertificateRules: CertificateRules{
+							StaticAttributes: map[string]string{
+								"env@example.com": "production",
+							},
+						},
+					},
+				},
+			},
+			// Sorted by (group, key).
+			want: []StaticAttributeWarning{
+				{Group: "admin", Key: "access-level"},
+				{Group: "admin", Key: "team"},
+				{Group: "users", Key: "region"},
+			},
+		},
+		{
+			name: "no static_attributes field set",
+			cfg: Config{
+				Groups: map[string]Group{
+					"empty": {CertificateRules: CertificateRules{}},
+				},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.Warnings()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("Warnings() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }

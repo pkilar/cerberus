@@ -4,8 +4,11 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"cerberus/messages"
@@ -160,4 +163,35 @@ func validateFlagExtensions(group, field string, m map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// StaticAttributeWarning identifies one static_attributes key that does not
+// follow the `name@domain` namespacing convention from PROTOCOL.certkeys §4.
+type StaticAttributeWarning struct {
+	Group string
+	Key   string
+}
+
+// Warnings returns non-fatal configuration issues discovered after Validate
+// has passed. Currently it surfaces static_attributes keys that lack the
+// `name@domain` namespace — unnamespaced names collide if OpenSSH later
+// standardises an extension with the same bare name. Reported as a warning
+// rather than a hard error so operators can migrate existing deployments
+// gradually. Results are sorted by (group, key) for stable output.
+func (c *Config) Warnings() []StaticAttributeWarning {
+	var warns []StaticAttributeWarning
+	for name, group := range c.Groups {
+		for k := range group.CertificateRules.StaticAttributes {
+			if !strings.Contains(k, "@") {
+				warns = append(warns, StaticAttributeWarning{Group: name, Key: k})
+			}
+		}
+	}
+	slices.SortFunc(warns, func(a, b StaticAttributeWarning) int {
+		if g := cmp.Compare(a.Group, b.Group); g != 0 {
+			return g
+		}
+		return cmp.Compare(a.Key, b.Key)
+	})
+	return warns
 }

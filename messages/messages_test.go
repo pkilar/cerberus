@@ -17,8 +17,8 @@ func TestSshSigningRequest_JSON(t *testing.T) {
 			"permit-user-rc": "",
 		},
 		CustomAttributes: map[string]string{
-			"environment":     "production",
-			"requesting_user": "admin@example.com",
+			"environment@example.com":     "production",
+			"requesting_user@example.com": "admin@example.com",
 		},
 	}
 
@@ -263,7 +263,7 @@ func BenchmarkSshSigningRequest_Marshal(b *testing.B) {
 			"permit-pty": "",
 		},
 		CustomAttributes: map[string]string{
-			"environment": "test",
+			"environment@example.com": "test",
 		},
 	}
 
@@ -285,7 +285,7 @@ func BenchmarkSshSigningRequest_Unmarshal(b *testing.B) {
 			"permit-pty": "",
 		},
 		CustomAttributes: map[string]string{
-			"environment": "test",
+			"environment@example.com": "test",
 		},
 	}
 

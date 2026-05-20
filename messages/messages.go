@@ -68,12 +68,17 @@ type SigningResponse struct {
 }
 
 // EnclaveSigningRequest is the structure for JSON request being sent to the Nitro Enclave.
+// The three map fields share a serialization policy: an empty or nil map is
+// elided from the wire payload (omitempty) rather than encoded as "null", so a
+// group with no permissions / static_attributes / critical_options produces
+// the same compact shape. The signer treats a missing field as an empty map
+// (maps.Copy from nil is a no-op) and the overlap check ranges nil safely.
 type EnclaveSigningRequest struct {
 	SSHKey           string            `json:"ssh_key"`
 	KeyID            string            `json:"key_id"`
 	Principals       []string          `json:"principals"`
 	Validity         string            `json:"validity"`
-	Permissions      map[string]string `json:"permissions"`
-	CustomAttributes map[string]string `json:"custom_attributes"`
+	Permissions      map[string]string `json:"permissions,omitempty"`
+	CustomAttributes map[string]string `json:"custom_attributes,omitempty"`
 	CriticalOptions  map[string]string `json:"critical_options,omitempty"`
 }
