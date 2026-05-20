@@ -120,13 +120,16 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 
 ### ssh-cert-api Environment Variables
 
-| Variable               | Default               | Description                          |
-| ---------------------- | --------------------- | ------------------------------------ |
-| `CONFIG_PATH`          | `configs/config.yaml` | Path to authorization config file    |
-| `KERBEROS_KEYTAB_PATH` | —                     | Path to Kerberos keytab file         |
-| `AWS_REGION`           | `us-east-1`           | AWS region for KMS operations        |
-| `ENCLAVE_VSOCK_PORT`   | `5000`                | VSOCK port for enclave communication |
-| `DEBUG`                | `false`               | Enable debug-level logging           |
+| Variable               | Default               | Description                                                                                               |
+| ---------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `CONFIG_PATH`          | `configs/config.yaml` | Path to authorization config file                                                                         |
+| `KERBEROS_KEYTAB_PATH` | —                     | Path to Kerberos keytab file. Must be mode `0600` or `0400`; group/world-readable keytabs refuse startup. |
+| `AWS_REGION`           | `us-east-1`           | AWS region for KMS operations                                                                             |
+| `ENCLAVE_VSOCK_PORT`   | `5000`                | VSOCK port for enclave communication                                                                      |
+| `RATE_LIMIT_RPS`       | `5`                   | Per-principal `/sign` rate limit, requests per second                                                     |
+| `RATE_LIMIT_BURST`     | `10`                  | Per-principal burst allowance                                                                             |
+| `LOG_FORMAT`           | `text`                | `json` emits structured slog JSON for log aggregation; anything else emits human-readable text            |
+| `DEBUG`                | `false`               | Enable debug-level logging                                                                                |
 
 ### ssh-cert-signer Environment Variables
 
@@ -180,7 +183,7 @@ groups:
         source-address: "10.20.30.0/24"
 ```
 
-**Authorization flow**: The API matches the authenticated Kerberos principal against group membership, then enforces the **first matching** group's `certificate_rules`.
+**Authorization flow**: The API matches the authenticated Kerberos principal against group membership. When a user belongs to multiple groups, the API picks the **first group in alphabetical order by group name** whose `allowed_principals` cover **every** principal in the request. Principals are *not* combined across groups within a single request — pick the right group, or the request is rejected with `403`. Enforcement is in `ssh-cert-api/internal/authz/casbin.go`.
 
 ### Validation Constraints
 
@@ -515,21 +518,27 @@ This launches the enclave with `--debug-mode --attach-console` for live log outp
 GET /health
 ```
 
-- **No authentication required**
-- Returns HTTP 200 with `{"status": "healthy"}` when the API service is running
-- Does **not** verify enclave connectivity (it only confirms the API process is alive)
+- **No authentication required.**
+- Reflects the cached result of a background enclave probe — a `HealthMonitor` goroutine pings the signer every 5 seconds (2-second probe timeout) and the handler reads the most recent snapshot. The request path **never** opens a VSOCK connection.
+- Returns HTTP 200 with `{"status": "healthy"}` when the most recent probe succeeded and the signer reports a loaded CA key.
+- Returns HTTP 503 with a JSON body of `{"status": "unhealthy", "reason": "..."}` for these failure modes:
+  - `"starting up"` — no probe has completed yet.
+  - `"health check stale"` — the cached snapshot is older than 30 seconds (the monitor goroutine is likely stuck or the enclave is unreachable).
+  - `"enclave unreachable"` — the last probe failed (VSOCK dial error, timeout, or signer side closed).
+  - `"signer not loaded"` — the enclave is reachable but reports the CA key isn't loaded yet.
+- The caching exists because the signer caps in-flight VSOCK connections at 32 (a shared semaphore covering `/sign` and health probes). Inline `/health` probing would let unauthenticated callers starve signing capacity, so **don't replace this with on-demand probing**.
 
 ### Monitoring Recommendations
 
-| Check                    | Method                                          | Frequency |
-| ------------------------ | ----------------------------------------------- | --------- |
-| API process alive        | `GET /health` → HTTP 200                        | Every 30s |
-| Enclave running          | `nitro-cli describe-enclaves` → State = RUNNING | Every 60s |
-| End-to-end signing       | Test sign request with a service account        | Every 5m  |
-| TLS certificate expiry   | Check cert NotAfter date                        | Daily     |
-| Kerberos keytab validity | `klist -k /etc/krb5.keytab`                     | Daily     |
-| KMS key accessibility    | `aws kms describe-key`                          | Every 5m  |
-| Disk space               | Standard OS monitoring                          | Every 5m  |
+| Check                    | Method                                                                                                                | Frequency |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------- | --------- |
+| API + enclave health     | `GET /health` → HTTP 200 (`status: healthy`); 503 includes a `reason` field — see [Health Endpoint](#health-endpoint) | Every 30s |
+| Enclave process running  | `nitro-cli describe-enclaves` → State = RUNNING                                                                       | Every 60s |
+| End-to-end signing       | Test sign request with a service account                                                                              | Every 5m  |
+| TLS certificate expiry   | Check cert NotAfter date                                                                                              | Daily     |
+| Kerberos keytab validity | `klist -k /etc/krb5.keytab`                                                                                           | Daily     |
+| KMS key accessibility    | `aws kms describe-key`                                                                                                | Every 5m  |
+| Disk space               | Standard OS monitoring                                                                                                | Every 5m  |
 
 ### Key Log Messages
 
@@ -683,11 +692,11 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 
 ### Authorization Failures
 
-| Error                                                | Likely Cause                                        | Resolution                                                                               |
-| ---------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `Not authorized for requested principals` (HTTP 403) | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                    |
-| User gets wrong permissions                          | User matches the wrong group                        | Groups are matched in order — the **first match** wins. Reorder groups in config.yaml    |
-| User not found in any group                          | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group |
+| Error                                                | Likely Cause                                        | Resolution                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Not authorized for requested principals` (HTTP 403) | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                               |
+| User gets wrong permissions                          | User matches the wrong group                        | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request. |
+| User not found in any group                          | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                            |
 
 ### VSOCK / KMS Proxy Issues
 
@@ -769,7 +778,8 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - All signing requests require **Kerberos/SPNEGO authentication**.
 - Authorization is **group-based** with per-group certificate rules.
 - Principals support **wildcard matching** — use carefully.
-- The first matching group wins — order groups from most to least restrictive.
+- When a user is in multiple groups, the **first group alphabetically by name** whose `allowed_principals` cover the request wins. Reordering YAML keys won't change this — rename groups if you need a different winner.
+- Per-principal rate limiting on `/sign` is on by default (`RATE_LIMIT_RPS=5`, `RATE_LIMIT_BURST=10`). Tune via env vars if needed.
 
 ### Certificate Safety
 
@@ -852,11 +862,17 @@ You must `cd` into the correct directory before running `go test`, `go build`, o
 
 ### GitHub Actions
 
-The workflow at `.github/workflows/go.yml` runs on every push and pull request to `main`:
+The workflow at `.github/workflows/go.yml` runs four matrix jobs on every push and pull request to `main`. Each Go-version job picks the toolchain from the module's `go.mod` (currently 1.26):
 
-1. **Build**: Compiles all Go modules with `go build -v ./...`
-2. **Test**: Runs all tests with `go test -v ./...`
-3. **Go version**: 1.26
+1. **Build & test** (per module: root, `ssh-cert-api`, `ssh-cert-signer`)
+   - `go build -v ./...`
+   - `go mod tidy` drift check (fails if checked-in `go.sum` is stale)
+   - `go test -race -shuffle=on -count=1 ./...`
+2. **golangci-lint** (per module) — uses the project's `.golangci.yml` (bodyclose, contextcheck, errorlint, misspell, nilerr, unconvert, plus `gofmt`/`goimports`)
+3. **govulncheck** (per module) — `golang.org/x/vuln/cmd/govulncheck@latest`
+4. **gosec** — `github.com/securego/gosec/v2@latest` at `-severity=medium`, run separately on root, `ssh-cert-api`, and `ssh-cert-signer`
+
+`gosec`, `golangci-lint`, and `govulncheck` are installed by the workflow (`go install`) rather than tracked as Go 1.24+ tool dependencies; this keeps them out of `go.sum` and shrinks the supply-chain surface of a signing service.
 
 ### Deployment Pipeline (Manual)
 
@@ -888,9 +904,11 @@ Request:
 Response (success):
 ```json
 {
-  "signed_certificate": "ssh-rsa-cert-v01@openssh.com AAAA..."
+  "signed_key": "ssh-rsa-cert-v01@openssh.com AAAA..."
 }
 ```
+
+The field name is `signed_key` — defined by `messages.SigningResponse` (`messages/messages.go`) and validated by `messages/messages_test.go`. Don't rename in docs; this is the wire contract shared with stress clients and any future SDK.
 
 ### SSH Certificate Fields
 
@@ -946,17 +964,17 @@ ssh ec2-user@server.example.com
 
 **RPM install** (recommended):
 
-| File             | Location                                        | Notes                |
-| ---------------- | ----------------------------------------------- | -------------------- |
-| API binary       | `/usr/bin/ssh-cert-api`                         | —                    |
-| Signer binary    | `/usr/bin/ssh-cert-signer`                      | —                    |
-| API config       | `/etc/cerberus/config.yaml`                     | Copy from `.example` |
-| API sysconfig    | `/etc/sysconfig/cerberus-api`                   | Env vars             |
-| Signer sysconfig | `/etc/sysconfig/cerberus-signer`                | Enclave params       |
-| Kerberos keytab  | `/etc/cerberus/krb5.keytab`                     | —                    |
-| Enclave wrapper  | `/usr/libexec/cerberus/run-enclave.sh`          | Used by systemd      |
-| EIF image        | `/usr/share/cerberus/ssh-cert-signer-amd64.eif` | Place after build    |
-| Log directory    | `/var/log/cerberus/`                            | Owned by `cerberus`  |
+| File             | Location                                  | Notes                                                                                                                              |
+| ---------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| API binary       | `/usr/bin/ssh-cert-api`                   | —                                                                                                                                  |
+| Signer binary    | `/usr/bin/ssh-cert-signer`                | —                                                                                                                                  |
+| API config       | `/etc/cerberus/config.yaml`               | Copy from `.example`                                                                                                               |
+| API sysconfig    | `/etc/sysconfig/cerberus-api`             | Env vars                                                                                                                           |
+| Signer sysconfig | `/etc/sysconfig/cerberus-signer`          | Enclave params                                                                                                                     |
+| Kerberos keytab  | `/etc/cerberus/krb5.keytab`               | —                                                                                                                                  |
+| Enclave wrapper  | `/usr/libexec/cerberus/run-enclave.sh`    | Used by systemd                                                                                                                    |
+| EIF image        | `/usr/share/cerberus/ssh-cert-signer.eif` | Place after build; **rename on copy** — `EIF_PATH` is arch-less. The host RPM is per-arch, so only one EIF arch is valid per host. |
+| Log directory    | `/var/log/cerberus/`                      | Owned by `cerberus`                                                                                                                |
 
 **Manual install**:
 

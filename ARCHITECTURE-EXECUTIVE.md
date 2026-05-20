@@ -21,13 +21,13 @@ Cerberus is a highly secure SSH Certificate Authority (CA) system designed for e
 
 ### Business Impact
 
-| Metric                   | Traditional SSH Keys             | Cerberus Solution                   |
-| ------------------------ | -------------------------------- | ----------------------------------- |
-| Key Compromise Risk      | High (keys persist indefinitely) | Minimal (time-limited certificates) |
+| Metric                   | Traditional SSH Keys             | Cerberus Solution                                                 |
+| ------------------------ | -------------------------------- | ----------------------------------------------------------------- |
+| Key Compromise Risk      | High (keys persist indefinitely) | Minimal (time-limited certificates)                               |
 | Access Revocation Time   | Hours to days                    | Reduced (short-lived certificates; removal stops future issuance) |
-| Audit Trail Completeness | Partial (login logs only)        | Issuance-level (certificate signing events logged)               |
-| Administrative Overhead  | High (manual key distribution)   | Low (automated issuance)            |
-| Compliance Posture       | Manual controls                  | Automated policy enforcement        |
+| Audit Trail Completeness | Partial (login logs only)        | Issuance-level (certificate signing events logged)                |
+| Administrative Overhead  | High (manual key distribution)   | Low (automated issuance)                                          |
+| Compliance Posture       | Manual controls                  | Automated policy enforcement                                      |
 
 ---
 
