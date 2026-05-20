@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"time"
 
 	"cerberus/messages"
@@ -191,12 +190,8 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create enclave request using config-based attributes
-	// Merge static attributes from config with dynamic audit attributes
-	customAttributes := make(map[string]string)
-	maps.Copy(customAttributes, result.CertificateRules.StaticAttributes)
-	// Add audit trail attributes
-	customAttributes["issued_at"] = strconv.FormatInt(time.Now().Unix(), 10)
+	// Static attributes from config become custom extensions on the cert.
+	customAttributes := maps.Clone(result.CertificateRules.StaticAttributes)
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,

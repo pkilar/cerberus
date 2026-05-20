@@ -271,7 +271,6 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 		},
 		CustomAttributes: map[string]string{
 			"environment": "test",
-			"issued_at":   fmt.Sprintf("%d", time.Now().Unix()),
 		},
 		CriticalOptions: map[string]string{
 			"source-address": "192.168.1.0/24",
