@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	"cerberus/messages"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -99,9 +101,14 @@ func (c *Config) Validate() error {
 		}
 
 		// Try parsing the duration to catch errors early.
-		_, err := time.ParseDuration(rules.Validity)
+		d, err := time.ParseDuration(rules.Validity)
 		if err != nil {
 			return fmt.Errorf("invalid validity duration for group '%s': %w", name, err)
+		}
+		// The enclave enforces the same cap; catching it here turns a silent
+		// per-request rejection at runtime into a loud startup failure.
+		if d > messages.MaxValidity {
+			return fmt.Errorf("group '%s' validity %v exceeds maximum allowed %v", name, d, messages.MaxValidity)
 		}
 
 		if len(rules.AllowedPrincipals) == 0 {

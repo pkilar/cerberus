@@ -145,8 +145,15 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 
 		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil && !errors.Is(err, net.ErrClosed) {
+			err := scanner.Err()
+			if err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Printf("ERROR: scanner.Scan() failed: %s", err)
+			}
+			// Turn an oversize request into a structured reply so the host
+			// sees "request too large" instead of a bare connection drop.
+			if errors.Is(err, bufio.ErrTooLong) {
+				resp := createErrorResponse(fmt.Errorf("request exceeds %d bytes", maxRequestBytes))
+				_ = sendResponse(conn, resp)
 			}
 			return
 		}

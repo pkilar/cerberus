@@ -52,10 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Kerberos authenticator: %v", err)
 	}
-	enclaveClient, err := enclave.NewClient()
-	if err != nil {
-		log.Fatalf("Failed to initialize enclave client: %v", err)
-	}
+	enclaveClient := enclave.New()
 	defer func() { _ = enclaveClient.Close() }()
 
 	// --- 3. Start VSOCK Proxy for AWS Services ---

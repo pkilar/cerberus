@@ -3,10 +3,18 @@
 // Every request/response crossing VSOCK is encoded as one of these types.
 package messages
 
+import "time"
+
 // MaxPrincipals is the maximum number of SSH principals accepted in a single
 // signing request. Enforced by the host (before authorization, to bound the
 // per-request Casbin work) and the enclave (in input validation).
 const MaxPrincipals = 100
+
+// MaxValidity caps the lifetime of any issued certificate. The enclave
+// rejects requests exceeding this, and config.Validate refuses configs whose
+// per-group validity exceeds it — so a misconfigured group fails at startup
+// instead of silently denying every signing request at runtime.
+const MaxValidity = 24 * time.Hour
 
 // These messages define the API between the ssh-cert-signer and ssh-cert-api.
 // Only one of each field is expected to be set at any given time.
