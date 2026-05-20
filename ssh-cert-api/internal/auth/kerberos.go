@@ -22,6 +22,10 @@ import (
 	"github.com/jcmturner/gokrb5/v8/spnego"
 )
 
+// errNotNegTokenInit is returned by parseSPNEGOAPReq when the client sent a
+// NegTokenResp continuation token where an initial token was expected.
+var errNotNegTokenInit = errors.New("expected NegTokenInit, got NegTokenResp")
+
 type Authenticator interface {
 	AuthenticateRequest(r *http.Request) (*AuthenticatedUser, error)
 }
@@ -90,29 +94,12 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 	// replayable authenticator within the clock-skew window.
 	logging.Debug("Kerberos authentication attempted (keytab entries=%d, token_len=%d)", len(k.keytab.Entries), len(spnegoToken))
 
-	isInit, negToken, err := spnego.UnmarshalNegToken(spnegoToken)
+	apReq, err := parseSPNEGOAPReq(spnegoToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse SPNEGO token: %w", err)
-	}
-	if !isInit {
-		return nil, fmt.Errorf("expected NegTokenInit, got NegTokenResp")
+		return nil, err
 	}
 
-	negInit, ok := negToken.(spnego.NegTokenInit)
-	if !ok {
-		return nil, fmt.Errorf("failed to cast to NegTokenInit")
-	}
-
-	if len(negInit.MechTokenBytes) == 0 {
-		return nil, fmt.Errorf("no mechanism token in SPNEGO")
-	}
-
-	var apReq messages.APReq
-	if err := apReq.Unmarshal(negInit.MechTokenBytes); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal AP-REQ: %w", err)
-	}
-
-	valid, creds, err := service.VerifyAPREQ(&apReq, k.settings)
+	valid, creds, err := service.VerifyAPREQ(apReq, k.settings)
 	if err != nil {
 		return nil, fmt.Errorf("AP-REQ verification failed: %w", err)
 	}
@@ -139,6 +126,41 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		Username: username,
 		Realm:    realm,
 	}, nil
+}
+
+// parseSPNEGOAPReq decodes the bytes from an HTTP `Authorization: Negotiate`
+// header and returns the embedded Kerberos AP-REQ.
+//
+// Standard Kerberos clients (MIT GSSAPI, Heimdal, curl --negotiate, browsers,
+// requests-kerberos) send a wire-format SPNEGO token: a GSS-API
+// InitialContextToken — `[APPLICATION 0] IMPLICIT SEQUENCE { mechOID,
+// NegTokenInit }` per RFC 2743 / RFC 4178 — whose inner mechToken is itself a
+// GSS-API KRB5 mech token wrapping the AP-REQ. The naive
+// `spnego.UnmarshalNegToken` only accepts a bare `NegotiationToken` CHOICE,
+// so it misreads the outer `[APPLICATION 0]` as a `[CONTEXT 0]` (both have
+// tag number 0; only the class differs) and then fails to parse the SPNEGO
+// OID as a NegTokenInit SEQUENCE. Use `spnego.SPNEGOToken.Unmarshal` and
+// `spnego.KRB5Token.Unmarshal` which strip both wrappers.
+func parseSPNEGOAPReq(token []byte) (*messages.APReq, error) {
+	var st spnego.SPNEGOToken
+	if err := st.Unmarshal(token); err != nil {
+		return nil, fmt.Errorf("failed to parse SPNEGO token: %w", err)
+	}
+	if !st.Init {
+		return nil, errNotNegTokenInit
+	}
+	if len(st.NegTokenInit.MechTokenBytes) == 0 {
+		return nil, fmt.Errorf("no mechanism token in SPNEGO")
+	}
+
+	var kt spnego.KRB5Token
+	if err := kt.Unmarshal(st.NegTokenInit.MechTokenBytes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal Kerberos mech token: %w", err)
+	}
+	if !kt.IsAPReq() {
+		return nil, fmt.Errorf("mech token is not a Kerberos AP-REQ")
+	}
+	return &kt.APReq, nil
 }
 
 // checkKeytabPermissions refuses to proceed if the keytab file is readable by
