@@ -79,15 +79,15 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 	if !ok {
 		return nil, fmt.Errorf("authorization header must use Negotiate scheme")
 	}
-	logging.Debug("Base64 token: %s", token)
 	spnegoToken, err := base64.StdEncoding.DecodeString(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode SPNEGO token: %w", err)
 	}
 
-	logging.Debug("Kerberos authentication attempted with keytab containing %d entries", len(k.keytab.Entries))
-	logging.Debug("SPNEGO token length: %d bytes", len(spnegoToken))
-	logging.Debug("SPNEGO token (first 32 bytes): %x", spnegoToken[:min(32, len(spnegoToken))])
+	// Never log the token bytes themselves — even at DEBUG, even truncated,
+	// the GSS-API wrapper plus AP-REQ contains principal, service, and a
+	// replayable authenticator within the clock-skew window.
+	logging.Debug("Kerberos authentication attempted (keytab entries=%d, token_len=%d)", len(k.keytab.Entries), len(spnegoToken))
 
 	isInit, negToken, err := spnego.UnmarshalNegToken(spnegoToken)
 	if err != nil {
@@ -116,13 +116,17 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		return nil, fmt.Errorf("AP-REQ verification failed: %w", err)
 	}
 
-	principal := creds.CName().PrincipalNameString()
-	if creds.Realm() != "" {
-		principal = fmt.Sprintf("%s@%s", principal, creds.Realm())
+	// Require a non-empty realm. Falling back to an empty realm silently
+	// produces a "user@" key string that won't match any group in config.yaml
+	// and would just deny access without a clear reason — fail loudly here
+	// so the cause is in the auth log.
+	username := creds.CName().PrincipalNameString()
+	realm := creds.Realm()
+	if realm == "" {
+		return nil, fmt.Errorf("kerberos credential has no realm")
 	}
 
-	username, realm, _ := strings.Cut(principal, "@")
-	slog.Info("auth.success", "principal", principal)
+	slog.Info("auth.success", "principal", username+"@"+realm)
 
 	return &AuthenticatedUser{
 		Username: username,

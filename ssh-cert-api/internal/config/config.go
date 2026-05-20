@@ -51,7 +51,10 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse YAML config: %w", err)
 	}
 
-	// Validate the loaded configuration to ensure it's usable.
+	// Fill in defaults before validating; Validate is read-only so callers
+	// who construct a Config directly (tests) can rely on it not mutating.
+	cfg.applyDefaults()
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
@@ -59,7 +62,23 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate checks the configuration for logical errors after parsing.
+// applyDefaults sets fields that have a sensible fallback when omitted from
+// the YAML. Defaults are operational (Listen address, TLS file paths); fields
+// that must be supplied (keytab path, groups) are not defaulted.
+func (c *Config) applyDefaults() {
+	if c.Listen == "" {
+		c.Listen = ":8443"
+	}
+	if c.TlsCert == "" {
+		c.TlsCert = "cert.pem"
+	}
+	if c.TlsKey == "" {
+		c.TlsKey = "key.pem"
+	}
+}
+
+// Validate checks the configuration for logical errors. It does not mutate
+// the receiver — call applyDefaults first if you want defaults filled in.
 func (c *Config) Validate() error {
 	if len(c.Groups) == 0 {
 		return fmt.Errorf("no groups defined in the configuration")
@@ -67,17 +86,6 @@ func (c *Config) Validate() error {
 
 	if c.KeytabPath == "" {
 		return fmt.Errorf("keytab_path must be specified in the configuration")
-	}
-
-	if c.Listen == "" {
-		c.Listen = ":8443"
-	}
-
-	if c.TlsCert == "" {
-		c.TlsCert = "cert.pem"
-	}
-	if c.TlsKey == "" {
-		c.TlsKey = "key.pem"
 	}
 
 	for name, group := range c.Groups {

@@ -5,10 +5,12 @@
 package cerberus
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -74,9 +76,16 @@ func (s *MockVSockServer) acceptConnections() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			// Closed listener (clean Stop) or any other failure ends the loop;
-			// retrying on a half-broken listener just spins.
-			return
+			if errors.Is(err, net.ErrClosed) {
+				// Clean Stop closed the listener — normal termination.
+				return
+			}
+			// Match production behavior: don't exit on transient errors,
+			// just back off briefly. Tests have no logger here, but
+			// returning on any error would hide regressions where the
+			// listener spuriously errors mid-test.
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
 		go s.handleConnection(conn)
 	}
@@ -87,8 +96,17 @@ func (s *MockVSockServer) handleConnection(conn net.Conn) {
 
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
+	// Mirror the production enclave's framing: bufio.Scanner with a 256 KiB
+	// cap, newline-delimited JSON. Using json.NewDecoder.Decode would silently
+	// accept oversize requests and miss regressions in the wire-protocol cap.
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	if !scanner.Scan() {
+		s.writeErrorResponse(conn, "Invalid request format")
+		return
+	}
 	var req messages.Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
 		s.writeErrorResponse(conn, "Invalid request format")
 		return
 	}
@@ -279,17 +297,16 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 		t.Fatalf("failed to send request: %v", err)
 	}
 
-	// Read response
+	// Mirror the production host client: bufio.NewReader.ReadBytes('\n').
+	// A single conn.Read works on localhost (TCP coalesces) but would short-
+	// read on any path with MTU-sensitive framing — exactly the regression we
+	// want this test to catch.
 	var response messages.Response
-	responseBytes := make([]byte, 4096)
-	n, err := conn.Read(responseBytes)
+	responseBytes, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("failed to read response: %v", err)
 	}
-
-	// Parse response (remove trailing newline)
-	responseData := bytes.TrimSpace(responseBytes[:n])
-	if err := json.Unmarshal(responseData, &response); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(responseBytes), &response); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 

@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -52,6 +54,10 @@ var (
 	// attestProvider is initialized in main before any goroutines spawn,
 	// so the goroutine-spawn happens-before edge makes plain access safe.
 	attestProvider *attestation.Provider
+
+	// errUnexpectedCommand is returned when a Request arrives with no
+	// recognized variant set. Named so log parsing can match it.
+	errUnexpectedCommand = errors.New("unexpected command")
 )
 
 func main() {
@@ -73,11 +79,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: failed to listen on vsock port %d: %v", constants.EnclaveListeningPort, err)
 	}
-	defer func() { _ = listener.Close() }()
+	// Close the listener exactly once across the two paths that need to do
+	// it: AfterFunc closes early on ctx cancellation (to unblock Accept), and
+	// the deferred wrapper closes on normal return.
+	var listenerCloseOnce sync.Once
+	closeListener := func() { listenerCloseOnce.Do(func() { _ = listener.Close() }) }
+	defer closeListener()
+	context.AfterFunc(ctx, closeListener)
 	log.Printf("Listening on vsock port %d...", constants.EnclaveListeningPort)
-
-	// Close the listener when ctx is cancelled to unblock Accept.
-	context.AfterFunc(ctx, func() { _ = listener.Close() })
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConcurrentConnections)
@@ -154,22 +163,46 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// processRequest handles a single request and returns the response.
-func processRequest(ctx context.Context, requestBytes []byte) messages.Response {
-	logging.Debug("recv: %s", string(requestBytes))
+// processRequest handles a single request and returns the response. It
+// recovers from panics so a single buggy handler doesn't drop the connection
+// without a structured log, and redacts the parsed request before debug
+// logging so LoadKeySigner credentials never reach stderr.
+func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Response) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("signer.panic", "panic", p, "stack", string(debug.Stack()))
+			resp = createErrorResponse(fmt.Errorf("internal error"))
+		}
+	}()
 
 	var req messages.Request
 	if err := json.Unmarshal(requestBytes, &req); err != nil {
+		// Don't log requestBytes — they may carry unredactable secret material
+		// for a payload that just happens to fail JSON parsing.
+		logging.Debug("recv: <unparseable JSON: %v>", err)
 		return createErrorResponse(fmt.Errorf("json.Unmarshal failed: %w", err))
 	}
+	logging.Debug("recv: %s", messages.RedactedJSON(req))
 
 	switch {
 	case req.LoadKeySigner != nil:
 		return handleLoadKeySigner(ctx, *req.LoadKeySigner)
 	case req.SignSshKey != nil:
 		return handleSignSshKey(ctx, *req.SignSshKey)
+	case req.Ping != nil:
+		return handlePing()
 	default:
-		return createErrorResponse(fmt.Errorf("unexpected command"))
+		return createErrorResponse(errUnexpectedCommand)
+	}
+}
+
+// handlePing returns a Pong reporting whether the CA signer has been loaded.
+// Used by the host's /health endpoint to surface enclave health to a load
+// balancer; intentionally does no KMS or crypto work.
+func handlePing() messages.Response {
+	loaded := caSigner.Load() != nil
+	return messages.Response{
+		Pong: &messages.PingResponse{SignerLoaded: loaded},
 	}
 }
 

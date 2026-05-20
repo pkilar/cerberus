@@ -138,6 +138,18 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 		log.Println("Successfully decrypted CA key with KMS (non-attested)")
 	}
 
+	// Best-effort zero of the plaintext key buffer once parsing has consumed
+	// it. ssh.ParsePrivateKey is documented to copy into independent big.Int
+	// allocations rather than retain the input slice, so clearing here doesn't
+	// disturb the returned Signer. We also zero the SDK's response buffers for
+	// the same defense-in-depth reason; the SDK may retain references inside,
+	// but anything we can clear shrinks the heap-scan attack surface.
+	defer func() {
+		clear(plaintextKey)
+		clear(decryptOutput.Plaintext)
+		clear(decryptOutput.CiphertextForRecipient)
+	}()
+
 	// Parse the decrypted private key
 	signer, err := ssh.ParsePrivateKey(plaintextKey)
 	if err != nil {

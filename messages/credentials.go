@@ -1,6 +1,9 @@
 package messages
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Credentials struct as returned by
 // http://169.254.169.254/latest/meta-data/iam/security-credentials/<iam role>
@@ -37,4 +40,20 @@ func (c Credentials) Redacted() Credentials {
 func (c Credentials) String() string {
 	return fmt.Sprintf("{AccessKeyId: %s, SecretAccessKey: %s, Token: %s}",
 		c.AccessKeyId, redact(c.SecretAccessKey), redact(c.Token))
+}
+
+// RedactedJSON returns r marshalled to JSON with sensitive fields replaced by
+// placeholders. Use this — never bare json.Marshal — when logging request
+// bodies that may cross the LoadKeySigner path, which carries AWS credentials.
+func RedactedJSON(r Request) string {
+	if r.LoadKeySigner != nil {
+		red := *r.LoadKeySigner
+		red.Credentials = red.Credentials.Redacted()
+		r.LoadKeySigner = &red
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
 }
