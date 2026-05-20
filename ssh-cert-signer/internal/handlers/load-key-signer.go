@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -163,7 +164,10 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 // document. Defaults to true when /dev/nsm is present (i.e. running inside a Nitro
 // Enclave). REQUIRE_ATTESTATION=true|false overrides the auto-detection.
 func attestationRequired() bool {
-	switch os.Getenv("REQUIRE_ATTESTATION") {
+	// Case-insensitive so REQUIRE_ATTESTATION=True / =TRUE / =Yes are honored.
+	// Misreading these as "fall through to auto-detect" silently disables a
+	// security-critical setting on hosts without /dev/nsm.
+	switch strings.ToLower(os.Getenv("REQUIRE_ATTESTATION")) {
 	case "true", "1", "yes":
 		return true
 	case "false", "0", "no":

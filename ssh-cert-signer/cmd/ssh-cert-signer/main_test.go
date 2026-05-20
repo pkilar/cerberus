@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -16,41 +15,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
-
-// Mock connection for testing
-type MockConn struct {
-	readData      []byte
-	writeData     []byte
-	readIndex     int
-	closed        bool
-	readDeadline  time.Time
-	writeDeadline time.Time
-}
-
-func (m *MockConn) Read(b []byte) (n int, err error) {
-	if m.readIndex >= len(m.readData) {
-		return 0, fmt.Errorf("EOF")
-	}
-	n = copy(b, m.readData[m.readIndex:])
-	m.readIndex += n
-	return n, nil
-}
-
-func (m *MockConn) Write(b []byte) (n int, err error) {
-	m.writeData = append(m.writeData, b...)
-	return len(b), nil
-}
-
-func (m *MockConn) Close() error {
-	m.closed = true
-	return nil
-}
-
-func (m *MockConn) LocalAddr() net.Addr                { return nil }
-func (m *MockConn) RemoteAddr() net.Addr               { return nil }
-func (m *MockConn) SetDeadline(t time.Time) error      { return nil }
-func (m *MockConn) SetReadDeadline(t time.Time) error  { m.readDeadline = t; return nil }
-func (m *MockConn) SetWriteDeadline(t time.Time) error { m.writeDeadline = t; return nil }
 
 // Helper function to create a test SSH signer
 func createTestSigner(t *testing.T) ssh.Signer {
@@ -236,15 +200,6 @@ func TestSignPublicKey(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestHandleConnectionIntegration(t *testing.T) {
-	// This test is skipped by default as it requires proper connection setup
-	// and would need to mock the entire VSOCK infrastructure
-	t.Skip("Integration test - requires full VSOCK setup")
-
-	// Integration tests would go here to test the actual handleConnection function
-	// with proper VSOCK connections and full message flow
 }
 
 func TestResponseSerialization(t *testing.T) {

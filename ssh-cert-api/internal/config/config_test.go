@@ -255,6 +255,22 @@ func TestValidate(t *testing.T) {
 			},
 			expectError: true,
 		},
+		{
+			name: "validity exceeds 24h max",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "25h",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {

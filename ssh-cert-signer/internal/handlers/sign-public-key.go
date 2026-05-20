@@ -19,8 +19,6 @@ import (
 )
 
 const (
-	// Maximum validity duration for certificates (24 hours)
-	maxValidityDuration = 24 * time.Hour
 	// Clock skew allowance in seconds
 	clockSkewSeconds = 300 // 5 minutes
 	// Nonce size in bytes
@@ -63,8 +61,8 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 	}
 
 	// Security check: limit validity duration
-	if validityDuration > maxValidityDuration {
-		return nil, fmt.Errorf("validity duration %v exceeds maximum allowed %v", validityDuration, maxValidityDuration)
+	if validityDuration > messages.MaxValidity {
+		return nil, fmt.Errorf("validity duration %v exceeds maximum allowed %v", validityDuration, messages.MaxValidity)
 	}
 
 	// Generate cryptographically secure nonce

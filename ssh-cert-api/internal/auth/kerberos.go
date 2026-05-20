@@ -7,6 +7,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -112,8 +113,14 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 	}
 
 	valid, creds, err := service.VerifyAPREQ(&apReq, k.settings)
-	if err != nil || !valid {
+	if err != nil {
 		return nil, fmt.Errorf("AP-REQ verification failed: %w", err)
+	}
+	if !valid {
+		// VerifyAPREQ returns (false, _, nil) on legitimate rejections such
+		// as replay-cache hits or expired authenticators — wrapping a nil
+		// err with %w renders as "<nil>" and obscures the cause.
+		return nil, errors.New("AP-REQ verification failed: token rejected")
 	}
 
 	// Require a non-empty realm. Falling back to an empty realm silently
@@ -126,7 +133,7 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		return nil, fmt.Errorf("kerberos credential has no realm")
 	}
 
-	slog.Info("auth.success", "principal", username+"@"+realm)
+	slog.Info("auth.success", "principal", username+"@"+realm, "remote_addr", r.RemoteAddr)
 
 	return &AuthenticatedUser{
 		Username: username,

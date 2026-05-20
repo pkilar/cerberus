@@ -136,8 +136,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSignRequestBytes)
 	var req messages.SigningRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			outcome = outcomeTooLarge
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
@@ -171,7 +170,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	principal := user.Username + "@" + user.Realm
-	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals)
+	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)
 
 	// Check authorization and get user's group configuration
 	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
@@ -228,6 +227,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		"principal", principal,
 		"group", result.GroupName,
 		"granted_principals", result.CertificateRules.AllowedPrincipals,
+		"remote_addr", r.RemoteAddr,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

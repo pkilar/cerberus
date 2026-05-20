@@ -29,20 +29,19 @@ type Signer interface {
 	Close() error
 }
 
-var _ Signer = (*Client)(nil)
+// vsockSigner implements Signer over the production VSOCK transport. It holds
+// no state — the dial parameters are fixed by constants/ and the per-call
+// deadline lives in the function body. Kept as a typed value so tests can
+// continue to substitute via the Signer interface.
+type vsockSigner struct{}
 
-type Client struct {
-	vsockPort int
-}
+var _ Signer = vsockSigner{}
 
-func NewClient() (*Client, error) {
-	return &Client{
-		vsockPort: constants.EnclaveListeningPort,
-	}, nil
-}
+// New returns the default VSOCK-based Signer implementation.
+func New() Signer { return vsockSigner{} }
 
-func (c *Client) Close() error {
-	logging.Debug("Enclave client closed")
+func (vsockSigner) Close() error {
+	logging.Debug("Enclave signer closed")
 	return nil
 }
 
@@ -102,7 +101,7 @@ func CommunicateWithEnclave(ctx context.Context, enclaveCID uint32, request mess
 // Ping sends a no-op request to verify the enclave is reachable and has a
 // loaded CA signer. /health uses this to surface enclave health to a load
 // balancer; it's cheap (no KMS or crypto work) so it's safe to call often.
-func (c *Client) Ping(ctx context.Context) (*messages.PingResponse, error) {
+func (vsockSigner) Ping(ctx context.Context) (*messages.PingResponse, error) {
 	request := messages.Request{Ping: &messages.PingRequest{}}
 
 	var response messages.Response
@@ -118,7 +117,7 @@ func (c *Client) Ping(ctx context.Context) (*messages.PingResponse, error) {
 	return response.Pong, nil
 }
 
-func (c *Client) SignPublicKey(ctx context.Context, req *messages.EnclaveSigningRequest) (string, error) {
+func (vsockSigner) SignPublicKey(ctx context.Context, req *messages.EnclaveSigningRequest) (string, error) {
 	request := messages.Request{
 		SignSshKey: req,
 	}
