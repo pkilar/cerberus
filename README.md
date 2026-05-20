@@ -70,7 +70,7 @@ This is the user-facing component that runs on the parent EC2 instance.
   - Exposes Prometheus metrics at `/metrics` (unauthenticated — protect at the network layer)
 - **HTTP endpoints**:
   - `POST /sign` — Kerberos-authenticated signing endpoint
-  - `GET /health` — liveness probe (unauthenticated)
+  - `GET /health` — readiness probe (unauthenticated). Returns `200 {"status":"healthy"}` only when a background goroutine has confirmed the enclave is reachable and its CA signer is loaded; otherwise `503` with a `reason` field. Probes are cached (5s refresh, 30s staleness threshold) so unauthenticated callers can't exhaust the signer's 32-slot connection budget.
   - `GET /metrics` — Prometheus scrape target (unauthenticated)
 - **Configuration**:
   - `configs/config.yaml`: Defines user groups and permissions
