@@ -271,6 +271,77 @@ func TestValidate(t *testing.T) {
 			},
 			expectError: true,
 		},
+		{
+			// Regression test: a non-empty value on a flag-style extension
+			// (permit-pty: "yes") produces a wire-format payload that sshd
+			// rejects as `Certificate option "permit-pty" corrupt (extra data)`.
+			// Validate must catch this at config load.
+			name: "flag extension with non-empty value",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "1h",
+							AllowedPrincipals: []string{"admin"},
+							Permissions: map[string]string{
+								"permit-pty": "yes",
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "flag extension under critical_options with non-empty value",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "1h",
+							AllowedPrincipals: []string{"admin"},
+							CriticalOptions: map[string]string{
+								"verify-required": "true",
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			// All flag extensions empty plus a non-flag critical option with
+			// a payload (force-command) is the correct shape and must pass.
+			name: "all flag extensions empty + force-command with payload",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "1h",
+							AllowedPrincipals: []string{"admin"},
+							Permissions: map[string]string{
+								"permit-X11-forwarding":   "",
+								"permit-agent-forwarding": "",
+								"permit-port-forwarding":  "",
+								"permit-pty":              "",
+								"permit-user-rc":          "",
+							},
+							CriticalOptions: map[string]string{
+								"force-command":  "/usr/bin/restricted-shell",
+								"source-address": "10.0.0.0/8",
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
 	}
 
 	for _, tt := range tests {
