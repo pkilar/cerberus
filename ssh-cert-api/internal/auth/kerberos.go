@@ -158,7 +158,7 @@ func parseSPNEGOAPReq(token []byte) (*messages.APReq, error) {
 		return nil, fmt.Errorf("failed to unmarshal Kerberos mech token: %w", err)
 	}
 	if !kt.IsAPReq() {
-		return nil, fmt.Errorf("Kerberos mech token does not contain AP-REQ")
+		return nil, fmt.Errorf("mech token is not a Kerberos AP-REQ")
 	}
 	return &kt.APReq, nil
 }
