@@ -319,6 +319,11 @@ Once the services are running, users can request signed certificates:
    }
    ```
 
+For interactive day-to-day use, the [`cssh` shell wrapper](docs/cssh.md)
+hides the curl/jq plumbing and caches the cert across runs —
+`cssh user@host` fetches a fresh certificate only when the cached one is
+about to expire, then hands off to `ssh`.
+
 ## **Configuration Reference**
 
 See `ssh-cert-api/configs/config-example.yaml` for a complete configuration example with:
