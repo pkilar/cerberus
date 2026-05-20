@@ -19,6 +19,12 @@ import (
 	"github.com/hf/nsm/request"
 )
 
+// maxCMSEnvelopeBytes caps the input size accepted by DecryptCMSEnvelope.
+// KMS responses for our CA key are a few KB in practice; rejecting inputs
+// orders of magnitude larger defends against a compromised host injecting
+// arbitrary bytes in place of a legitimate KMS response.
+const maxCMSEnvelopeBytes = 64 * 1024
+
 // Provider wraps NSM attestation document generation and CMS envelope decryption.
 // If the NSM device is not available (outside an enclave), all operations
 // gracefully return nil/false so callers can fall back to standard KMS Decrypt.
@@ -101,6 +107,9 @@ func (p *Provider) GenerateAttestationDoc() ([]byte, error) {
 func (p *Provider) DecryptCMSEnvelope(data []byte) (plaintext []byte, err error) {
 	if p == nil || p.rsaKey == nil {
 		return nil, errors.New("attestation RSA key not available")
+	}
+	if len(data) > maxCMSEnvelopeBytes {
+		return nil, fmt.Errorf("CMS envelope too large: %d bytes (max %d)", len(data), maxCMSEnvelopeBytes)
 	}
 
 	// Trust-boundary defense: the upstream BER parser has at least one

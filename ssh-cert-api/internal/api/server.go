@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"time"
@@ -57,7 +58,27 @@ func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer 
 }
 
 func (s *Server) Router() http.Handler {
-	return s.authMiddleware(s.router)
+	return recoverMiddleware(s.authMiddleware(s.router))
+}
+
+// recoverMiddleware catches panics from any handler below it, increments
+// cerberus_handler_panics_total, logs the panic with a stack trace, and
+// returns a generic 500. Without this wrapper, Go's http.Server still
+// recovers per-connection but aborts the response mid-stream and writes
+// the trace to the default error log without structure.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if p := recover(); p != nil {
+				handlerPanicsTotal.Inc()
+				slog.Error("handler.panic", "path", r.URL.Path, "panic", p, "stack", string(debug.Stack()))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Internal error"})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -136,6 +157,17 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap principals BEFORE authorization so the per-request Casbin work
+	// doesn't scale with attacker-chosen input. The enclave enforces the
+	// same cap downstream, but only after the API has already paid the cost.
+	if len(req.Principals) > messages.MaxPrincipals {
+		outcome = outcomeInvalidBody
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
+		return
+	}
+
 	principal := user.Username + "@" + user.Realm
 	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals)
 
@@ -175,8 +207,10 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		CriticalOptions:  maps.Clone(result.CertificateRules.CriticalOptions),
 	}
 
-	// Sign the key
-	signedKey, err := s.enclaveClient.SignPublicKey(enclaveReq)
+	// Sign the key — propagate r.Context() so client disconnect or upstream
+	// deadline tears the enclave call down rather than letting it run to the
+	// wall-clock backstop.
+	signedKey, err := s.enclaveClient.SignPublicKey(r.Context(), enclaveReq)
 	if err != nil {
 		outcome = outcomeFailed
 		enclaveErrorsTotal.Inc()
@@ -198,8 +232,28 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
+// handleHealth probes the enclave so /health reflects the whole system, not
+// just whether this process is responsive. A short timeout caps the cost of
+// probing — if the enclave is hung, the load balancer should hear about it
+// quickly rather than after the global 10s WriteTimeout.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
 	w.Header().Set("Content-Type", "application/json")
+
+	pong, err := s.enclaveClient.Ping(ctx)
+	if err != nil {
+		slog.Warn("health.enclave_unreachable", "error", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "enclave unreachable"})
+		return
+	}
+	if !pong.SignerLoaded {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "signer not loaded"})
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status": "healthy"}`))
+	_, _ = w.Write([]byte(`{"status": "healthy"}`))
 }

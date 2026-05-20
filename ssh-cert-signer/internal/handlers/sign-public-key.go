@@ -1,9 +1,11 @@
 package handlers
 
 import (
-	"cerberus/messages"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -11,18 +13,21 @@ import (
 	"strings"
 	"time"
 
+	"cerberus/messages"
+
 	"golang.org/x/crypto/ssh"
 )
 
 const (
 	// Maximum validity duration for certificates (24 hours)
 	maxValidityDuration = 24 * time.Hour
-	// Maximum number of principals allowed
-	maxPrincipals = 100
 	// Clock skew allowance in seconds
 	clockSkewSeconds = 300 // 5 minutes
 	// Nonce size in bytes
 	nonceSize = 32
+	// Minimum RSA key size accepted in submitted public keys. Anything below
+	// 2048 is too weak to certify even for a short-lived cert.
+	minRSAKeyBits = 2048
 )
 
 // SignPublicKey contains the core logic for signing the SSH key.
@@ -48,6 +53,10 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		return nil, fmt.Errorf("failed to parse public key: %w", err)
 	}
 
+	if err := validatePublicKey(publicKey); err != nil {
+		return nil, fmt.Errorf("rejected public key: %w", err)
+	}
+
 	validityDuration, err := time.ParseDuration(req.Validity)
 	if err != nil {
 		return nil, fmt.Errorf("invalid validity duration string '%s': %w", req.Validity, err)
@@ -71,26 +80,19 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		return nil, fmt.Errorf("failed to generate secure serial number: %w", err)
 	}
 
-	// Build permissions correctly - fix critical bug
+	// Cert permissions. Extensions hold SSH-protocol permissions (permit-pty,
+	// permit-port-forwarding, ...) and any audit/custom attributes — the SSH
+	// cert format keeps them in the same map. CriticalOptions are separate
+	// and carry stronger enforcement semantics. validateSigningRequest has
+	// already rejected any key collision between Permissions and
+	// CustomAttributes, so the merge below is unambiguous.
 	permissions := ssh.Permissions{
 		Extensions:      make(map[string]string),
 		CriticalOptions: make(map[string]string),
 	}
-
-	// Copy permissions to extensions
-	if req.Permissions != nil {
-		maps.Copy(permissions.Extensions, req.Permissions)
-	}
-
-	// Copy custom attributes to extensions
-	if req.CustomAttributes != nil {
-		maps.Copy(permissions.Extensions, req.CustomAttributes)
-	}
-
-	// Copy critical options
-	if req.CriticalOptions != nil {
-		maps.Copy(permissions.CriticalOptions, req.CriticalOptions)
-	}
+	maps.Copy(permissions.Extensions, req.Permissions)
+	maps.Copy(permissions.Extensions, req.CustomAttributes)
+	maps.Copy(permissions.CriticalOptions, req.CriticalOptions)
 
 	now := time.Now()
 	cert := &ssh.Certificate{
@@ -153,8 +155,8 @@ func validateSigningRequest(req messages.EnclaveSigningRequest) error {
 	}
 
 	// Limit number of principals for security
-	if len(req.Principals) > maxPrincipals {
-		return fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), maxPrincipals)
+	if len(req.Principals) > messages.MaxPrincipals {
+		return fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), messages.MaxPrincipals)
 	}
 
 	// Validate principals are not empty strings
@@ -164,5 +166,39 @@ func validateSigningRequest(req messages.EnclaveSigningRequest) error {
 		}
 	}
 
+	// Reject overlapping keys between Permissions and CustomAttributes. Both
+	// merge into the cert's Extensions map, so a collision would silently
+	// override one with the other depending on iteration order — refuse the
+	// request rather than letting that ambiguity reach the signed cert.
+	for k := range req.CustomAttributes {
+		if _, exists := req.Permissions[k]; exists {
+			return fmt.Errorf("key %q present in both permissions and custom_attributes", k)
+		}
+	}
+
+	return nil
+}
+
+// validatePublicKey restricts the algorithms and key sizes the signer will
+// issue certificates for. Even when the host has authorized the request, the
+// enclave refuses to certify keys it considers too weak to be useful for
+// short-lived auth.
+func validatePublicKey(publicKey ssh.PublicKey) error {
+	cpk, ok := publicKey.(ssh.CryptoPublicKey)
+	if !ok {
+		return fmt.Errorf("unsupported public key wrapper: %T", publicKey)
+	}
+	switch k := cpk.CryptoPublicKey().(type) {
+	case *rsa.PublicKey:
+		if k.N.BitLen() < minRSAKeyBits {
+			return fmt.Errorf("RSA key too small: %d bits (minimum %d)", k.N.BitLen(), minRSAKeyBits)
+		}
+	case *ecdsa.PublicKey, ed25519.PublicKey:
+		// ECDSA P-256/P-384/P-521 and Ed25519 are all acceptable. Their
+		// strengths are tied to curve choice, which ssh.ParseAuthorizedKey
+		// has already locked down by the time we get here.
+	default:
+		return fmt.Errorf("unsupported public key type: %T", k)
+	}
 	return nil
 }

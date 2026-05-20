@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -470,6 +471,74 @@ func BenchmarkJSONMarshalUnmarshal(b *testing.B) {
 		if err != nil {
 			b.Fatalf("unmarshal failed: %v", err)
 		}
+	}
+}
+
+// TestCASignerAtomicSwapUnderLoad exercises the atomic.Pointer[ssh.Signer]
+// swap that backs the load-key-then-sign hot path. N readers continuously
+// load the pointer and run a full sign while a writer replaces it. With
+// -race, a regression that downgrades the primitive (e.g. to a bare pointer
+// + mutex held incorrectly, or a non-atomic *ssh.Signer field) surfaces as
+// a data race. Nil loads or sign errors fail the test.
+func TestCASignerAtomicSwapUnderLoad(t *testing.T) {
+	signer1 := createTestSigner(t)
+	signer2 := createTestSigner(t)
+	caSigner.Store(&signer1)
+	t.Cleanup(func() {
+		var zero *ssh.Signer
+		caSigner.Store(zero)
+	})
+
+	pub := createTestPublicKey(t)
+	const readers = 8
+	stop := make(chan struct{})
+	errs := make(chan error, readers)
+	var wg sync.WaitGroup
+
+	for range readers {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				sp := caSigner.Load()
+				if sp == nil {
+					errs <- fmt.Errorf("caSigner.Load returned nil during swap")
+					return
+				}
+				_, err := handlers.SignPublicKey(t.Context(), *sp, messages.EnclaveSigningRequest{
+					SSHKey:     pub,
+					KeyID:      "swap-load",
+					Principals: []string{"u1"},
+					Validity:   "1h",
+				})
+				if err != nil {
+					errs <- fmt.Errorf("SignPublicKey under swap: %w", err)
+					return
+				}
+			}
+		})
+	}
+
+	// Hammer the swap. The 2 ms pacing gives readers many chances per
+	// iteration to observe both halves of the swap.
+	for i := range 50 {
+		time.Sleep(2 * time.Millisecond)
+		if i%2 == 0 {
+			caSigner.Store(&signer2)
+		} else {
+			caSigner.Store(&signer1)
+		}
+	}
+
+	close(stop)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

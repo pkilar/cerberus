@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 
@@ -69,10 +69,13 @@ func (p *Proxy) Stop() {
 
 // run is the main loop that accepts and handles connections.
 func (p *Proxy) run(ctx context.Context) {
-	defer p.listener.Close()
-
-	// Close the listener when ctx is cancelled to unblock Accept.
-	context.AfterFunc(ctx, func() { _ = p.listener.Close() })
+	// Close the listener exactly once across the two paths that need to do
+	// it: AfterFunc closes early on ctx cancellation (to unblock Accept), and
+	// the deferred wrapper closes on normal return.
+	var closeOnce sync.Once
+	closeListener := func() { closeOnce.Do(func() { _ = p.listener.Close() }) }
+	defer closeListener()
+	context.AfterFunc(ctx, closeListener)
 
 	for {
 		conn, err := p.listener.Accept()
@@ -82,7 +85,7 @@ func (p *Proxy) run(ctx context.Context) {
 			case <-ctx.Done():
 				return // Exit the loop.
 			default:
-				log.Printf("Proxy failed to accept vsock connection: %v", err)
+				slog.Error("proxy.accept_failed", "error", err)
 				// If the listener is closed for other reasons, we should exit.
 				if _, ok := errors.AsType[*net.OpError](err); ok {
 					return
@@ -106,7 +109,7 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	var dialer net.Dialer
 	tcpConn, err := dialer.DialContext(ctx, "tcp", p.targetAddr)
 	if err != nil {
-		log.Printf("Proxy failed to dial TCP endpoint %s: %v", p.targetAddr, err)
+		slog.Error("proxy.dial_failed", "target", p.targetAddr, "error", err)
 		return
 	}
 	defer tcpConn.Close()

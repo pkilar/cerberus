@@ -58,11 +58,24 @@ func Debug(format string, args ...any) {
 // Logger returns the configured application logger.
 func Logger() *slog.Logger { return appLogger }
 
-// slogBridge implements io.Writer and forwards stdlib log output to slog.
+// slogBridge implements io.Writer and forwards stdlib log output to slog,
+// honoring a severity prefix (FATAL:, ERROR:, WARN:, DEBUG:) when present so
+// callers that already tag their level don't get silently downgraded to INFO.
+// Untagged lines remain at INFO. The bridge is best-effort — callers that
+// want guaranteed severity should use slog directly.
 type slogBridge struct{}
 
 func (slogBridge) Write(b []byte) (int, error) {
 	msg := strings.TrimRight(string(b), "\n")
-	appLogger.Info(msg)
+	level := slog.LevelInfo
+	switch {
+	case strings.HasPrefix(msg, "FATAL: "), strings.HasPrefix(msg, "ERROR: "):
+		level = slog.LevelError
+	case strings.HasPrefix(msg, "WARN: "), strings.HasPrefix(msg, "WARNING: "):
+		level = slog.LevelWarn
+	case strings.HasPrefix(msg, "DEBUG: "):
+		level = slog.LevelDebug
+	}
+	appLogger.Log(context.Background(), level, msg)
 	return len(b), nil
 }

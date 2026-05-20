@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -35,14 +36,28 @@ func (f *fakeAuthorizer) Authorize(string, []string) (*authz.AuthorizationResult
 }
 
 type fakeSigner struct {
-	signed string
-	err    error
-	got    *messages.EnclaveSigningRequest
+	signed   string
+	err      error
+	got      *messages.EnclaveSigningRequest
+	pingResp *messages.PingResponse
+	pingErr  error
 }
 
-func (f *fakeSigner) SignPublicKey(req *messages.EnclaveSigningRequest) (string, error) {
+func (f *fakeSigner) SignPublicKey(_ context.Context, req *messages.EnclaveSigningRequest) (string, error) {
 	f.got = req
 	return f.signed, f.err
+}
+
+func (f *fakeSigner) Ping(_ context.Context) (*messages.PingResponse, error) {
+	if f.pingErr != nil {
+		return nil, f.pingErr
+	}
+	if f.pingResp != nil {
+		return f.pingResp, nil
+	}
+	// Default: signer is loaded. Tests that need a different shape set
+	// pingResp or pingErr explicitly.
+	return &messages.PingResponse{SignerLoaded: true}, nil
 }
 
 func (f *fakeSigner) Close() error { return nil }
@@ -264,7 +279,41 @@ func TestHealth_BypassesAuth(t *testing.T) {
 	s.Router().ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("health: got %d, want 200", w.Code)
+		t.Errorf("health: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHealth_ReturnsServiceUnavailableWhenEnclaveUnreachable(t *testing.T) {
+	authN := &fakeAuthenticator{err: errors.New("should not be called")}
+	signer := &fakeSigner{pingErr: errors.New("vsock dial: connection refused")}
+	s := newServerForTest(t, authN, &fakeAuthorizer{}, signer)
+
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("health: got %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "enclave unreachable") {
+		t.Errorf("body missing reason: %s", w.Body.String())
+	}
+}
+
+func TestHealth_ReturnsServiceUnavailableWhenSignerNotLoaded(t *testing.T) {
+	authN := &fakeAuthenticator{err: errors.New("should not be called")}
+	signer := &fakeSigner{pingResp: &messages.PingResponse{SignerLoaded: false}}
+	s := newServerForTest(t, authN, &fakeAuthorizer{}, signer)
+
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("health: got %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "signer not loaded") {
+		t.Errorf("body missing reason: %s", w.Body.String())
 	}
 }
 

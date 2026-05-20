@@ -7,6 +7,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -71,9 +72,13 @@ func main() {
 	}
 	logging.Debug("Started VSOCK proxy on port %d forwarding to %s", constants.InstanceListeningPort, kmsEndpoint)
 
-	// Initialize the enclave with AWS credentials
+	// Initialize the enclave with AWS credentials. Use a bounded context so a
+	// hung KMS Decrypt during startup doesn't block the service indefinitely;
+	// 60s comfortably covers attestation + KMS round-trip + key parse.
 	logging.Debug("Initializing enclave with AWS credentials...")
-	err = LoadKeySigner()
+	loadCtx, loadCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	err = LoadKeySigner(loadCtx)
+	loadCancel()
 	if err != nil {
 		log.Fatalf("Failed to initialize enclave: %v", err)
 	}
@@ -106,6 +111,22 @@ func main() {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		// Pin the TLS policy explicitly rather than relying on Go's defaults.
+		// TLS 1.2 minimum keeps older Kerberos-aware HTTP clients working; the
+		// cipher list is restricted to AEAD constructions (TLS 1.3 has its
+		// own AEAD-only set and ignores this field).
+		TLSConfig: &tls.Config{
+			MinVersion:       tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			},
+		},
 	}
 
 	// --- 6. Start Server with graceful shutdown ---
@@ -149,26 +170,27 @@ func main() {
 	}
 }
 
-// LoadKeySigner sends a load-key-signer request to the enclave
-func LoadKeySigner() error {
+// LoadKeySigner sends a load-key-signer request to the enclave. The supplied
+// ctx bounds the entire fetch-credentials + VSOCK round trip; on cancellation
+// the VSOCK client tears its connection down promptly.
+func LoadKeySigner(ctx context.Context) error {
 	logging.Debug("Fetching AWS credentials from metadata service...")
-	credentials, err := fetchAWSCredentials()
+	credentials, err := fetchAWSCredentials(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch AWS credentials: %w", err)
 	}
 	logging.Debug("Successfully fetched AWS credentials")
 
-	// Create the LoadKeySigner request
+	// Create the LoadKeySigner request. The encrypted key itself is read by
+	// the enclave from CA_KEY_FILE_PATH; it does not travel over the wire.
 	request := messages.Request{
 		LoadKeySigner: &messages.LoadKeySignerRequest{
-			EncryptedKey: "", // Empty for now - the enclave will load from file
-			Credentials:  *credentials,
+			Credentials: *credentials,
 		},
 	}
 
 	var response messages.Response
-	err = enclave.CommunicateWithEnclave(constants.EnclaveCID, request, &response)
-	if err != nil {
+	if err := enclave.CommunicateWithEnclave(ctx, constants.EnclaveCID, request, &response); err != nil {
 		return fmt.Errorf("error communicating with enclave: %w", err)
 	}
 
@@ -181,12 +203,15 @@ func LoadKeySigner() error {
 }
 
 // fetchAWSCredentials retrieves AWS credentials from the EC2 instance metadata
-// service. It defers the IMDSv2 token dance, role discovery, and JSON decodeing
-// to the  SDK's ec2rolecreds provider rather than hand-rolling the IMDS calls.
-func fetchAWSCredentials() (*messages.Credentials, error) {
-	ctx := context.Background()
+// service. It defers the IMDSv2 token dance, role discovery, and JSON decoding
+// to the SDK's ec2rolecreds provider rather than hand-rolling the IMDS calls.
+// Caps the call at 10s within the caller's broader budget so a hung metadata
+// service can't eat the parent LoadKeySigner budget.
+func fetchAWSCredentials(ctx context.Context) (*messages.Credentials, error) {
+	imdsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := awsconfig.LoadDefaultConfig(imdsCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -196,7 +221,7 @@ func fetchAWSCredentials() (*messages.Credentials, error) {
 		o.Client = imdsClient
 	})
 
-	creds, err := provider.Retrieve(ctx)
+	creds, err := provider.Retrieve(imdsCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve EC2 role credentials: %w", err)
 	}

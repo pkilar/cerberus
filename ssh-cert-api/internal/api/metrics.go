@@ -44,4 +44,11 @@ var (
 			Help: "Total errors returned from the signing enclave (VSOCK transport + enclave-side failures).",
 		},
 	)
+
+	handlerPanicsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cerberus_handler_panics_total",
+			Help: "Total panics caught by the HTTP handler recovery middleware.",
+		},
+	)
 )
