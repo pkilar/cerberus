@@ -369,8 +369,8 @@ func TestAuthorize_CertificateRulesReturned(t *testing.T) {
 					"permit-agent-forwarding": "",
 				},
 				StaticAttributes: map[string]string{
-					"team":         "backend",
-					"access-level": "production",
+					"team@example.com":         "backend",
+					"access-level@example.com": "production",
 				},
 				CriticalOptions: map[string]string{
 					"source-address": "10.0.0.0/8",
@@ -402,8 +402,8 @@ func TestAuthorize_CertificateRulesReturned(t *testing.T) {
 	if len(rules.Permissions) != 2 {
 		t.Fatalf("expected 2 permissions, got %d", len(rules.Permissions))
 	}
-	if rules.StaticAttributes["team"] != "backend" {
-		t.Fatalf("expected static attribute team=backend, got %q", rules.StaticAttributes["team"])
+	if rules.StaticAttributes["team@example.com"] != "backend" {
+		t.Fatalf("expected static attribute team@example.com=backend, got %q", rules.StaticAttributes["team@example.com"])
 	}
 	if rules.CriticalOptions["source-address"] != "10.0.0.0/8" {
 		t.Fatalf("expected critical option source-address=10.0.0.0/8, got %q", rules.CriticalOptions["source-address"])

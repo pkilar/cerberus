@@ -103,9 +103,16 @@ groups:
 
       # Static key-value pairs that will be embedded as custom extensions
       # in the signed certificate. Useful for auditing and context.
+      #
+      # Per the SSH certificate spec (PROTOCOL.certkeys §4), names that are
+      # not defined by OpenSSH MUST be namespaced as `name@domain` to avoid
+      # collisions with future standard extensions. sshd will still log a
+      # benign "extension is not supported" message for these — that's
+      # expected, the cert authenticates fine. Replace `example.com` with
+      # your organization's domain.
       static_attributes:
-        team: "backend"
-        access-level: "production"
+        team@example.com: "backend"
+        access-level@example.com: "production"
 
       # Critical options are a set of directives that, when present in a certificate, must be understood and processed by the SSH server.
       # If the server doesn't recognize a critical option, it will reject the certificate, preventing authentication.
@@ -128,5 +135,5 @@ groups:
         permit-pty: ""
         permit-user-rc: ""
       static_attributes:
-        team: "data"
-        access-level: "restricted"
+        team@example.com: "data"
+        access-level@example.com: "restricted"

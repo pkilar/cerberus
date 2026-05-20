@@ -177,8 +177,8 @@ groups:
         permit-pty: ""
         permit-user-rc: ""
       static_attributes:                      # Custom key-value pairs embedded in cert
-        team: "backend"
-        access-level: "production"
+        team@example.com: "backend"          # Namespace custom names per PROTOCOL.certkeys §4
+        access-level@example.com: "production"
       critical_options:                       # SSH critical options
         source-address: "10.20.30.0/24"
 ```
@@ -196,6 +196,46 @@ groups:
 | API read/write timeout     | 10 seconds              |
 | Enclave read/write timeout | 5 seconds               |
 | VSOCK connection deadline  | 30 seconds              |
+
+### SSH Certificate Extensions and Critical Options
+
+OpenSSH dispatches certificate extensions and critical options through a hardcoded table in `auth-options.c` (`cert_parse_options`). Anything outside that table that appears in an issued certificate is handled as follows:
+
+- **Unknown extension** → sshd logs `Certificate extension "<name>" is not supported` at `LogLevel INFO` and **ignores** it. The cert still authenticates.
+- **Unknown critical option** → sshd logs an `error` and **rejects** the certificate.
+
+This is why `permissions:` in a group's `certificate_rules` should only contain names from the recognized extensions list, and `critical_options:` should only contain names from the recognized critical options list. `static_attributes:` is the place for custom metadata — those land in the cert's extensions list and are read by downstream tooling (e.g., `ssh-keygen -L -f cert.pub`), not by sshd's authorization logic.
+
+#### Recognized by stock OpenSSH
+
+| Type                | Name                      | Effect                                                                                          |
+| ------------------- | ------------------------- | ----------------------------------------------------------------------------------------------- |
+| Extension           | `permit-X11-forwarding`   | Allow `ssh -X` / `-Y`                                                                           |
+| Extension           | `permit-agent-forwarding` | Allow `ssh -A`                                                                                  |
+| Extension           | `permit-port-forwarding`  | Allow `-L`, `-R`, `-D`                                                                          |
+| Extension           | `permit-pty`              | Allow PTY allocation (required for interactive shells)                                          |
+| Extension           | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                                            |
+| Extension           | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                                            |
+| Critical option     | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only)                     |
+| Critical option     | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses                              |
+| Critical option     | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence                     |
+
+Anything else — including names cerberus operators add via `static_attributes:` — falls through to the "not supported" branch. That's expected and harmless.
+
+#### Custom extension naming
+
+Per the SSH certificate spec ([PROTOCOL.certkeys §4, "Custom Extensions"](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.certkeys)), names that are not defined by OpenSSH **must** be namespaced as `name@domain` to avoid collisions with future standard extensions. Cerberus example configs use `name@example.com`; replace the domain with your organization's. Namespacing does **not** suppress the sshd warning — the dispatch table is still hardcoded — but it documents intent and prevents collisions if OpenSSH later adopts a standard extension with the same bare name.
+
+#### Acting on custom extensions server-side
+
+Stock sshd cannot make authorization decisions based on a custom extension; the dispatch is hardcoded. If you need to gate logins on `team`, `access-level`, etc., use `AuthorizedPrincipalsCommand` in `sshd_config`:
+
+```
+AuthorizedPrincipalsCommand /usr/local/bin/check-cert-policy %u %k %t %f
+AuthorizedPrincipalsCommandUser nobody
+```
+
+The script receives the certificate, runs `ssh-keygen -L -f -` against it, and writes the allowed principals (or nothing, to deny) on stdout.
 
 ---
 
@@ -796,7 +836,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 ### Audit Trail
 
 - Every signing request is logged with the authenticated principal and key ID.
-- Static attributes embedded in certificates (e.g., `team`, `access-level`) provide audit context.
+- Static attributes embedded in certificates (e.g., `team@example.com`, `access-level@example.com`) provide audit context. Namespace custom names per [SSH cert spec §4](#ssh-certificate-extensions-and-critical-options).
 
 ---
 
