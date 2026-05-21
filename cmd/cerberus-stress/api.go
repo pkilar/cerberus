@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -38,7 +39,7 @@ func runAPI(args []string) {
 	fs := flag.NewFlagSet("api", flag.ExitOnError)
 	common.bind(fs)
 	fs.StringVar(&url, "url", "https://127.0.0.1:8443/sign", "API /sign endpoint URL")
-	fs.StringVar(&spn, "spn", "", "Kerberos service principal (e.g. HTTP/host.realm.com); required unless -no-auth")
+	fs.StringVar(&spn, "spn", "", "Kerberos service principal (e.g. HTTP/host.realm.com); defaults to HTTP/<host-from-url>")
 	fs.StringVar(&krb5Conf, "krb5-conf", "/etc/krb5.conf", "Kerberos config file path")
 	fs.StringVar(&ccachePath, "ccache", "", "credential cache path (default: $KRB5CCNAME or /tmp/krb5cc_<uid>)")
 	fs.StringVar(&princs, "principals", "stress-user", "comma-separated SSH principals to request in cert (must be allowed by server config)")
@@ -103,8 +104,13 @@ Flags:
 		}
 	} else {
 		if spn == "" {
-			fmt.Fprintln(os.Stderr, "-spn is required (or pass -no-auth for an unauthenticated baseline)")
-			os.Exit(2)
+			derived, err := deriveSPN(url)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "-spn not provided and could not derive from -url: %v\n", err)
+				os.Exit(2)
+			}
+			spn = derived
+			fmt.Fprintf(os.Stderr, "using derived SPN %q (override with -spn)\n", spn)
 		}
 		spnegoCli, cleanup, err := buildSpnegoClient(httpClient, krb5Conf, ccachePath, spn)
 		if err != nil {
@@ -122,6 +128,22 @@ Flags:
 		url, common.concurrency, formatStopCondition(common))
 
 	runner(ctx, common, label, do)
+}
+
+// deriveSPN builds an HTTP/<host> SPN from the target URL. The host is taken
+// verbatim from the URL (no canonicalization) — if it doesn't match the SPN
+// the server registered with the KDC, the ticket request will fail fast with
+// a clear KDC error rather than silently auth against the wrong service.
+func deriveSPN(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse url: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("no host in url %q", rawURL)
+	}
+	return "HTTP/" + host, nil
 }
 
 // buildSpnegoClient loads the Kerberos credential cache and wraps the given
