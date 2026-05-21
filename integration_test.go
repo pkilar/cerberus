@@ -495,21 +495,3 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 		t.Errorf("expected error response, got: %+v", resp)
 	}
 }
-
-func TestIntegration_EnclaveConnectionFailure(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	// Try to connect to non-existent server
-	conn, err := net.DialTimeout("tcp", "localhost:99999", 1*time.Second)
-	if err == nil {
-		conn.Close()
-		t.Fatal("expected connection to fail, but it succeeded")
-	}
-
-	// Verify we get a connection error (this is expected behavior)
-	if !strings.Contains(err.Error(), "connection refused") && !strings.Contains(err.Error(), "no connection could be made") {
-		t.Logf("Got expected connection error: %v", err)
-	}
-}

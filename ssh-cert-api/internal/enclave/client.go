@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"cerberus/constants"
@@ -61,7 +62,14 @@ func Call(ctx context.Context, enclaveCID uint32, request messages.Request, resp
 		return fmt.Errorf("failed to connect to enclave: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	return roundTrip(ctx, conn, request, response)
+}
 
+// roundTrip is the post-dial half of Call: framing, deadline application,
+// cancel-on-context, write the request, read one newline-delimited response,
+// decode. Split out so unit tests can drive it over net.Pipe without needing
+// a vsock device.
+func roundTrip(ctx context.Context, conn net.Conn, request messages.Request, response *messages.Response) error {
 	// Cancel-on-context: close the conn when ctx is done so the Read/Write
 	// below return immediately rather than waiting on the wall-clock deadline.
 	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })

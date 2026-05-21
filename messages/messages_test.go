@@ -2,6 +2,7 @@ package messages
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -42,8 +43,8 @@ func TestSshSigningRequest_JSON(t *testing.T) {
 	if decoded.KeyID != req.KeyID {
 		t.Errorf("expected KeyID %s, got %s", req.KeyID, decoded.KeyID)
 	}
-	if len(decoded.Principals) != len(req.Principals) {
-		t.Errorf("expected %d principals, got %d", len(req.Principals), len(decoded.Principals))
+	if !slices.Equal(decoded.Principals, req.Principals) {
+		t.Errorf("Principals = %v, want %v", decoded.Principals, req.Principals)
 	}
 	if decoded.Validity != req.Validity {
 		t.Errorf("expected Validity %s, got %s", req.Validity, decoded.Validity)
