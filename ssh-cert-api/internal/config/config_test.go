@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,7 @@ func TestLoadConfig(t *testing.T) {
 		name        string
 		yamlContent string
 		expectError bool
+		errSubstr   string
 	}{
 		{
 			name: "valid config",
@@ -77,6 +79,7 @@ groups: {}
 		{
 			name: "group with no members",
 			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
 groups:
   admin:
     members: []
@@ -86,10 +89,12 @@ groups:
         - admin
 `,
 			expectError: true,
+			errSubstr:   "has no members",
 		},
 		{
 			name: "group with no validity",
 			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
 groups:
   admin:
     members:
@@ -99,10 +104,12 @@ groups:
         - admin
 `,
 			expectError: true,
+			errSubstr:   "no validity period defined",
 		},
 		{
 			name: "invalid validity duration",
 			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
 groups:
   admin:
     members:
@@ -113,10 +120,12 @@ groups:
         - admin
 `,
 			expectError: true,
+			errSubstr:   "invalid validity duration",
 		},
 		{
 			name: "no allowed principals",
 			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
 groups:
   admin:
     members:
@@ -126,6 +135,7 @@ groups:
       allowed_principals: []
 `,
 			expectError: true,
+			errSubstr:   "no allowed_principals",
 		},
 	}
 
@@ -147,6 +157,9 @@ groups:
 				}
 				if cfg != nil {
 					t.Error("expected nil config on error")
+				}
+				if tt.errSubstr != "" && err != nil && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("expected error containing %q, got: %v", tt.errSubstr, err)
 				}
 			} else {
 				if err != nil {
@@ -172,6 +185,7 @@ func TestValidate(t *testing.T) {
 		name        string
 		config      Config
 		expectError bool
+		errSubstr   string
 	}{
 		{
 			name: "valid config",
@@ -199,6 +213,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "group with no members",
 			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
 				Groups: map[string]Group{
 					"admin": {
 						Members: []string{},
@@ -210,10 +225,12 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			expectError: true,
+			errSubstr:   "has no members",
 		},
 		{
 			name: "group with empty validity",
 			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
 				Groups: map[string]Group{
 					"admin": {
 						Members: []string{"admin@example.com"},
@@ -225,10 +242,12 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			expectError: true,
+			errSubstr:   "no validity period defined",
 		},
 		{
 			name: "group with invalid validity duration",
 			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
 				Groups: map[string]Group{
 					"admin": {
 						Members: []string{"admin@example.com"},
@@ -240,10 +259,12 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			expectError: true,
+			errSubstr:   "invalid validity duration",
 		},
 		{
 			name: "group with no allowed principals",
 			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
 				Groups: map[string]Group{
 					"admin": {
 						Members: []string{"admin@example.com"},
@@ -255,6 +276,45 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			expectError: true,
+			errSubstr:   "no allowed_principals",
+		},
+		{
+			// PR #35 added the d <= 0 guard. 0s would otherwise produce a cert
+			// "valid" only inside the 300s clock-skew window.
+			name: "zero validity",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "0s",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "must be positive",
+		},
+		{
+			// Negative validity would produce ValidBefore < ValidAfter which
+			// sshd refuses. Catch at startup, not at the user's terminal.
+			name: "negative validity",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "-1h",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "must be positive",
 		},
 		{
 			name: "validity exceeds 24h max",
@@ -353,6 +413,9 @@ func TestValidate(t *testing.T) {
 			}
 			if !tt.expectError && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+			if tt.expectError && err != nil && tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Errorf("expected error containing %q, got: %v", tt.errSubstr, err)
 			}
 		})
 	}

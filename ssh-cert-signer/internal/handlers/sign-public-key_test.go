@@ -118,6 +118,60 @@ func TestSignPublicKey(t *testing.T) {
 			errorMsg:    "principals cannot be empty",
 		},
 		{
+			// PR #35: zero validity would produce a cert "valid" only inside
+			// the 300s clock-skew window. Refuse instead.
+			name:   "zero validity",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:     testPublicKey,
+				KeyID:      "test-key-zero-validity",
+				Principals: []string{"user1"},
+				Validity:   "0s",
+			},
+			expectError: true,
+			errorMsg:    "validity duration must be positive",
+		},
+		{
+			// PR #35: negative validity produces ValidBefore < ValidAfter.
+			name:   "negative validity",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:     testPublicKey,
+				KeyID:      "test-key-neg-validity",
+				Principals: []string{"user1"},
+				Validity:   "-1h",
+			},
+			expectError: true,
+			errorMsg:    "validity duration must be positive",
+		},
+		{
+			// PR #35: SSH key with prefix options must be refused. The
+			// authorized_keys parser accepts options silently; we don't.
+			name:   "ssh key with prefix options",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:     "cert-authority,no-pty " + testPublicKey,
+				KeyID:      "test-key-options",
+				Principals: []string{"user1"},
+				Validity:   "1h",
+			},
+			expectError: true,
+			errorMsg:    "must not carry SSH options",
+		},
+		{
+			// PR #35: SSH key with trailing data must be refused.
+			name:   "ssh key with trailing data",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:     strings.TrimSpace(testPublicKey) + "\nsecond-key-fragment\n",
+				KeyID:      "test-key-trailing",
+				Principals: []string{"user1"},
+				Validity:   "1h",
+			},
+			expectError: true,
+			errorMsg:    "trailing data",
+		},
+		{
 			name:   "empty SSH key",
 			signer: signer,
 			request: messages.EnclaveSigningRequest{

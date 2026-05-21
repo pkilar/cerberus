@@ -202,122 +202,9 @@ func TestSignPublicKey(t *testing.T) {
 	}
 }
 
-func TestResponseSerialization(t *testing.T) {
-	tests := []struct {
-		name     string
-		response messages.Response
-	}{
-		{
-			name: "success response",
-			response: messages.Response{
-				SignSshKey: &messages.SigningResponse{
-					SignedKey: "ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAB...",
-				},
-			},
-		},
-		{
-			name: "error response",
-			response: messages.Response{
-				Error: stringPtr("signing failed"),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test JSON serialization
-			data, err := json.Marshal(tt.response)
-			if err != nil {
-				t.Fatalf("failed to marshal response: %v", err)
-			}
-
-			// Test JSON deserialization
-			var decoded messages.Response
-			err = json.Unmarshal(data, &decoded)
-			if err != nil {
-				t.Fatalf("failed to unmarshal response: %v", err)
-			}
-
-			// Verify fields
-			if tt.response.SignSshKey != nil {
-				if decoded.SignSshKey == nil {
-					t.Error("expected SignSshKey but got nil")
-				} else if decoded.SignSshKey.SignedKey != tt.response.SignSshKey.SignedKey {
-					t.Errorf("expected SignedKey %s, got %s", tt.response.SignSshKey.SignedKey, decoded.SignSshKey.SignedKey)
-				}
-			}
-
-			if tt.response.Error != nil {
-				if decoded.Error == nil {
-					t.Error("expected Error but got nil")
-				} else if *decoded.Error != *tt.response.Error {
-					t.Errorf("expected Error %s, got %s", *tt.response.Error, *decoded.Error)
-				}
-			}
-		})
-	}
-}
-
-// Helper function to create string pointer
-func stringPtr(s string) *string {
-	return &s
-}
-
-func TestSshSigningRequest_JSON(t *testing.T) {
-	req := messages.EnclaveSigningRequest{
-		SSHKey:     "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...",
-		KeyID:      "test-key-id",
-		Principals: []string{"user1", "user2"},
-		Validity:   "24h",
-		Permissions: map[string]string{
-			"permit-pty":     "",
-			"permit-user-rc": "",
-		},
-		CustomAttributes: map[string]string{
-			"environment":     "production",
-			"requesting_user": "admin@example.com",
-		},
-	}
-
-	// Test marshaling
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("failed to marshal request: %v", err)
-	}
-
-	// Test unmarshaling
-	var decoded messages.EnclaveSigningRequest
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("failed to unmarshal request: %v", err)
-	}
-
-	// Verify all fields
-	if decoded.SSHKey != req.SSHKey {
-		t.Errorf("expected SSHKey %s, got %s", req.SSHKey, decoded.SSHKey)
-	}
-	if decoded.KeyID != req.KeyID {
-		t.Errorf("expected KeyID %s, got %s", req.KeyID, decoded.KeyID)
-	}
-	if len(decoded.Principals) != len(req.Principals) {
-		t.Errorf("expected %d principals, got %d", len(req.Principals), len(decoded.Principals))
-	}
-	if decoded.Validity != req.Validity {
-		t.Errorf("expected Validity %s, got %s", req.Validity, decoded.Validity)
-	}
-
-	// Check maps
-	for k, v := range req.Permissions {
-		if decoded.Permissions[k] != v {
-			t.Errorf("expected permission %s=%s, got %s", k, v, decoded.Permissions[k])
-		}
-	}
-	for k, v := range req.CustomAttributes {
-		if decoded.CustomAttributes[k] != v {
-			t.Errorf("expected attribute %s=%s, got %s", k, v, decoded.CustomAttributes[k])
-		}
-	}
-}
+// JSON round-trip tests for messages.Response and messages.EnclaveSigningRequest
+// live in messages/messages_test.go (TestResponse_JSON, TestResponse_WithError,
+// TestSshSigningRequest_JSON). Duplicating them here was pure cost.
 
 func TestCertificateFields(t *testing.T) {
 	signer := createTestSigner(t)
@@ -494,6 +381,76 @@ func TestCASignerAtomicSwapUnderLoad(t *testing.T) {
 
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// TestProcessRequest_RejectsAmbiguousVariants verifies that processRequest
+// refuses a Request payload with more than one variant set (PR #35). The
+// wire-protocol contract says exactly one of LoadKeySigner / SignSshKey /
+// Ping is non-nil; a malicious or buggy host that sets two must not have
+// one operation silently picked while the other is "smuggled".
+func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
+	cases := []messages.Request{
+		{
+			LoadKeySigner: &messages.LoadKeySignerRequest{},
+			SignSshKey:    &messages.EnclaveSigningRequest{},
+		},
+		{
+			LoadKeySigner: &messages.LoadKeySignerRequest{},
+			Ping:          &messages.PingRequest{},
+		},
+		{
+			SignSshKey: &messages.EnclaveSigningRequest{},
+			Ping:       &messages.PingRequest{},
+		},
+		{
+			LoadKeySigner: &messages.LoadKeySignerRequest{},
+			SignSshKey:    &messages.EnclaveSigningRequest{},
+			Ping:          &messages.PingRequest{},
+		},
+	}
+	for i, req := range cases {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			resp := processRequest(t.Context(), body)
+			if resp.Error == nil {
+				t.Fatalf("expected error response, got: %+v", resp)
+			}
+			if !strings.Contains(*resp.Error, "multiple request variants") {
+				t.Errorf("expected 'multiple request variants' in error, got: %s", *resp.Error)
+			}
+			// Belt-and-braces: no variant of the response should be set.
+			if resp.LoadKeySigner != nil || resp.SignSshKey != nil || resp.Pong != nil {
+				t.Errorf("ambiguous request must not be dispatched; got resp=%+v", resp)
+			}
+		})
+	}
+}
+
+// TestProcessRequest_PingNoSigner verifies that Ping works before any
+// LoadKeySigner has been called — /health depends on this being cheap and
+// non-failing.
+func TestProcessRequest_PingNoSigner(t *testing.T) {
+	// Force caSigner to its zero state.
+	var zero *ssh.Signer
+	caSigner.Store(zero)
+
+	body, err := json.Marshal(messages.Request{Ping: &messages.PingRequest{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp := processRequest(t.Context(), body)
+	if resp.Error != nil {
+		t.Fatalf("Ping returned error: %s", *resp.Error)
+	}
+	if resp.Pong == nil {
+		t.Fatal("expected Pong, got nil")
+	}
+	if resp.Pong.SignerLoaded {
+		t.Error("SignerLoaded should be false when caSigner is nil")
 	}
 }
 

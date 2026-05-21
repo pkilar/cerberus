@@ -22,9 +22,15 @@ import (
 // Forwarder forwards VSOCK connections from the enclave to a target TCP
 // endpoint. One instance handles many concurrent connections; Stop waits for
 // all in-flight forwards to drain.
+//
+// listen and dial are seams swapped by tests; New populates them with the
+// production vsock/tcp implementations. Production callers do not interact
+// with these fields.
 type Forwarder struct {
 	vsockPort  uint32
 	targetAddr string
+	listen     func(port uint32) (net.Listener, error)
+	dial       func(ctx context.Context, network, addr string) (net.Conn, error)
 	listener   net.Listener
 	wg         sync.WaitGroup
 	cancel     context.CancelFunc
@@ -37,6 +43,8 @@ func New(vsockPort uint32, targetAddr string) *Forwarder {
 	return &Forwarder{
 		vsockPort:  vsockPort,
 		targetAddr: targetAddr,
+		listen:     func(p uint32) (net.Listener, error) { return vsock.Listen(p, nil) },
+		dial:       (&net.Dialer{}).DialContext,
 	}
 }
 
@@ -46,10 +54,10 @@ func (f *Forwarder) Start(ctx context.Context) error {
 	proxyCtx, cancel := context.WithCancel(ctx)
 	f.cancel = cancel
 
-	// Listen on the specified VSOCK port.
-	listener, err := vsock.Listen(f.vsockPort, nil)
+	// Listen on the specified port (vsock in production; TCP in tests).
+	listener, err := f.listen(f.vsockPort)
 	if err != nil {
-		return fmt.Errorf("proxy failed to listen on vsock port %d: %w", f.vsockPort, err)
+		return fmt.Errorf("proxy failed to listen on port %d: %w", f.vsockPort, err)
 	}
 	f.listener = listener
 
@@ -109,8 +117,7 @@ func (f *Forwarder) handleConnection(ctx context.Context, vsockConn net.Conn) {
 
 	// Dial the target TCP endpoint with the forwarder's lifecycle context so
 	// shutdown cancels in-flight dials instead of waiting on TCP timeouts.
-	var dialer net.Dialer
-	tcpConn, err := dialer.DialContext(ctx, "tcp", f.targetAddr)
+	tcpConn, err := f.dial(ctx, "tcp", f.targetAddr)
 	if err != nil {
 		slog.Error("proxy.dial_failed", "target", f.targetAddr, "error", err)
 		return
