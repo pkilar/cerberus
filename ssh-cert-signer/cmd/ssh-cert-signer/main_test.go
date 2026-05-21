@@ -16,63 +16,67 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Helper function to create a test SSH signer
+// Test-key caches mirror the same pattern as the handlers package: RSA-2048
+// generation is expensive, and most callers just need "a test CA signer" /
+// "a test user pubkey" — generating fresh per call is wasted CI time.
+var (
+	cachedCAKey   = sync.OnceValue(func() *rsa.PrivateKey { return mustGenRSA(2048) })
+	cachedUserKey = sync.OnceValue(func() *rsa.PrivateKey { return mustGenRSA(2048) })
+)
+
+func mustGenRSA(bits int) *rsa.PrivateKey {
+	k, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		panic(err) // process-local fixture; failure here means rand.Reader is broken
+	}
+	return k
+}
+
 func createTestSigner(t *testing.T) ssh.Signer {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	t.Helper()
+	signer, err := ssh.NewSignerFromKey(cachedCAKey())
 	if err != nil {
-		t.Fatalf("failed to generate test key: %v", err)
+		t.Fatalf("ssh.NewSignerFromKey: %v", err)
 	}
-
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		t.Fatalf("failed to create signer: %v", err)
-	}
-
 	return signer
 }
 
-// Helper function for benchmarks that need a signer
+// freshTestSigner generates a brand-new signer per call. Use for tests that
+// MUST observe two distinct signer identities (e.g. the atomic swap test);
+// otherwise prefer createTestSigner.
+func freshTestSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	signer, err := ssh.NewSignerFromKey(mustGenRSA(2048))
+	if err != nil {
+		t.Fatalf("ssh.NewSignerFromKey: %v", err)
+	}
+	return signer
+}
+
 func createTestSignerForBenchmark(b *testing.B) ssh.Signer {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	b.Helper()
+	signer, err := ssh.NewSignerFromKey(cachedCAKey())
 	if err != nil {
-		b.Fatalf("failed to generate test key: %v", err)
+		b.Fatalf("ssh.NewSignerFromKey: %v", err)
 	}
-
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		b.Fatalf("failed to create signer: %v", err)
-	}
-
 	return signer
 }
 
-// Helper function to create a test public key
 func createTestPublicKey(t *testing.T) string {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	t.Helper()
+	publicKey, err := ssh.NewPublicKey(&cachedUserKey().PublicKey)
 	if err != nil {
-		t.Fatalf("failed to generate test key: %v", err)
+		t.Fatalf("ssh.NewPublicKey: %v", err)
 	}
-
-	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		t.Fatalf("failed to create public key: %v", err)
-	}
-
 	return string(ssh.MarshalAuthorizedKey(publicKey))
 }
 
-// Helper function for benchmarks that need a public key
 func createTestPublicKeyForBenchmark(b *testing.B) string {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	b.Helper()
+	publicKey, err := ssh.NewPublicKey(&cachedUserKey().PublicKey)
 	if err != nil {
-		b.Fatalf("failed to generate test key: %v", err)
+		b.Fatalf("ssh.NewPublicKey: %v", err)
 	}
-
-	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		b.Fatalf("failed to create public key: %v", err)
-	}
-
 	return string(ssh.MarshalAuthorizedKey(publicKey))
 }
 
@@ -323,8 +327,10 @@ func BenchmarkJSONMarshalUnmarshal(b *testing.B) {
 // + mutex held incorrectly, or a non-atomic *ssh.Signer field) surfaces as
 // a data race. Nil loads or sign errors fail the test.
 func TestCASignerAtomicSwapUnderLoad(t *testing.T) {
-	signer1 := createTestSigner(t)
-	signer2 := createTestSigner(t)
+	// Two distinct signer identities — the cached helper would hand back the
+	// same pointer twice and turn the swap into a no-op.
+	signer1 := freshTestSigner(t)
+	signer2 := freshTestSigner(t)
 	caSigner.Store(&signer1)
 	t.Cleanup(func() {
 		var zero *ssh.Signer

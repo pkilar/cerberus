@@ -332,6 +332,10 @@ func TestAuthorize_PartialDeny(t *testing.T) {
 }
 
 func TestAuthorize_EmptyPrincipals(t *testing.T) {
+	// Defense in depth: with no principals to check, the per-principal Casbin
+	// loop trivially allows. Refuse instead — the HTTP layer (api/server.go)
+	// refuses too, but Authorize must hold the line for any future caller
+	// that bypasses the handler.
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -352,8 +356,17 @@ func TestAuthorize_EmptyPrincipals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
-	if !result.Allowed {
-		t.Fatal("expected allowed for empty requested principals")
+	if result.Allowed {
+		t.Fatal("Authorize must refuse empty requested principals")
+	}
+
+	// Same for an unknown user with an empty slice — must still refuse.
+	result, err = a.Authorize("nobody@REALM.COM", []string{})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("Authorize must refuse empty requested principals regardless of user")
 	}
 }
 

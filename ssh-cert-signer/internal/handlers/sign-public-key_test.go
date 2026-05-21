@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"strings"
+	"sync"
 	"testing"
 
 	"cerberus/messages"
@@ -11,33 +12,42 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Helper function to create a test SSH signer
+// Test-key caches: RSA-2048 generation costs ~50–200ms per call. Without
+// caching, this package's table tests would run a dozen+ generations for
+// the same conceptual "a test CA key" and "a test user pubkey", trading
+// real CI time for no extra coverage. sync.OnceValue gives us "generated
+// once per process, deterministically reused".
+var (
+	cachedCAKey   = sync.OnceValue(func() *rsa.PrivateKey { return mustGenRSA(2048) })
+	cachedUserKey = sync.OnceValue(func() *rsa.PrivateKey { return mustGenRSA(2048) })
+)
+
+func mustGenRSA(bits int) *rsa.PrivateKey {
+	k, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		panic(err) // process-local fixture; failure here means rand.Reader is broken
+	}
+	return k
+}
+
+// createTestSigner returns the cached test CA signer.
 func createTestSigner(t *testing.T) ssh.Signer {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	t.Helper()
+	signer, err := ssh.NewSignerFromKey(cachedCAKey())
 	if err != nil {
-		t.Fatalf("failed to generate test key: %v", err)
+		t.Fatalf("ssh.NewSignerFromKey: %v", err)
 	}
-
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		t.Fatalf("failed to create signer: %v", err)
-	}
-
 	return signer
 }
 
-// Helper function to create a test public key
+// createTestPublicKey returns the cached test user public key in
+// authorized_keys format.
 func createTestPublicKey(t *testing.T) string {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	t.Helper()
+	publicKey, err := ssh.NewPublicKey(&cachedUserKey().PublicKey)
 	if err != nil {
-		t.Fatalf("failed to generate test key: %v", err)
+		t.Fatalf("ssh.NewPublicKey: %v", err)
 	}
-
-	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		t.Fatalf("failed to create public key: %v", err)
-	}
-
 	return string(ssh.MarshalAuthorizedKey(publicKey))
 }
 
@@ -372,32 +382,23 @@ func BenchmarkSignPublicKey(b *testing.B) {
 	}
 }
 
-// Helper function for benchmarks
+// Benchmark variants reuse the same cached keys; setup time should not be
+// charged to the measured iterations.
 func createTestSignerForBenchmark(b *testing.B) ssh.Signer {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	b.Helper()
+	signer, err := ssh.NewSignerFromKey(cachedCAKey())
 	if err != nil {
-		b.Fatalf("failed to generate test key: %v", err)
+		b.Fatalf("ssh.NewSignerFromKey: %v", err)
 	}
-
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		b.Fatalf("failed to create signer: %v", err)
-	}
-
 	return signer
 }
 
 func createTestPublicKeyForBenchmark(b *testing.B) string {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	b.Helper()
+	publicKey, err := ssh.NewPublicKey(&cachedUserKey().PublicKey)
 	if err != nil {
-		b.Fatalf("failed to generate test key: %v", err)
+		b.Fatalf("ssh.NewPublicKey: %v", err)
 	}
-
-	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		b.Fatalf("failed to create public key: %v", err)
-	}
-
 	return string(ssh.MarshalAuthorizedKey(publicKey))
 }
 
