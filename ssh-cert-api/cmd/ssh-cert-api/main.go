@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -160,13 +161,20 @@ func main() {
 	}
 
 	// --- 6. Start Server with graceful shutdown ---
-	log.Printf("Server listening on https://%s", cfg.Listen)
+	// http.Server treats an empty host in Addr (e.g. ":8443") as "all
+	// interfaces". Render that as 0.0.0.0:port so operators don't have to
+	// decode the missing host themselves.
+	displayAddr := cfg.Listen
+	if host, port, err := net.SplitHostPort(cfg.Listen); err == nil && host == "" {
+		displayAddr = net.JoinHostPort("0.0.0.0", port)
+	}
+	log.Printf("Server listening on https://%s", displayAddr)
 
 	g, gctx := errgroup.WithContext(rootCtx)
 
 	g.Go(func() error {
 		if err := httpServer.ListenAndServeTLS(cfg.TlsCert, cfg.TlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("https server: %w (ensure %s and %s are present)", err, cfg.TlsCert, cfg.TlsKey)
+			return fmt.Errorf("https server (cert=%s key=%s): %w", cfg.TlsCert, cfg.TlsKey, err)
 		}
 		return nil
 	})
