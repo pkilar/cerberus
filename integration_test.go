@@ -420,14 +420,16 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 				return
 			}
 
-			buf := make([]byte, 4096)
-			n, err := conn.Read(buf)
+			// Mirror the production host client: bufio.NewReader.ReadBytes('\n').
+			// A single conn.Read works on localhost (TCP coalesces) but would
+			// short-read on any path with MTU-sensitive framing.
+			responseBytes, err := bufio.NewReader(conn).ReadBytes('\n')
 			if err != nil {
 				errs <- fmt.Errorf("goroutine %d: read: %w", idx, err)
 				return
 			}
 			var resp messages.Response
-			if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &resp); err != nil {
+			if err := json.Unmarshal(bytes.TrimSpace(responseBytes), &resp); err != nil {
 				errs <- fmt.Errorf("goroutine %d: unmarshal: %w", idx, err)
 				return
 			}
@@ -477,14 +479,16 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
+	// Same newline-delimited framing as the rest of the test suite — see the
+	// comment in TestIntegration_EndToEndSigning for why bufio.NewReader.ReadBytes
+	// is preferred over a single conn.Read.
+	responseBytes, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 
 	var resp messages.Response
-	if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &resp); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(responseBytes), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if resp.Error == nil || *resp.Error == "" {

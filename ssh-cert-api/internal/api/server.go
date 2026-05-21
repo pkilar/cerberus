@@ -157,6 +157,18 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject empty principals explicitly. An empty slice would trivially pass
+	// the Casbin per-principal loop below (zero iterations = unanimously
+	// allowed) and the user would receive a cert with the group's full
+	// allowed_principals set — wider than the empty request implied.
+	if len(req.Principals) == 0 {
+		outcome = outcomeMissingPrincipals
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing principals"})
+		return
+	}
+
 	// Cap principals BEFORE authorization so the per-request Casbin work
 	// doesn't scale with attacker-chosen input. The enclave enforces the
 	// same cap downstream, but only after the API has already paid the cost.
