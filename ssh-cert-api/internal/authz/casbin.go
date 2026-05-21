@@ -95,7 +95,17 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 // Authorize checks if the user is allowed to sign for all requested SSH principals.
 // It enforces per-group: all requested principals must be allowed within a single
 // group. This ensures the returned CertificateRules match the authorization scope.
+//
+// An empty requestedPrincipals slice is refused. With nothing to check, the
+// per-principal Casbin loop below would trivially "allow" and return the
+// first group's full rules — wider than the empty request implied. The HTTP
+// layer already refuses this (api/server.go); defense in depth catches any
+// future caller that bypasses the handler.
 func (ca *CasbinAuthorizer) Authorize(userPrincipal string, requestedPrincipals []string) (*AuthorizationResult, error) {
+	if len(requestedPrincipals) == 0 {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+
 	groups, exists := ca.userGroups[userPrincipal]
 	if !exists {
 		return &AuthorizationResult{Allowed: false}, nil
