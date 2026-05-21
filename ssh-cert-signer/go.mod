@@ -37,3 +37,5 @@ require (
 )
 
 replace cerberus => ../
+
+replace github.com/edgebitio/nitro-enclaves-sdk-go => github.com/pkilar/nitro-enclaves-sdk-go v1.0.1-0.20260521032308-6819b7df8e4d

@@ -172,11 +172,8 @@ func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte, form 
 	return tlv(0x30, cat(envOID, ed0))
 }
 
-// Note: cannot use t.Parallel here or on any subtest below. The upstream
-// github.com/edgebitio/nitro-enclaves-sdk-go/crypto/cms package has a data
-// race in ber2der's asn1Structured.EncodeTo path that surfaces when valid
-// envelopes are parsed concurrently. Keep this file fully sequential.
 func TestDecryptCMSEnvelope_RoundTrip(t *testing.T) {
+	t.Parallel()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +196,7 @@ func TestDecryptCMSEnvelope_RoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			envelope := buildCMSEnvelope(t, &key.PublicKey, tt.plaintext, tt.form)
 			got, err := p.DecryptCMSEnvelope(envelope)
 			if err != nil {
@@ -212,6 +210,7 @@ func TestDecryptCMSEnvelope_RoundTrip(t *testing.T) {
 }
 
 func TestDecryptCMSEnvelope_NoKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		p    *Provider
@@ -221,6 +220,7 @@ func TestDecryptCMSEnvelope_NoKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := tt.p.DecryptCMSEnvelope([]byte("anything"))
 			if err == nil {
 				t.Fatal("expected error, got nil")
@@ -230,6 +230,7 @@ func TestDecryptCMSEnvelope_NoKey(t *testing.T) {
 }
 
 func TestDecryptCMSEnvelope_MalformedInput(t *testing.T) {
+	t.Parallel()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +247,7 @@ func TestDecryptCMSEnvelope_MalformedInput(t *testing.T) {
 	}
 	for name, data := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			// Must return error, not panic.
 			_, err := p.DecryptCMSEnvelope(data)
 			if err == nil {
@@ -256,6 +258,7 @@ func TestDecryptCMSEnvelope_MalformedInput(t *testing.T) {
 }
 
 func TestDecryptCMSEnvelope_Truncated(t *testing.T) {
+	t.Parallel()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +268,7 @@ func TestDecryptCMSEnvelope_Truncated(t *testing.T) {
 
 	for cut := 1; cut < len(envelope); cut += 23 {
 		t.Run("cut_"+strconv.Itoa(cut), func(t *testing.T) {
+			t.Parallel()
 			_, err := p.DecryptCMSEnvelope(envelope[:cut])
 			if err == nil {
 				t.Errorf("truncation to %d bytes: expected error", cut)
