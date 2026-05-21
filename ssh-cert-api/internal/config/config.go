@@ -6,8 +6,10 @@ package config
 import (
 	"cmp"
 	"fmt"
+	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -139,6 +141,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("enclave_metrics_interval %v is too short; minimum is 1s", c.EnclaveMetricsInterval)
 	}
 
+	if err := validateListen(c.Listen); err != nil {
+		return err
+	}
+
 	for name, group := range c.Groups {
 		if len(group.Members) == 0 {
 			return fmt.Errorf("group '%s' has no members", name)
@@ -177,6 +183,34 @@ func (c *Config) Validate() error {
 		if err := validateFlagExtensions(name, "critical_options", rules.CriticalOptions); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateListen rejects malformed listen addresses at config-load time so
+// they don't surface as opaque bind errors several seconds into startup.
+// Accepts ":port" (all interfaces), "host:port", and "[ipv6]:port"; rejects
+// host-only forms like "0.0.0.0" that net.Listen would refuse with "missing
+// port in address". An empty string is accepted because applyDefaults fills
+// it in before LoadConfig calls Validate; tests that construct Config
+// directly inherit the same lenience.
+func validateListen(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("listen %q is not a valid host:port: %w", addr, err)
+	}
+	if port == "" {
+		return fmt.Errorf("listen %q is missing a port", addr)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("listen %q has non-numeric port %q", addr, port)
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("listen %q port %d out of range 1..65535", addr, p)
 	}
 	return nil
 }

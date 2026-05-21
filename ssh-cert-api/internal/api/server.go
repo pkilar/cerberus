@@ -94,7 +94,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		user, err := s.authenticator.AuthenticateRequest(r)
 		if err != nil {
-			slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)
+			// SPNEGO is a challenge/response protocol: every real request
+			// starts with a no-Authorization probe so the client can pick
+			// up the WWW-Authenticate: Negotiate challenge. Logging that
+			// as auth.failed at WARN floods logs and obscures genuine
+			// rejected-token errors, so demote it to debug.
+			if r.Header.Get("Authorization") == "" {
+				slog.Debug("auth.challenge", "remote_addr", r.RemoteAddr)
+			} else {
+				slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)
+			}
 			w.Header().Set("WWW-Authenticate", "Negotiate")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)

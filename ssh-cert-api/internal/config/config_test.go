@@ -738,3 +738,40 @@ func TestEnclaveMetricsInterval_Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateListen(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		addr      string
+		wantError bool
+		errSubstr string
+	}{
+		{name: "empty allowed (defaults handle it)", addr: "", wantError: false},
+		{name: "all-interfaces shorthand", addr: ":8443", wantError: false},
+		{name: "explicit ipv4 host:port", addr: "0.0.0.0:8443", wantError: false},
+		{name: "loopback host:port", addr: "127.0.0.1:8443", wantError: false},
+		{name: "ipv6 bracketed", addr: "[::1]:8443", wantError: false},
+		{name: "host without port", addr: "0.0.0.0", wantError: true, errSubstr: "missing port"},
+		{name: "host without port (loopback)", addr: "127.0.0.1", wantError: true, errSubstr: "missing port"},
+		{name: "non-numeric port", addr: "0.0.0.0:https", wantError: true, errSubstr: "non-numeric port"},
+		{name: "port zero", addr: ":0", wantError: true, errSubstr: "out of range"},
+		{name: "port too high", addr: ":70000", wantError: true, errSubstr: "out of range"},
+		{name: "port negative", addr: ":-1", wantError: true, errSubstr: "out of range"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateListen(tt.addr)
+			if tt.wantError && err == nil {
+				t.Fatalf("expected error for %q, got nil", tt.addr)
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("unexpected error for %q: %v", tt.addr, err)
+			}
+			if tt.wantError && tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Errorf("expected error containing %q, got: %v", tt.errSubstr, err)
+			}
+		})
+	}
+}
