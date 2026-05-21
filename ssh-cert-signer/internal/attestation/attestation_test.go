@@ -172,6 +172,10 @@ func buildCMSEnvelope(tb testing.TB, pub *rsa.PublicKey, plaintext []byte, form 
 	return tlv(0x30, cat(envOID, ed0))
 }
 
+// Note: cannot use t.Parallel here or on any subtest below. The upstream
+// github.com/edgebitio/nitro-enclaves-sdk-go/crypto/cms package has a data
+// race in ber2der's asn1Structured.EncodeTo path that surfaces when valid
+// envelopes are parsed concurrently. Keep this file fully sequential.
 func TestDecryptCMSEnvelope_RoundTrip(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

@@ -181,6 +181,7 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		config      Config
@@ -407,6 +408,7 @@ func TestValidate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			err := tt.config.Validate()
 			if tt.expectError && err == nil {
 				t.Error("expected error but got none")
@@ -422,6 +424,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestValidate_ValidityDurationParsing(t *testing.T) {
+	t.Parallel()
 	validDurations := []string{
 		"1h",
 		"24h",
@@ -433,6 +436,7 @@ func TestValidate_ValidityDurationParsing(t *testing.T) {
 
 	for _, duration := range validDurations {
 		t.Run(duration, func(t *testing.T) {
+			t.Parallel()
 			config := Config{
 				KeytabPath: "/etc/keytab/test.keytab",
 				Groups: map[string]Group{
@@ -461,6 +465,7 @@ func TestValidate_ValidityDurationParsing(t *testing.T) {
 }
 
 func TestConfigStructure(t *testing.T) {
+	t.Parallel()
 	// Test that the config structure matches expected YAML structure
 	config := Config{
 		KeytabPath: "/etc/keytab/test.keytab",
@@ -526,6 +531,7 @@ func TestConfigStructure(t *testing.T) {
 }
 
 func TestConfigValidation_MultipleGroups(t *testing.T) {
+	t.Parallel()
 	config := Config{
 		KeytabPath: "/etc/keytab/test.keytab",
 		Groups: map[string]Group{
@@ -565,6 +571,7 @@ func TestConfigValidation_MultipleGroups(t *testing.T) {
 }
 
 func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		cfg  Config
@@ -640,6 +647,7 @@ func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := tt.cfg.Warnings()
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("Warnings() = %+v, want %+v", got, tt.want)

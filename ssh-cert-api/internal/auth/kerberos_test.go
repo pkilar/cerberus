@@ -30,6 +30,7 @@ const realWorldSPNEGOInitHex = "608202b606062b0601050502a08202aa308202a6a0273025
 //
 // On a fixed parser the call must reach the embedded AP-REQ.
 func TestParseSPNEGOAPReq_AcceptsGSSWrappedInitialToken(t *testing.T) {
+	t.Parallel()
 	raw, err := hex.DecodeString(realWorldSPNEGOInitHex)
 	if err != nil {
 		t.Fatalf("decode fixture: %v", err)
@@ -48,6 +49,7 @@ func TestParseSPNEGOAPReq_AcceptsGSSWrappedInitialToken(t *testing.T) {
 }
 
 func TestParseSPNEGOAPReq_RejectsEmpty(t *testing.T) {
+	t.Parallel()
 	if _, err := parseSPNEGOAPReq(nil); err == nil {
 		t.Error("expected error for nil token, got nil")
 	}
@@ -57,6 +59,7 @@ func TestParseSPNEGOAPReq_RejectsEmpty(t *testing.T) {
 }
 
 func TestParseSPNEGOAPReq_RejectsNegTokenResp(t *testing.T) {
+	t.Parallel()
 	// gokrb5 testGSSAPIResp: a bare NegTokenResp (byte 0 = 0xA1). Continuation
 	// tokens have no place in the initial Authenticate request.
 	raw, err := hex.DecodeString("a1143012a0030a0100a10b06092a864886f712010202")
@@ -73,6 +76,7 @@ func TestParseSPNEGOAPReq_RejectsNegTokenResp(t *testing.T) {
 }
 
 func TestCheckKeytabPermissions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mode    os.FileMode
@@ -88,6 +92,7 @@ func TestCheckKeytabPermissions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "test.keytab")
 			if err := os.WriteFile(path, []byte("stub"), tt.mode); err != nil {
 				t.Fatalf("failed to create keytab: %v", err)
@@ -111,6 +116,7 @@ func TestCheckKeytabPermissions(t *testing.T) {
 }
 
 func TestCheckKeytabPermissions_MissingFile(t *testing.T) {
+	t.Parallel()
 	err := checkKeytabPermissions(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Fatal("expected error for missing file")

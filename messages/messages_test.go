@@ -8,6 +8,7 @@ import (
 )
 
 func TestSshSigningRequest_JSON(t *testing.T) {
+	t.Parallel()
 	req := EnclaveSigningRequest{
 		SSHKey:     "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC...",
 		KeyID:      "test-key-id",
@@ -64,6 +65,7 @@ func TestSshSigningRequest_JSON(t *testing.T) {
 }
 
 func TestSshSigningResponse_JSON(t *testing.T) {
+	t.Parallel()
 	resp := SigningResponse{
 		SignedKey: "ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAB...",
 	}
@@ -87,6 +89,7 @@ func TestSshSigningResponse_JSON(t *testing.T) {
 }
 
 func TestRequest_JSON(t *testing.T) {
+	t.Parallel()
 	sshReq := EnclaveSigningRequest{
 		SSHKey:   "ssh-rsa AAAAB3...",
 		KeyID:    "test",
@@ -124,6 +127,7 @@ func TestRequest_JSON(t *testing.T) {
 }
 
 func TestResponse_JSON(t *testing.T) {
+	t.Parallel()
 	sshResp := SigningResponse{
 		SignedKey: "ssh-rsa-cert-v01@openssh.com...",
 	}
@@ -154,6 +158,7 @@ func TestResponse_JSON(t *testing.T) {
 }
 
 func TestResponse_WithError(t *testing.T) {
+	t.Parallel()
 	errorMsg := "test error message"
 	resp := Response{
 		Error: &errorMsg,
@@ -181,6 +186,7 @@ func TestResponse_WithError(t *testing.T) {
 }
 
 func TestCredentials_Redacted(t *testing.T) {
+	t.Parallel()
 	creds := Credentials{
 		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -206,6 +212,7 @@ func TestCredentials_Redacted(t *testing.T) {
 }
 
 func TestCredentials_String_NoSecretLeak(t *testing.T) {
+	t.Parallel()
 	secret := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	token := "FwoGZXIvYXdzEKL//////////wEa"
 	creds := Credentials{
@@ -223,6 +230,7 @@ func TestCredentials_String_NoSecretLeak(t *testing.T) {
 }
 
 func TestCredentials_JSON(t *testing.T) {
+	t.Parallel()
 	creds := Credentials{
 		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
