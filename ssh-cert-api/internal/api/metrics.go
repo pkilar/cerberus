@@ -8,15 +8,16 @@ import (
 // Prometheus metric outcomes for /sign. Keep this set small and stable —
 // adding labels bumps cardinality across every scrape.
 const (
-	outcomeSuccess     = "success"
-	outcomeDenied      = "denied"
-	outcomeFailed      = "failed"
-	outcomeRatelimited = "ratelimited"
-	outcomeInvalidBody = "invalid_body"
-	outcomeTooLarge    = "too_large"
-	outcomeMissingKey  = "missing_key"
-	outcomeAuthzError  = "authz_error"
-	outcomeNoAuth      = "no_auth"
+	outcomeSuccess           = "success"
+	outcomeDenied            = "denied"
+	outcomeFailed            = "failed"
+	outcomeRatelimited       = "ratelimited"
+	outcomeInvalidBody       = "invalid_body"
+	outcomeTooLarge          = "too_large"
+	outcomeMissingKey        = "missing_key"
+	outcomeMissingPrincipals = "missing_principals"
+	outcomeAuthzError        = "authz_error"
+	outcomeNoAuth            = "no_auth"
 )
 
 var (

@@ -191,6 +191,24 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	}
 	logging.Debug("recv: %s", messages.RedactedJSON(req))
 
+	// The wire-protocol contract in messages.Request says exactly one variant
+	// is non-nil. Refuse ambiguous payloads rather than silently picking the
+	// first one — a misbehaving host that sets two variants must not be able
+	// to smuggle one operation past host-side checks while another executes.
+	nVariants := 0
+	if req.LoadKeySigner != nil {
+		nVariants++
+	}
+	if req.SignSshKey != nil {
+		nVariants++
+	}
+	if req.Ping != nil {
+		nVariants++
+	}
+	if nVariants > 1 {
+		return createErrorResponse(errors.New("multiple request variants set; expected exactly one"))
+	}
+
 	switch {
 	case req.LoadKeySigner != nil:
 		return handleLoadKeySigner(ctx, *req.LoadKeySigner)
@@ -260,12 +278,11 @@ func sendResponse(conn net.Conn, response messages.Response) error {
 		return fmt.Errorf("failed to set write deadline: %w", err)
 	}
 
-	if _, err := conn.Write(responseBytes); err != nil {
+	// Single Write so the JSON object and its newline framing land in the
+	// same syscall — mirrors the host client's append-then-write pattern in
+	// ssh-cert-api/internal/enclave/client.go.
+	if _, err := conn.Write(append(responseBytes, '\n')); err != nil {
 		return fmt.Errorf("failed to write response: %w", err)
-	}
-
-	if _, err := conn.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("failed to write newline: %w", err)
 	}
 
 	return nil

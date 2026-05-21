@@ -130,6 +130,13 @@ func (c *Config) Validate() error {
 		if err != nil {
 			return fmt.Errorf("invalid validity duration for group '%s': %w", name, err)
 		}
+		// Reject zero/negative validity: a 0s value would produce a cert
+		// "valid" only inside the signer's 300s clock-skew window; a negative
+		// value would produce ValidBefore < ValidAfter which sshd refuses.
+		// Catch the operator typo here rather than at the user's terminal.
+		if d <= 0 {
+			return fmt.Errorf("group '%s' validity %v must be positive", name, d)
+		}
 		// The enclave enforces the same cap; catching it here turns a silent
 		// per-request rejection at runtime into a loud startup failure.
 		if d > messages.MaxValidity {

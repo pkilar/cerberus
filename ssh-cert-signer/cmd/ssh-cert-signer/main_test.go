@@ -129,7 +129,7 @@ func TestSignPublicKey(t *testing.T) {
 				Principals: []string{},
 				Validity:   "1h",
 			},
-			expectError: false, // Empty principals should be allowed
+			expectError: true, // Empty principals are now refused at the enclave
 		},
 	}
 

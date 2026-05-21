@@ -73,9 +73,10 @@ func TestSignPublicKey(t *testing.T) {
 			name:   "nil signer",
 			signer: nil,
 			request: messages.EnclaveSigningRequest{
-				SSHKey:   testPublicKey,
-				KeyID:    "test-key-nil-signer",
-				Validity: "1h",
+				SSHKey:     testPublicKey,
+				KeyID:      "test-key-nil-signer",
+				Principals: []string{"user1"},
+				Validity:   "1h",
 			},
 			expectError: true,
 			errorMsg:    "CA signer is not initialized",
@@ -113,7 +114,8 @@ func TestSignPublicKey(t *testing.T) {
 				Principals: []string{},
 				Validity:   "1h",
 			},
-			expectError: false, // Empty principals should be allowed
+			expectError: true,
+			errorMsg:    "principals cannot be empty",
 		},
 		{
 			name:   "empty SSH key",
@@ -151,9 +153,10 @@ func TestSignPublicKey(t *testing.T) {
 			name:   "excessive validity duration",
 			signer: signer,
 			request: messages.EnclaveSigningRequest{
-				SSHKey:   testPublicKey,
-				KeyID:    "test-key-7",
-				Validity: "48h", // Exceeds 24h limit
+				SSHKey:     testPublicKey,
+				KeyID:      "test-key-7",
+				Principals: []string{"user1"},
+				Validity:   "48h", // Exceeds 24h limit
 			},
 			expectError: true,
 			errorMsg:    "validity duration",

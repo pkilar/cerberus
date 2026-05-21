@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
@@ -46,9 +48,19 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 		return nil, fmt.Errorf("CA signer is not initialized. Call LoadKeySigner first")
 	}
 
-	publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(req.SSHKey))
+	publicKey, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(req.SSHKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+	// The input must be a bare authorized_keys-style key blob. Prefix options
+	// (e.g. `cert-authority,no-pty ssh-rsa ...`) and trailing bytes are silently
+	// dropped by ParseAuthorizedKey today; refuse them so the input string the
+	// caller sent is faithfully what we sign.
+	if len(options) > 0 {
+		return nil, fmt.Errorf("public key must not carry SSH options")
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("public key must not carry trailing data")
 	}
 
 	if err := validatePublicKey(publicKey); err != nil {
@@ -58,6 +70,13 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 	validityDuration, err := time.ParseDuration(req.Validity)
 	if err != nil {
 		return nil, fmt.Errorf("invalid validity duration string '%s': %w", req.Validity, err)
+	}
+
+	// Reject zero/negative durations: a 0 or negative duration produces a cert
+	// with ValidBefore <= ValidAfter (after the clock-skew back-date), which
+	// sshd rejects. Fail loudly here instead of issuing a useless cert.
+	if validityDuration <= 0 {
+		return nil, fmt.Errorf("validity duration must be positive (got %v)", validityDuration)
 	}
 
 	// Security check: limit validity duration
@@ -152,6 +171,12 @@ func validateSigningRequest(req messages.EnclaveSigningRequest) error {
 		return fmt.Errorf("invalid validity duration format: %w", err)
 	}
 
+	// Refuse an empty principals slice. The host API rejects this too; this
+	// is the enclave-side belt-and-braces for any future host that forgets.
+	if len(req.Principals) == 0 {
+		return fmt.Errorf("principals cannot be empty")
+	}
+
 	// Limit number of principals for security
 	if len(req.Principals) > messages.MaxPrincipals {
 		return fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), messages.MaxPrincipals)
@@ -191,10 +216,19 @@ func validatePublicKey(publicKey ssh.PublicKey) error {
 		if k.N.BitLen() < minRSAKeyBits {
 			return fmt.Errorf("RSA key too small: %d bits (minimum %d)", k.N.BitLen(), minRSAKeyBits)
 		}
-	case *ecdsa.PublicKey, ed25519.PublicKey:
-		// ECDSA P-256/P-384/P-521 and Ed25519 are all acceptable. Their
-		// strengths are tied to curve choice, which ssh.ParseAuthorizedKey
-		// has already locked down by the time we get here.
+	case *ecdsa.PublicKey:
+		// Explicit curve allowlist. ssh.ParseAuthorizedKey currently only
+		// emits NIST-P256/P384/P521, but enumerating them here keeps the
+		// signer's contract local instead of depending on a transitive
+		// parser invariant that may widen in a future x/crypto release.
+		switch k.Curve {
+		case elliptic.P256(), elliptic.P384(), elliptic.P521():
+			// OK
+		default:
+			return fmt.Errorf("unsupported ECDSA curve: %s", k.Curve.Params().Name)
+		}
+	case ed25519.PublicKey:
+		// Ed25519 is fixed-strength; nothing more to check.
 	default:
 		return fmt.Errorf("unsupported public key type: %T", k)
 	}
