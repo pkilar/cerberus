@@ -25,8 +25,6 @@ require (
 	golang.org/x/sys v0.44.0 // indirect
 )
 
-replace github.com/aws/aws-sdk-go-v2/service/kms => github.com/edgebitio/nitro-enclaves-sdk-go/kms v0.0.0-20221110205443-8a5476ff3cc2
-
 // Dev tools (gosec, govulncheck, golangci-lint) are intentionally NOT tracked
 // via Go 1.24+ tool directives here. Their transitive deps balloon go.sum
 // by 40+ entries, widening the supply-chain surface of a signing service.
