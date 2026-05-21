@@ -14,6 +14,7 @@ func newTestConfig(groups map[string]config.Group) *config.Config {
 }
 
 func TestAuthorize_BasicAllow(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -52,6 +53,7 @@ func TestAuthorize_BasicAllow(t *testing.T) {
 }
 
 func TestAuthorize_BasicDeny(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -78,6 +80,7 @@ func TestAuthorize_BasicDeny(t *testing.T) {
 }
 
 func TestAuthorize_UnknownUser(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -104,6 +107,7 @@ func TestAuthorize_UnknownUser(t *testing.T) {
 }
 
 func TestAuthorize_WildcardPrincipal(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"superadmins": {
 			Members: []string{"admin@REALM.COM"},
@@ -133,6 +137,7 @@ func TestAuthorize_WildcardPrincipal(t *testing.T) {
 }
 
 func TestAuthorize_MultiGroup(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -188,6 +193,7 @@ func TestAuthorize_MultiGroup(t *testing.T) {
 }
 
 func TestAuthorize_DeterministicOrder(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"zebra-team": {
 			Members: []string{"bob@REALM.COM"},
@@ -235,6 +241,7 @@ func TestAuthorize_MultiGroupDisjointPrincipals(t *testing.T) {
 	// Regression test: a user in multiple groups with different principals must
 	// NOT get cross-group authorization. The returned CertificateRules must
 	// come from the same group that authorized the principal.
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"alpha-admins": {
 			Members: []string{"alice@REALM.COM"},
@@ -305,6 +312,7 @@ func TestAuthorize_MultiGroupDisjointPrincipals(t *testing.T) {
 }
 
 func TestAuthorize_PartialDeny(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -336,6 +344,7 @@ func TestAuthorize_EmptyPrincipals(t *testing.T) {
 	// loop trivially allows. Refuse instead — the HTTP layer (api/server.go)
 	// refuses too, but Authorize must hold the line for any future caller
 	// that bypasses the handler.
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},
@@ -371,6 +380,7 @@ func TestAuthorize_EmptyPrincipals(t *testing.T) {
 }
 
 func TestAuthorize_CertificateRulesReturned(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(map[string]config.Group{
 		"engineers": {
 			Members: []string{"alice@REALM.COM"},

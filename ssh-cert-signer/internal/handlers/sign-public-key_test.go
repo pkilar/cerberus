@@ -52,6 +52,7 @@ func createTestPublicKey(t *testing.T) string {
 }
 
 func TestSignPublicKey(t *testing.T) {
+	t.Parallel()
 	signer := createTestSigner(t)
 	testPublicKey := createTestPublicKey(t)
 
@@ -229,6 +230,7 @@ func TestSignPublicKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			response, err := SignPublicKey(t.Context(), tt.signer, tt.request)
 
 			if tt.expectError {
@@ -300,6 +302,7 @@ func TestSignPublicKey(t *testing.T) {
 }
 
 func TestSignPublicKey_CertificateFields(t *testing.T) {
+	t.Parallel()
 	signer := createTestSigner(t)
 	testPublicKey := createTestPublicKey(t)
 
@@ -403,6 +406,7 @@ func createTestPublicKeyForBenchmark(b *testing.B) string {
 }
 
 func TestSignPublicKey_CriticalOptions(t *testing.T) {
+	t.Parallel()
 	signer := createTestSigner(t)
 	testPublicKey := createTestPublicKey(t)
 
