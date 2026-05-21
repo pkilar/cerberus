@@ -19,21 +19,63 @@ const MaxValidity = 24 * time.Hour
 // These messages define the API between the ssh-cert-signer and ssh-cert-api.
 // Only one of each field is expected to be set at any given time.
 type Request struct {
-	LoadKeySigner *LoadKeySignerRequest  `json:"loadKeySigner,omitempty"`
-	SignSshKey    *EnclaveSigningRequest `json:"signSshKey,omitempty"`
-	Ping          *PingRequest           `json:"ping,omitempty"`
+	LoadKeySigner     *LoadKeySignerRequest     `json:"loadKeySigner,omitempty"`
+	SignSshKey        *EnclaveSigningRequest    `json:"signSshKey,omitempty"`
+	Ping              *PingRequest              `json:"ping,omitempty"`
+	GetEnclaveMetrics *GetEnclaveMetricsRequest `json:"getEnclaveMetrics,omitempty"`
 }
 
 type Response struct {
-	LoadKeySigner *LoadKeySignerResponse `json:"loadKeySigner,omitempty"`
-	Error         *string                `json:"error,omitempty"`
-	SignSshKey    *SigningResponse       `json:"signSshKey,omitempty"`
-	Pong          *PingResponse          `json:"pong,omitempty"`
+	LoadKeySigner  *LoadKeySignerResponse  `json:"loadKeySigner,omitempty"`
+	Error          *string                 `json:"error,omitempty"`
+	SignSshKey     *SigningResponse        `json:"signSshKey,omitempty"`
+	Pong           *PingResponse           `json:"pong,omitempty"`
+	EnclaveMetrics *EnclaveMetricsResponse `json:"enclaveMetrics,omitempty"`
 }
 
 // PingRequest is a no-op request used by /health to verify the enclave is
 // reachable and has a loaded CA signer.
 type PingRequest struct{}
+
+// GetEnclaveMetricsRequest asks the enclave to sample its own /proc/stat and
+// /proc/meminfo. The host polls this on a slow cadence (default 15s, matched
+// to the default Prometheus scrape interval) and exposes the values via the
+// /metrics endpoint as cerberus_enclave_cpu_seconds_total{mode} and
+// cerberus_enclave_memory_bytes{type}.
+type GetEnclaveMetricsRequest struct{}
+
+// EnclaveMetricsResponse carries one snapshot of enclave resource usage. CPU
+// values are cumulative seconds since enclave boot (counter semantics — the
+// host emits them as Prometheus counters and Grafana queries use rate());
+// Memory values are byte counts at sample time (gauge semantics).
+type EnclaveMetricsResponse struct {
+	CPU    EnclaveCPUTimes    `json:"cpu"`
+	Memory EnclaveMemoryStats `json:"memory"`
+}
+
+// EnclaveCPUTimes is the seven canonical /proc/stat aggregate-cpu modes,
+// converted from jiffies to seconds inside the enclave so the host doesn't
+// have to know the enclave's CLK_TCK.
+type EnclaveCPUTimes struct {
+	User    float64 `json:"user"`
+	Nice    float64 `json:"nice"`
+	System  float64 `json:"system"`
+	Idle    float64 `json:"idle"`
+	IOWait  float64 `json:"iowait"`
+	IRQ     float64 `json:"irq"`
+	SoftIRQ float64 `json:"softirq"`
+}
+
+// EnclaveMemoryStats is the subset of /proc/meminfo the host surfaces as
+// Prometheus metrics. Bytes (not kB) so the wire format matches the unit
+// node_exporter uses.
+type EnclaveMemoryStats struct {
+	TotalBytes     uint64 `json:"totalBytes"`
+	AvailableBytes uint64 `json:"availableBytes"`
+	FreeBytes      uint64 `json:"freeBytes"`
+	BuffersBytes   uint64 `json:"buffersBytes"`
+	CachedBytes    uint64 `json:"cachedBytes"`
+}
 
 // PingResponse is the enclave's reply to a PingRequest. SignerLoaded is
 // false during the brief window between process start and LoadKeySigner

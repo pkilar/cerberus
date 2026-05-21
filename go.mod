@@ -19,10 +19,10 @@ require (
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
-	github.com/mdlayher/socket v0.4.1 // indirect
-	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	github.com/mdlayher/socket v0.6.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
 
 // Dev tools (gosec, govulncheck, golangci-lint) are intentionally NOT tracked

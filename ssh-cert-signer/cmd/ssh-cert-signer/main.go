@@ -205,6 +205,9 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	if req.Ping != nil {
 		nVariants++
 	}
+	if req.GetEnclaveMetrics != nil {
+		nVariants++
+	}
 	if nVariants > 1 {
 		return createErrorResponse(errors.New("multiple request variants set; expected exactly one"))
 	}
@@ -216,6 +219,8 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 		return handleSignSshKey(ctx, *req.SignSshKey)
 	case req.Ping != nil:
 		return handlePing()
+	case req.GetEnclaveMetrics != nil:
+		return handleGetEnclaveMetrics()
 	default:
 		return createErrorResponse(errUnexpectedCommand)
 	}
@@ -228,6 +233,19 @@ func handlePing() messages.Response {
 	loaded := caSigner.Load() != nil
 	return messages.Response{
 		Pong: &messages.PingResponse{SignerLoaded: loaded},
+	}
+}
+
+// handleGetEnclaveMetrics samples /proc/stat and /proc/meminfo inside the
+// enclave and returns the snapshot. The host polls this on a slow cadence
+// and exposes the values through its /metrics endpoint.
+func handleGetEnclaveMetrics() messages.Response {
+	resp, err := handlers.ReadEnclaveMetrics()
+	if err != nil {
+		return createErrorResponse(err)
+	}
+	return messages.Response{
+		EnclaveMetrics: &resp,
 	}
 }
 

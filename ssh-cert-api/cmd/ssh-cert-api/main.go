@@ -31,6 +31,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -112,6 +113,19 @@ func main() {
 	defer rootCancel()
 	healthMonitor := api.NewHealthMonitor(enclaveClient)
 	healthMonitor.Start(rootCtx)
+
+	// --- 4c. Start background enclave-resource metrics poller ---
+	// Independent of the health monitor: the metrics path samples
+	// /proc/stat and /proc/meminfo inside the enclave on a slow cadence
+	// (default 15s, override via ENCLAVE_METRICS_INTERVAL) and exposes
+	// the snapshot through /metrics. Failed polls do not page anyone —
+	// stale metrics are detectable via
+	// cerberus_enclave_metrics_last_scrape_timestamp_seconds.
+	enclaveMetrics := api.NewEnclaveMetricsCollector(enclaveClient, cfg.EnclaveMetricsInterval)
+	if err := prometheus.Register(enclaveMetrics); err != nil {
+		log.Fatalf("Failed to register enclave metrics collector: %v", err)
+	}
+	enclaveMetrics.Start(rootCtx)
 
 	// --- 5. Setup API Server ---
 	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient, healthMonitor)
