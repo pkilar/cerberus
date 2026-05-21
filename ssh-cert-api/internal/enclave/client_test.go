@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"cerberus/messages"
@@ -81,72 +82,80 @@ func TestRoundTrip_ErrorResponseDecoded(t *testing.T) {
 }
 
 func TestRoundTrip_CtxCancelClosesConn(t *testing.T) {
-	// The AfterFunc seam must close the conn on ctx cancellation so the read
-	// returns instead of waiting on the wall-clock backstop.
-	client, server := pipePair(t)
-	// Server never replies. The test goroutine will cancel ctx.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// Drain one request, then block (no reply).
-		_, _ = bufio.NewReader(server).ReadBytes('\n')
-		// Goroutine exits without replying. The client's read blocks until
-		// the AfterFunc seam (ctx cancel / deadline path) closes its conn.
-	}()
+	// synctest pauses real time and only advances it when every goroutine in
+	// the bubble is blocked. The 50ms sleep before cancel and the post-cancel
+	// elapsed assertion become exact rather than "approximately X within a
+	// generous tolerance" — and the test runs in microseconds of real time.
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+		// Server never replies. Cancel the ctx after 50ms (synthetic).
+		go func() {
+			_, _ = bufio.NewReader(server).ReadBytes('\n')
+			// Goroutine exits without replying. The client's read blocks
+			// until the AfterFunc seam (ctx cancel) closes its conn.
+		}()
 
-	start := time.Now()
-	var resp messages.Response
-	err := roundTrip(ctx, client, messages.Request{
-		Ping: &messages.PingRequest{},
-	}, &resp)
-	elapsed := time.Since(start)
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
 
-	if err == nil {
-		t.Fatal("expected error after ctx cancel, got nil")
-	}
-	// Should return well under the 30s wall-clock backstop.
-	if elapsed > 2*time.Second {
-		t.Errorf("roundTrip blocked %v after ctx cancel — AfterFunc seam not wired", elapsed)
-	}
-	_ = server.Close()
-	<-done
+		start := time.Now()
+		var resp messages.Response
+		err := roundTrip(ctx, client, messages.Request{
+			Ping: &messages.PingRequest{},
+		}, &resp)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected error after ctx cancel, got nil")
+		}
+		// AfterFunc must fire shortly after the 50ms cancel — not anywhere
+		// near the 30s wall-clock backstop.
+		if elapsed > 100*time.Millisecond {
+			t.Errorf("roundTrip returned %v after ctx cancel; AfterFunc seam not wired", elapsed)
+		}
+	})
 }
 
 func TestRoundTrip_CtxDeadlineNarrowsBackstop(t *testing.T) {
 	// A short ctx deadline must clamp the conn deadline so a non-responsive
-	// peer doesn't keep us blocked for the full wall-clock budget.
-	client, server := pipePair(t)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = bufio.NewReader(server).ReadBytes('\n')
-		// No reply. Client's read blocks until the conn deadline fires.
-	}()
+	// peer doesn't keep us blocked for the full wall-clock budget. Under
+	// synctest, the 80ms deadline fires at synthetic time; real elapsed
+	// is microseconds.
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
-	defer cancel()
+		go func() {
+			_, _ = bufio.NewReader(server).ReadBytes('\n')
+			// No reply. Client's read blocks until the conn deadline fires
+			// (via the AfterFunc seam clamping to the ctx deadline).
+		}()
 
-	start := time.Now()
-	var resp messages.Response
-	err := roundTrip(ctx, client, messages.Request{
-		Ping: &messages.PingRequest{},
-	}, &resp)
-	elapsed := time.Since(start)
+		ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+		defer cancel()
 
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	if elapsed > 2*time.Second {
-		t.Errorf("roundTrip blocked %v under 80ms ctx deadline", elapsed)
-	}
-	_ = server.Close()
-	<-done
+		start := time.Now()
+		var resp messages.Response
+		err := roundTrip(ctx, client, messages.Request{
+			Ping: &messages.PingRequest{},
+		}, &resp)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("expected timeout error, got nil")
+		}
+		// Must return at the 80ms deadline, not the 30s wall-clock backstop.
+		if elapsed > 200*time.Millisecond {
+			t.Errorf("roundTrip blocked %v under 80ms ctx deadline", elapsed)
+		}
+	})
 }
 
 func TestRoundTrip_MalformedJSONResponse(t *testing.T) {
@@ -191,34 +200,36 @@ func TestRoundTrip_ServerClosesWithoutResponse(t *testing.T) {
 func TestRoundTrip_FragmentedResponseRecombined(t *testing.T) {
 	// The bufio.NewReader.ReadBytes('\n') framing must concatenate bytes
 	// across multiple Write calls — a single conn.Read might short-read on
-	// MTU-sensitive transport. Two small writes here, separated by a tiny
-	// sleep, exercise that join.
-	client, server := pipePair(t)
-	body, _ := json.Marshal(messages.Response{
-		SignSshKey: &messages.SigningResponse{SignedKey: "x"},
-	})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer server.Close()
-		_, _ = bufio.NewReader(server).ReadBytes('\n')
-		half := len(body) / 2
-		_, _ = server.Write(body[:half])
-		time.Sleep(5 * time.Millisecond)
-		_, _ = server.Write(body[half:])
-		_, _ = server.Write([]byte{'\n'})
-	}()
+	// MTU-sensitive transport. Two small writes here, separated by a sleep,
+	// exercise that join. Under synctest the sleep is synthetic; the test
+	// stays deterministic without paying real wall-clock time.
+	synctest.Test(t, func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
 
-	var resp messages.Response
-	if err := roundTrip(t.Context(), client, messages.Request{
-		Ping: &messages.PingRequest{},
-	}, &resp); err != nil {
-		t.Fatalf("roundTrip: %v", err)
-	}
-	if resp.SignSshKey == nil || resp.SignSshKey.SignedKey != "x" {
-		t.Errorf("response payload not assembled: %+v", resp)
-	}
-	<-done
+		body, _ := json.Marshal(messages.Response{
+			SignSshKey: &messages.SigningResponse{SignedKey: "x"},
+		})
+		go func() {
+			defer server.Close()
+			_, _ = bufio.NewReader(server).ReadBytes('\n')
+			half := len(body) / 2
+			_, _ = server.Write(body[:half])
+			time.Sleep(5 * time.Millisecond)
+			_, _ = server.Write(body[half:])
+			_, _ = server.Write([]byte{'\n'})
+		}()
+
+		var resp messages.Response
+		if err := roundTrip(t.Context(), client, messages.Request{
+			Ping: &messages.PingRequest{},
+		}, &resp); err != nil {
+			t.Fatalf("roundTrip: %v", err)
+		}
+		if resp.SignSshKey == nil || resp.SignSshKey.SignedKey != "x" {
+			t.Errorf("response payload not assembled: %+v", resp)
+		}
+	})
 }
 
 func TestRoundTrip_AfterFuncStopsOnReturn(t *testing.T) {
