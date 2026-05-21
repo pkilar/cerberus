@@ -39,12 +39,15 @@ func (f *fakeAuthorizer) Authorize(string, []string) (*authz.AuthorizationResult
 }
 
 type fakeSigner struct {
-	signed    string
-	err       error
-	got       *messages.EnclaveSigningRequest
-	pingResp  *messages.PingResponse
-	pingErr   error
-	pingCount atomic.Int64 // total Ping calls, for the no-enclave-hit-on-flood assertion
+	signed       string
+	err          error
+	got          *messages.EnclaveSigningRequest
+	pingResp     *messages.PingResponse
+	pingErr      error
+	pingCount    atomic.Int64 // total Ping calls, for the no-enclave-hit-on-flood assertion
+	metricsResp  *messages.EnclaveMetricsResponse
+	metricsErr   error
+	metricsCount atomic.Int64
 }
 
 func (f *fakeSigner) SignPublicKey(_ context.Context, req *messages.EnclaveSigningRequest) (string, error) {
@@ -63,6 +66,22 @@ func (f *fakeSigner) Ping(_ context.Context) (*messages.PingResponse, error) {
 	// Default: signer is loaded. Tests that need a different shape set
 	// pingResp or pingErr explicitly.
 	return &messages.PingResponse{SignerLoaded: true}, nil
+}
+
+func (f *fakeSigner) GetEnclaveMetrics(_ context.Context) (*messages.EnclaveMetricsResponse, error) {
+	f.metricsCount.Add(1)
+	if f.metricsErr != nil {
+		return nil, f.metricsErr
+	}
+	if f.metricsResp != nil {
+		return f.metricsResp, nil
+	}
+	// Default: a minimal valid snapshot. Tests that need specific values set
+	// metricsResp explicitly.
+	return &messages.EnclaveMetricsResponse{
+		CPU:    messages.EnclaveCPUTimes{User: 1, System: 2, Idle: 100},
+		Memory: messages.EnclaveMemoryStats{TotalBytes: 1 << 30, AvailableBytes: 1 << 29},
+	}, nil
 }
 
 func (f *fakeSigner) Close() error { return nil }

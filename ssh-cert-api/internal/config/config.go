@@ -18,12 +18,13 @@ import (
 
 // Config is the top-level structure for the entire config.yaml file.
 type Config struct {
-	Groups           map[string]Group `yaml:"groups"`
-	KeytabPath       string           `yaml:"keytab_path"`
-	ServicePrincipal string           `yaml:"service_principal"`
-	Listen           string           `yaml:"listen"`
-	TlsCert          string           `yaml:"tls_cert"`
-	TlsKey           string           `yaml:"tls_key"`
+	Groups                 map[string]Group `yaml:"groups"`
+	KeytabPath             string           `yaml:"keytab_path"`
+	ServicePrincipal       string           `yaml:"service_principal"`
+	Listen                 string           `yaml:"listen"`
+	TlsCert                string           `yaml:"tls_cert"`
+	TlsKey                 string           `yaml:"tls_key"`
+	EnclaveMetricsInterval time.Duration    `yaml:"enclave_metrics_interval"`
 }
 
 // Group defines a set of members and the certificate rules that apply to them.
@@ -102,6 +103,18 @@ func (c *Config) applyDefaults() {
 	if c.TlsKey == "" {
 		c.TlsKey = "key.pem"
 	}
+	// Env override takes precedence over YAML so operators can re-tune the
+	// poller without redeploying config. Invalid values silently fall back to
+	// the YAML/zero value, matching the rate-limit override pattern in
+	// ratelimit.go.
+	if v := os.Getenv("ENCLAVE_METRICS_INTERVAL"); v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil && parsed > 0 {
+			c.EnclaveMetricsInterval = parsed
+		}
+	}
+	if c.EnclaveMetricsInterval == 0 {
+		c.EnclaveMetricsInterval = 15 * time.Second
+	}
 }
 
 // Validate checks the configuration for logical errors. It does not mutate
@@ -113,6 +126,17 @@ func (c *Config) Validate() error {
 
 	if c.KeytabPath == "" {
 		return fmt.Errorf("keytab_path must be specified in the configuration")
+	}
+
+	// EnclaveMetricsInterval == 0 is allowed here: applyDefaults fills it
+	// before LoadConfig reaches Validate, and tests that bypass applyDefaults
+	// have skipped this field deliberately. Reject only absurd values that
+	// would produce VSOCK pressure or never-firing tickers.
+	if c.EnclaveMetricsInterval < 0 {
+		return fmt.Errorf("enclave_metrics_interval must not be negative, got %v", c.EnclaveMetricsInterval)
+	}
+	if c.EnclaveMetricsInterval > 0 && c.EnclaveMetricsInterval < time.Second {
+		return fmt.Errorf("enclave_metrics_interval %v is too short; minimum is 1s", c.EnclaveMetricsInterval)
 	}
 
 	for name, group := range c.Groups {

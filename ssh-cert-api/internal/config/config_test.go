@@ -655,3 +655,86 @@ func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
 		})
 	}
 }
+
+func TestEnclaveMetricsInterval_Defaults(t *testing.T) {
+	// Cannot t.Parallel here: we mutate a process-global env var.
+	t.Setenv("ENCLAVE_METRICS_INTERVAL", "")
+
+	c := &Config{}
+	c.applyDefaults()
+	if c.EnclaveMetricsInterval != 15*time.Second {
+		t.Errorf("default = %v, want 15s", c.EnclaveMetricsInterval)
+	}
+}
+
+func TestEnclaveMetricsInterval_EnvOverride(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		yaml     time.Duration
+		want     time.Duration
+	}{
+		{name: "env wins over yaml", envValue: "30s", yaml: 10 * time.Second, want: 30 * time.Second},
+		{name: "yaml used when env empty", envValue: "", yaml: 10 * time.Second, want: 10 * time.Second},
+		{name: "default when both empty", envValue: "", yaml: 0, want: 15 * time.Second},
+		{name: "invalid env falls back to yaml", envValue: "not-a-duration", yaml: 10 * time.Second, want: 10 * time.Second},
+		{name: "negative env falls back to default", envValue: "-5s", yaml: 0, want: 15 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ENCLAVE_METRICS_INTERVAL", tt.envValue)
+			c := &Config{EnclaveMetricsInterval: tt.yaml}
+			c.applyDefaults()
+			if c.EnclaveMetricsInterval != tt.want {
+				t.Errorf("got %v, want %v", c.EnclaveMetricsInterval, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnclaveMetricsInterval_Validate(t *testing.T) {
+	t.Parallel()
+	base := func(d time.Duration) Config {
+		return Config{
+			KeytabPath:             "/tmp/k",
+			EnclaveMetricsInterval: d,
+			Groups: map[string]Group{
+				"g": {
+					Members: []string{"u@example.com"},
+					CertificateRules: CertificateRules{
+						Validity:          "1h",
+						AllowedPrincipals: []string{"u"},
+					},
+				},
+			},
+		}
+	}
+	tests := []struct {
+		name      string
+		interval  time.Duration
+		wantError bool
+		errSubstr string
+	}{
+		{name: "zero is OK (defaults will fill)", interval: 0, wantError: false},
+		{name: "5 seconds is OK", interval: 5 * time.Second, wantError: false},
+		{name: "1 hour is OK", interval: time.Hour, wantError: false},
+		{name: "negative rejected", interval: -1 * time.Second, wantError: true, errSubstr: "must not be negative"},
+		{name: "sub-second rejected", interval: 100 * time.Millisecond, wantError: true, errSubstr: "minimum is 1s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base(tt.interval)
+			err := cfg.Validate()
+			if tt.wantError && err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantError && tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Errorf("error %v does not contain %q", err, tt.errSubstr)
+			}
+		})
+	}
+}

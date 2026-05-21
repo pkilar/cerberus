@@ -27,6 +27,7 @@ import (
 type Signer interface {
 	SignPublicKey(ctx context.Context, req *messages.EnclaveSigningRequest) (string, error)
 	Ping(ctx context.Context) (*messages.PingResponse, error)
+	GetEnclaveMetrics(ctx context.Context) (*messages.EnclaveMetricsResponse, error)
 	Close() error
 }
 
@@ -123,6 +124,26 @@ func (vsockSigner) Ping(ctx context.Context) (*messages.PingResponse, error) {
 		return nil, fmt.Errorf("no pong in response")
 	}
 	return response.Pong, nil
+}
+
+// GetEnclaveMetrics asks the enclave for one snapshot of its CPU and memory
+// usage. The enclave reads /proc/stat and /proc/meminfo and returns
+// pre-converted values (CPU seconds, memory bytes). Used by the host's
+// background EnclaveMetricsCollector; do not call from the request hot path.
+func (vsockSigner) GetEnclaveMetrics(ctx context.Context) (*messages.EnclaveMetricsResponse, error) {
+	request := messages.Request{GetEnclaveMetrics: &messages.GetEnclaveMetricsRequest{}}
+
+	var response messages.Response
+	if err := Call(ctx, constants.EnclaveCID, request, &response); err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, fmt.Errorf("enclave error: %s", *response.Error)
+	}
+	if response.EnclaveMetrics == nil {
+		return nil, fmt.Errorf("no enclaveMetrics in response")
+	}
+	return response.EnclaveMetrics, nil
 }
 
 func (vsockSigner) SignPublicKey(ctx context.Context, req *messages.EnclaveSigningRequest) (string, error) {
