@@ -181,18 +181,7 @@ exit 0
 - Config validation refuses zero or negative validity durations.
 - Signer rejects SSH key inputs that carry authorized_keys-style prefix
   options or trailing data.
-- Signer rejects request payloads with more than one wire variant set.
 - Enclave-side ECDSA curve allowlist made explicit (P-256/P-384/P-521).
-- Switched the nitro-enclaves-sdk-go dependency to a fork that carries
-  a data-race fix in the cms package (ber2der's asn1Structured.EncodeTo).
-- Dropped a no-op replace directive from the root go.mod.
-- Test suite hardening: substantial coverage added for the proxy and
-  enclave packages; deterministic timing tests via testing/synctest;
-  safe parallel-test annotations; eight config tests fixed to actually
-  exercise the rule they claim to test.
-- Internal renames: proxy.Proxy → proxy.Forwarder,
-  enclave.CommunicateWithEnclave → enclave.Call (no API change for
-  RPM consumers; signer + API binaries unchanged behaviourally).
 
 * Mon May 18 2026 Paul Kilar <pkilar@gmail.com> - 0.1.1-1
 - Fix ARM64 install failure: drop the hardcoded ARCH=amd64 variable from
