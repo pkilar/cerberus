@@ -1,6 +1,6 @@
 // Package proxy implements a VSOCK-to-TCP forwarder. Nitro Enclaves have no
 // network stack; the enclave dials a VSOCK address on the parent instance,
-// and this proxy forwards the bytes on to the target TCP endpoint
+// and this forwarder relays the bytes on to the target TCP endpoint
 // (typically kms.<region>.amazonaws.com:443). TLS is terminated inside the
 // enclave, so the host sees only ciphertext on the wire.
 package proxy
@@ -19,8 +19,10 @@ import (
 	"github.com/mdlayher/vsock"
 )
 
-// Proxy defines a VSOCK-to-TCP proxy.
-type Proxy struct {
+// Forwarder forwards VSOCK connections from the enclave to a target TCP
+// endpoint. One instance handles many concurrent connections; Stop waits for
+// all in-flight forwards to drain.
+type Forwarder struct {
 	vsockPort  uint32
 	targetAddr string
 	listener   net.Listener
@@ -28,57 +30,58 @@ type Proxy struct {
 	cancel     context.CancelFunc
 }
 
-// New creates a new Proxy instance.
-// targetAddr should be in "host:port" format (e.g., "kms.us-east-1.amazonaws.com:443").
-func New(vsockPort uint32, targetAddr string) *Proxy {
-	return &Proxy{
+// New creates a Forwarder that listens on the given VSOCK port and forwards
+// each accepted connection to targetAddr ("host:port", e.g.
+// "kms.us-east-1.amazonaws.com:443").
+func New(vsockPort uint32, targetAddr string) *Forwarder {
+	return &Forwarder{
 		vsockPort:  vsockPort,
 		targetAddr: targetAddr,
 	}
 }
 
-// Start launches the proxy listener in a background goroutine.
-func (p *Proxy) Start(ctx context.Context) error {
-	// Create a cancellable context for the proxy's lifecycle.
+// Start launches the forwarder's accept loop in a background goroutine.
+func (f *Forwarder) Start(ctx context.Context) error {
+	// Create a cancellable context for the forwarder's lifecycle.
 	proxyCtx, cancel := context.WithCancel(ctx)
-	p.cancel = cancel
+	f.cancel = cancel
 
 	// Listen on the specified VSOCK port.
-	listener, err := vsock.Listen(p.vsockPort, nil)
+	listener, err := vsock.Listen(f.vsockPort, nil)
 	if err != nil {
-		return fmt.Errorf("proxy failed to listen on vsock port %d: %w", p.vsockPort, err)
+		return fmt.Errorf("proxy failed to listen on vsock port %d: %w", f.vsockPort, err)
 	}
-	p.listener = listener
+	f.listener = listener
 
-	logging.Debug("Proxy listening on vsock port %d, forwarding to %s", p.vsockPort, p.targetAddr)
+	logging.Debug("Proxy listening on vsock port %d, forwarding to %s", f.vsockPort, f.targetAddr)
 
-	p.wg.Go(func() { p.run(proxyCtx) })
+	f.wg.Go(func() { f.run(proxyCtx) })
 
 	return nil
 }
 
-// Stop gracefully shuts down the proxy and waits for it to finish.
-func (p *Proxy) Stop() {
+// Stop gracefully shuts down the forwarder and waits for it to finish.
+func (f *Forwarder) Stop() {
 	logging.Debug("Stopping proxy...")
-	if p.cancel != nil {
-		p.cancel()
+	if f.cancel != nil {
+		f.cancel()
 	}
-	p.wg.Wait()
+	f.wg.Wait()
 	logging.Debug("Proxy stopped.")
 }
 
 // run is the main loop that accepts and handles connections.
-func (p *Proxy) run(ctx context.Context) {
+func (f *Forwarder) run(ctx context.Context) {
 	// Close the listener exactly once across the two paths that need to do
 	// it: AfterFunc closes early on ctx cancellation (to unblock Accept), and
 	// the deferred wrapper closes on normal return.
 	var closeOnce sync.Once
-	closeListener := func() { closeOnce.Do(func() { _ = p.listener.Close() }) }
+	closeListener := func() { closeOnce.Do(func() { _ = f.listener.Close() }) }
 	defer closeListener()
 	context.AfterFunc(ctx, closeListener)
 
 	for {
-		conn, err := p.listener.Accept()
+		conn, err := f.listener.Accept()
 		if err != nil {
 			// Check if the context was cancelled, indicating a graceful shutdown.
 			select {
@@ -94,22 +97,22 @@ func (p *Proxy) run(ctx context.Context) {
 			}
 		}
 
-		p.wg.Go(func() { p.handleConnection(ctx, conn) })
+		f.wg.Go(func() { f.handleConnection(ctx, conn) })
 	}
 }
 
 // handleConnection forwards data between the VSOCK client and the TCP target.
-func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
+func (f *Forwarder) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	defer vsockConn.Close()
 
 	logging.Debug("Proxy accepted connection from %s", vsockConn.RemoteAddr().String())
 
-	// Dial the target TCP endpoint with the proxy's lifecycle context so
+	// Dial the target TCP endpoint with the forwarder's lifecycle context so
 	// shutdown cancels in-flight dials instead of waiting on TCP timeouts.
 	var dialer net.Dialer
-	tcpConn, err := dialer.DialContext(ctx, "tcp", p.targetAddr)
+	tcpConn, err := dialer.DialContext(ctx, "tcp", f.targetAddr)
 	if err != nil {
-		slog.Error("proxy.dial_failed", "target", p.targetAddr, "error", err)
+		slog.Error("proxy.dial_failed", "target", f.targetAddr, "error", err)
 		return
 	}
 	defer tcpConn.Close()
@@ -117,7 +120,7 @@ func (p *Proxy) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	logging.Debug("Proxy connected to TCP endpoint %s", tcpConn.RemoteAddr().String())
 
 	// Goroutine to copy data from VSOCK to TCP.
-	p.wg.Go(func() {
+	f.wg.Go(func() {
 		defer tcpConn.Close()
 		defer vsockConn.Close()
 		if _, err := io.Copy(tcpConn, vsockConn); err != nil && !errors.Is(err, net.ErrClosed) {

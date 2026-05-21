@@ -50,12 +50,12 @@ func (vsockSigner) Close() error {
 // fits comfortably within this window in practice.
 const vsockRoundTripDeadline = 30 * time.Second
 
-// CommunicateWithEnclave sends a JSON request to the enclave and decodes the
-// response into response. The supplied ctx governs the call: if it is
-// cancelled or expires, the underlying VSOCK connection is closed so any
-// in-flight Read/Write unblocks promptly. A wall-clock backstop bounds
-// requests whose context lacks a deadline.
-func CommunicateWithEnclave(ctx context.Context, enclaveCID uint32, request messages.Request, response *messages.Response) error {
+// Call sends a JSON request to the enclave and decodes the response into
+// response. The supplied ctx governs the call: if it is cancelled or expires,
+// the underlying VSOCK connection is closed so any in-flight Read/Write
+// unblocks promptly. A wall-clock backstop bounds requests whose context
+// lacks a deadline.
+func Call(ctx context.Context, enclaveCID uint32, request messages.Request, response *messages.Response) error {
 	conn, err := vsock.Dial(enclaveCID, constants.EnclaveListeningPort, nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to enclave: %w", err)
@@ -105,7 +105,7 @@ func (vsockSigner) Ping(ctx context.Context) (*messages.PingResponse, error) {
 	request := messages.Request{Ping: &messages.PingRequest{}}
 
 	var response messages.Response
-	if err := CommunicateWithEnclave(ctx, constants.EnclaveCID, request, &response); err != nil {
+	if err := Call(ctx, constants.EnclaveCID, request, &response); err != nil {
 		return nil, err
 	}
 	if response.Error != nil {
@@ -123,7 +123,7 @@ func (vsockSigner) SignPublicKey(ctx context.Context, req *messages.EnclaveSigni
 	}
 
 	var response messages.Response
-	if err := CommunicateWithEnclave(ctx, constants.EnclaveCID, request, &response); err != nil {
+	if err := Call(ctx, constants.EnclaveCID, request, &response); err != nil {
 		return "", err
 	}
 

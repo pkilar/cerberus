@@ -203,7 +203,7 @@ func LoadKeySigner(ctx context.Context) error {
 	}
 
 	var response messages.Response
-	if err := enclave.CommunicateWithEnclave(ctx, constants.EnclaveCID, request, &response); err != nil {
+	if err := enclave.Call(ctx, constants.EnclaveCID, request, &response); err != nil {
 		return fmt.Errorf("error communicating with enclave: %w", err)
 	}
 
