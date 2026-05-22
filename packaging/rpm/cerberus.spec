@@ -175,6 +175,11 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu May 21 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
+- Expose Nitro Enclave CPU and memory utilization as Prometheus metrics
+  (sourced via NSM in-band describe-pcr; no host metrics).
+- Switch ssh-cert-signer to github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
+
 * Thu May 21 2026 Paul Kilar <pkilar@gmail.com> - 0.2.0-1
 - API rejects empty Principals; signer applies the same check as defense
   in depth.

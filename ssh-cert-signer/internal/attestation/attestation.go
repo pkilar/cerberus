@@ -14,7 +14,7 @@ import (
 	"log"
 	"log/slog"
 
-	"github.com/edgebitio/nitro-enclaves-sdk-go/crypto/cms"
+	"github.com/pkilar/nitro-enclaves-sdk-go/crypto/cms"
 	"github.com/hf/nsm"
 	"github.com/hf/nsm/request"
 )
