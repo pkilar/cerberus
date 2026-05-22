@@ -14,9 +14,9 @@ import (
 	"log"
 	"log/slog"
 
-	"github.com/pkilar/nitro-enclaves-sdk-go/crypto/cms"
 	"github.com/hf/nsm"
 	"github.com/hf/nsm/request"
+	"github.com/pkilar/nitro-enclaves-sdk-go/crypto/cms"
 )
 
 // maxCMSEnvelopeBytes caps the input size accepted by DecryptCMSEnvelope.
