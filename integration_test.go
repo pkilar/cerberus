@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -231,21 +232,65 @@ func TestIntegration_MessageSerialization(t *testing.T) {
 	}
 }
 
+// startMockEnclave starts a MockVSockServer scoped to the test lifetime. Stop
+// is registered as a t.Cleanup so callers don't have to track it themselves.
+func startMockEnclave(t *testing.T) *MockVSockServer {
+	t.Helper()
+	server, err := NewMockVSockServer()
+	if err != nil {
+		t.Fatalf("failed to create mock server: %v", err)
+	}
+	if err := server.Start(); err != nil {
+		t.Fatalf("failed to start mock server: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop() })
+	return server
+}
+
+// verifyCertMatches asserts that the issued certificate carries the principals,
+// permissions, custom attributes, and critical options from the original
+// signing request, and that the validity window covers "now".
+func verifyCertMatches(t *testing.T, cert *ssh.Certificate, want messages.EnclaveSigningRequest) {
+	t.Helper()
+
+	if cert.KeyId != want.KeyID {
+		t.Errorf("KeyId: want %q, got %q", want.KeyID, cert.KeyId)
+	}
+	if !slices.Equal(cert.ValidPrincipals, want.Principals) {
+		t.Errorf("ValidPrincipals: want %v, got %v", want.Principals, cert.ValidPrincipals)
+	}
+
+	// Production behavior collapses Permissions + CustomAttributes into
+	// the SSH cert's Extensions map; CriticalOptions stays separate.
+	for k, v := range want.Permissions {
+		if got := cert.Permissions.Extensions[k]; got != v {
+			t.Errorf("Extensions[%q]: want %q, got %q", k, v, got)
+		}
+	}
+	for k, v := range want.CustomAttributes {
+		if got := cert.Permissions.Extensions[k]; got != v {
+			t.Errorf("Extensions[%q]: want %q, got %q", k, v, got)
+		}
+	}
+	for k, v := range want.CriticalOptions {
+		if got := cert.Permissions.CriticalOptions[k]; got != v {
+			t.Errorf("CriticalOptions[%q]: want %q, got %q", k, v, got)
+		}
+	}
+
+	now := uint64(time.Now().Unix())
+	if cert.ValidAfter > now || cert.ValidBefore < now {
+		t.Errorf("certificate not valid now: ValidAfter=%d, ValidBefore=%d, now=%d",
+			cert.ValidAfter, cert.ValidBefore, now)
+	}
+}
+
 func TestIntegration_EndToEndSigning(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	// Start mock enclave server
-	mockServer, err := NewMockVSockServer()
-	if err != nil {
-		t.Fatalf("failed to create mock server: %v", err)
-	}
-
-	if err := mockServer.Start(); err != nil {
-		t.Fatalf("failed to start mock server: %v", err)
-	}
-	defer mockServer.Stop()
+	mockServer := startMockEnclave(t)
 
 	// Create test public key
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -260,7 +305,6 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 
 	testPublicKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(publicKey)))
 
-	// Create signing request
 	signingReq := messages.EnclaveSigningRequest{
 		SSHKey:     testPublicKey,
 		KeyID:      "test-user@example.com",
@@ -277,11 +321,6 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 		},
 	}
 
-	// Create request message
-	request := messages.Request{
-		SignSshKey: &signingReq,
-	}
-
 	// Connect to mock server and send request
 	conn, err := net.Dial("tcp", mockServer.Addr())
 	if err != nil {
@@ -291,8 +330,7 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	// Send request
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
+	if err := json.NewEncoder(conn).Encode(messages.Request{SignSshKey: &signingReq}); err != nil {
 		t.Fatalf("failed to send request: %v", err)
 	}
 
@@ -309,54 +347,23 @@ func TestIntegration_EndToEndSigning(t *testing.T) {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
 
-	// Check for errors
 	if response.Error != nil {
 		t.Fatalf("received error response: %s", *response.Error)
 	}
-
 	if response.SignSshKey == nil || response.SignSshKey.SignedKey == "" {
 		t.Fatal("expected signed key in response")
 	}
 
-	// Verify the signed certificate
 	certKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(response.SignSshKey.SignedKey))
 	if err != nil {
 		t.Fatalf("failed to parse signed certificate: %v", err)
 	}
-
 	cert, ok := certKey.(*ssh.Certificate)
 	if !ok {
 		t.Fatal("expected SSH certificate")
 	}
 
-	// Verify certificate properties
-	if len(cert.ValidPrincipals) != 1 || cert.ValidPrincipals[0] != "admin" {
-		t.Errorf("expected principals [admin], got %v", cert.ValidPrincipals)
-	}
-
-	if cert.KeyId != "test-user@example.com" {
-		t.Errorf("expected KeyID 'test-user@example.com', got '%s'", cert.KeyId)
-	}
-
-	// Verify extensions (permissions + custom attributes)
-	if cert.Permissions.Extensions["permit-pty"] != "" {
-		t.Error("expected permit-pty permission")
-	}
-
-	if cert.Permissions.Extensions["environment@example.com"] != "test" {
-		t.Error("expected environment@example.com=test attribute")
-	}
-
-	// Verify critical options
-	if cert.Permissions.CriticalOptions["source-address"] != "192.168.1.0/24" {
-		t.Errorf("expected source-address critical option, got: %v", cert.Permissions.CriticalOptions)
-	}
-
-	// Verify certificate is currently valid
-	now := uint64(time.Now().Unix())
-	if cert.ValidAfter > now || cert.ValidBefore < now {
-		t.Error("certificate should be valid now")
-	}
+	verifyCertMatches(t, cert, signingReq)
 
 	t.Logf("Successfully created and verified SSH certificate with KeyID: %s", cert.KeyId)
 }
@@ -371,15 +378,7 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	mockServer, err := NewMockVSockServer()
-	if err != nil {
-		t.Fatalf("failed to create mock server: %v", err)
-	}
-	if err := mockServer.Start(); err != nil {
-		t.Fatalf("failed to start mock server: %v", err)
-	}
-	defer mockServer.Stop()
-	addr := mockServer.Addr()
+	addr := startMockEnclave(t).Addr()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -459,14 +458,7 @@ func TestIntegration_MalformedRequest(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	mockServer, err := NewMockVSockServer()
-	if err != nil {
-		t.Fatalf("failed to create mock server: %v", err)
-	}
-	if err := mockServer.Start(); err != nil {
-		t.Fatalf("failed to start mock server: %v", err)
-	}
-	defer mockServer.Stop()
+	mockServer := startMockEnclave(t)
 
 	conn, err := net.Dial("tcp", mockServer.Addr())
 	if err != nil {
