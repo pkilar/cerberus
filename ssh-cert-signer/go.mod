@@ -10,9 +10,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/service/kms v1.52.0
-	github.com/edgebitio/nitro-enclaves-sdk-go v1.0.0
 	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.2.1
+	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
 	golang.org/x/crypto v0.51.0
 )
 
@@ -37,5 +37,3 @@ require (
 )
 
 replace cerberus => ../
-
-replace github.com/edgebitio/nitro-enclaves-sdk-go => github.com/pkilar/nitro-enclaves-sdk-go v1.0.1-0.20260521032308-6819b7df8e4d
