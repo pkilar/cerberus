@@ -2,6 +2,8 @@
 
 # **Cerberus: An AWS Nitro Enclave SSH Certificate Authority**
 
+[![CI][ci-badge]][ci] [![Go Report Card][go-reportcard-badge]][go-reportcard] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev]
+
 Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to run on AWS. It leverages AWS Nitro Enclaves to ensure that the CA's private signing key is never exposed to the host operating system, network, or any user. It provides a web API for users to request signed SSH certificates after authenticating with Kerberos.
 
 ## **Features**
