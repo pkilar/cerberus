@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 )
 
 func TestEnclaveMetricsCollector_PopulatesSnapshotOnSuccess(t *testing.T) {

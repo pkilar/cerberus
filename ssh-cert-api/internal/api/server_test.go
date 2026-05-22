@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"cerberus/messages"
-	"ssh-cert-api/internal/auth"
-	"ssh-cert-api/internal/authz"
-	"ssh-cert-api/internal/config"
-	"ssh-cert-api/internal/enclave"
+	"github.com/pkilar/cerberus/messages"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/auth"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/authz"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
 )
 
 // --- Test doubles for the three injection points on Server. ---

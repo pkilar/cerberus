@@ -6,7 +6,7 @@
 // principals cover the full request wins.
 package authz
 
-import "ssh-cert-api/internal/config"
+import "github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 
 // AuthorizationResult contains the authorization decision and the associated certificate rules.
 type AuthorizationResult struct {

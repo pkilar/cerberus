@@ -14,7 +14,7 @@ import (
 	"net"
 	"sync"
 
-	"cerberus/logging"
+	"github.com/pkilar/cerberus/logging"
 
 	"github.com/mdlayher/vsock"
 )

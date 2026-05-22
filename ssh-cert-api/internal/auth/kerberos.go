@@ -14,7 +14,7 @@ import (
 	"os"
 	"strings"
 
-	"cerberus/logging"
+	"github.com/pkilar/cerberus/logging"
 
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/jcmturner/gokrb5/v8/messages"

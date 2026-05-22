@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"cerberus/messages"
-	"ssh-cert-signer/internal/handlers"
+	"github.com/pkilar/cerberus/messages"
+	"github.com/pkilar/cerberus/ssh-cert-signer/internal/handlers"
 
 	"golang.org/x/crypto/ssh"
 )

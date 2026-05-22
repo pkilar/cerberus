@@ -23,10 +23,10 @@ import (
 	"github.com/mdlayher/vsock"
 	"golang.org/x/crypto/ssh"
 
-	"cerberus/constants"
-	"cerberus/logging"
-	"cerberus/messages"
-	"ssh-cert-signer/internal/attestation"
+	"github.com/pkilar/cerberus/constants"
+	"github.com/pkilar/cerberus/logging"
+	"github.com/pkilar/cerberus/messages"
+	"github.com/pkilar/cerberus/ssh-cert-signer/internal/attestation"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )

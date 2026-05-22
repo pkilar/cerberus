@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ssh-cert-api/internal/enclave"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
 )
 
 const (

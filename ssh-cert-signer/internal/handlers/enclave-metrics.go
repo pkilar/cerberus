@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 )
 
 // procStatPath and procMeminfoPath are vars (not consts) so tests can point

@@ -14,9 +14,9 @@ import (
 	"net"
 	"time"
 
-	"cerberus/constants"
-	"cerberus/logging"
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/constants"
+	"github.com/pkilar/cerberus/logging"
+	"github.com/pkilar/cerberus/messages"
 
 	"github.com/mdlayher/vsock"
 )

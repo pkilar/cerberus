@@ -1,17 +1,17 @@
-module ssh-cert-api
+module github.com/pkilar/cerberus/ssh-cert-api
 
 go 1.26.0
 
 toolchain go1.26.3
 
 require (
-	cerberus v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.23
 	github.com/casbin/casbin/v2 v2.135.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mdlayher/vsock v1.2.1
+	github.com/pkilar/cerberus v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	go.uber.org/goleak v1.3.0
@@ -55,4 +55,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace cerberus => ../
+replace github.com/pkilar/cerberus => ../
