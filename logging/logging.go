@@ -48,11 +48,24 @@ func init() {
 
 // Debug logs at debug level with a printf-style message. Kept for back-compat;
 // prefer slog.Debug / slog.Info / slog.Error with structured attributes in new code.
+// Callers with a context.Context in scope should use DebugContext to propagate
+// any context-attached attributes into the slog handler.
 func Debug(format string, args ...any) {
 	if !debugEnabled {
 		return
 	}
 	appLogger.LogAttrs(context.Background(), slog.LevelDebug, fmt.Sprintf(format, args...))
+}
+
+// DebugContext is the ctx-aware sibling of Debug. It carries the caller's
+// context into slog so the configured handler can pick up any
+// context-attached attributes (request IDs, span IDs). Same DEBUG=true gate
+// and printf-style format as Debug.
+func DebugContext(ctx context.Context, format string, args ...any) {
+	if !debugEnabled {
+		return
+	}
+	appLogger.LogAttrs(ctx, slog.LevelDebug, fmt.Sprintf(format, args...))
 }
 
 // Logger returns the configured application logger.

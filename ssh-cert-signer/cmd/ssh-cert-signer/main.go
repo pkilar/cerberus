@@ -130,7 +130,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	// up to connDeadline for the in-flight Scan to time out.
 	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopOnCancel()
-	logging.Debug("Accepted new connection from parent instance.")
+	logging.DebugContext(ctx, "Accepted new connection from parent instance.")
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBytes)
@@ -186,10 +186,10 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	if err := json.Unmarshal(requestBytes, &req); err != nil {
 		// Don't log requestBytes — they may carry unredactable secret material
 		// for a payload that just happens to fail JSON parsing.
-		logging.Debug("recv: <unparseable JSON: %v>", err)
+		logging.DebugContext(ctx, "recv: <unparseable JSON: %v>", err)
 		return createErrorResponse(fmt.Errorf("json.Unmarshal failed: %w", err))
 	}
-	logging.Debug("recv: %s", messages.RedactedJSON(req))
+	logging.DebugContext(ctx, "recv: %s", messages.RedactedJSON(req))
 
 	// The wire-protocol contract in messages.Request says exactly one variant
 	// is non-nil. Refuse ambiguous payloads rather than silently picking the
@@ -272,7 +272,7 @@ func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) m
 		return createErrorResponse(err)
 	}
 
-	logging.Debug("res: %v", signResponse.SignedKey)
+	logging.DebugContext(ctx, "res: %v", signResponse.SignedKey)
 	return messages.Response{
 		SignSshKey: signResponse,
 	}

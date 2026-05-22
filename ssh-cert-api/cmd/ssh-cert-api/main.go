@@ -209,12 +209,12 @@ func main() {
 // ctx bounds the entire fetch-credentials + VSOCK round trip; on cancellation
 // the VSOCK client tears its connection down promptly.
 func LoadKeySigner(ctx context.Context) error {
-	logging.Debug("Fetching AWS credentials from metadata service...")
+	logging.DebugContext(ctx, "Fetching AWS credentials from metadata service...")
 	credentials, err := fetchAWSCredentials(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch AWS credentials: %w", err)
 	}
-	logging.Debug("Successfully fetched AWS credentials")
+	logging.DebugContext(ctx, "Successfully fetched AWS credentials")
 
 	// Create the LoadKeySigner request. The encrypted key itself is read by
 	// the enclave from CA_KEY_FILE_PATH; it does not travel over the wire.
@@ -233,7 +233,7 @@ func LoadKeySigner(ctx context.Context) error {
 		return fmt.Errorf("enclave error: %s", *response.Error)
 	}
 
-	logging.Debug("Successfully loaded key signer in enclave")
+	logging.DebugContext(ctx, "Successfully loaded key signer in enclave")
 	return nil
 }
 

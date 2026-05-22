@@ -61,7 +61,7 @@ func (f *Forwarder) Start(ctx context.Context) error {
 	}
 	f.listener = listener
 
-	logging.Debug("Proxy listening on vsock port %d, forwarding to %s", f.vsockPort, f.targetAddr)
+	logging.DebugContext(ctx, "Proxy listening on vsock port %d, forwarding to %s", f.vsockPort, f.targetAddr)
 
 	f.wg.Go(func() { f.run(proxyCtx) })
 
@@ -113,7 +113,7 @@ func (f *Forwarder) run(ctx context.Context) {
 func (f *Forwarder) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	defer vsockConn.Close()
 
-	logging.Debug("Proxy accepted connection from %s", vsockConn.RemoteAddr().String())
+	logging.DebugContext(ctx, "Proxy accepted connection from %s", vsockConn.RemoteAddr().String())
 
 	// Dial the target TCP endpoint with the forwarder's lifecycle context so
 	// shutdown cancels in-flight dials instead of waiting on TCP timeouts.
@@ -124,19 +124,19 @@ func (f *Forwarder) handleConnection(ctx context.Context, vsockConn net.Conn) {
 	}
 	defer tcpConn.Close()
 
-	logging.Debug("Proxy connected to TCP endpoint %s", tcpConn.RemoteAddr().String())
+	logging.DebugContext(ctx, "Proxy connected to TCP endpoint %s", tcpConn.RemoteAddr().String())
 
 	// Goroutine to copy data from VSOCK to TCP.
 	f.wg.Go(func() {
 		defer tcpConn.Close()
 		defer vsockConn.Close()
 		if _, err := io.Copy(tcpConn, vsockConn); err != nil && !errors.Is(err, net.ErrClosed) {
-			logging.Debug("proxy vsock→tcp copy ended: %v", err)
+			logging.DebugContext(ctx, "proxy vsock→tcp copy ended: %v", err)
 		}
 	})
 
 	// Copy data from TCP to VSOCK.
 	if _, err := io.Copy(vsockConn, tcpConn); err != nil && !errors.Is(err, net.ErrClosed) {
-		logging.Debug("proxy tcp→vsock copy ended: %v", err)
+		logging.DebugContext(ctx, "proxy tcp→vsock copy ended: %v", err)
 	}
 }
