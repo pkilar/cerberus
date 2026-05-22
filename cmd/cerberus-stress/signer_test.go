@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 )
 
 func TestParseVsock(t *testing.T) {

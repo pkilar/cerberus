@@ -14,9 +14,9 @@ import (
 	"net"
 	"time"
 
-	"cerberus/constants"
-	"cerberus/logging"
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/constants"
+	"github.com/pkilar/cerberus/logging"
+	"github.com/pkilar/cerberus/messages"
 
 	"github.com/mdlayher/vsock"
 )
@@ -89,7 +89,7 @@ func roundTrip(ctx context.Context, conn net.Conn, request messages.Request, res
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	logging.Debug("Sending request to enclave: %s", messages.RedactedJSON(request))
+	logging.DebugContext(ctx, "Sending request to enclave: %s", messages.RedactedJSON(request))
 	if _, err := conn.Write(append(requestBytes, '\n')); err != nil {
 		return fmt.Errorf("failed to send request to enclave: %w", err)
 	}
@@ -99,7 +99,7 @@ func roundTrip(ctx context.Context, conn net.Conn, request messages.Request, res
 	if err != nil {
 		return fmt.Errorf("failed to read response from enclave: %w", err)
 	}
-	logging.Debug("Received response from enclave: %s", string(responseBytes))
+	logging.DebugContext(ctx, "Received response from enclave: %s", string(responseBytes))
 
 	if err := json.Unmarshal(responseBytes, response); err != nil {
 		return fmt.Errorf("failed to unmarshal response: %w", err)

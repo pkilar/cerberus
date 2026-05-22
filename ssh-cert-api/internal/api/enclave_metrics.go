@@ -8,8 +8,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"cerberus/messages"
-	"ssh-cert-api/internal/enclave"
+	"github.com/pkilar/cerberus/messages"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
 )
 
 const (

@@ -11,7 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 )
 
 // pipePair returns two ends of a net.Pipe. Both ends honor deadlines.

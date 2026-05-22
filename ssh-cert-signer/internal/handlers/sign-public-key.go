@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 
 	"golang.org/x/crypto/ssh"
 )

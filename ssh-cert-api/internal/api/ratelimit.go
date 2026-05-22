@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"ssh-cert-api/internal/auth"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/auth"
 )
 
 const (

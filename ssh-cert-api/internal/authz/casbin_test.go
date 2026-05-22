@@ -3,7 +3,7 @@ package authz
 import (
 	"testing"
 
-	"ssh-cert-api/internal/config"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 )
 
 func newTestConfig(groups map[string]config.Group) *config.Config {

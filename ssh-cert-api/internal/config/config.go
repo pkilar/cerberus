@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 
 	"gopkg.in/yaml.v3"
 )

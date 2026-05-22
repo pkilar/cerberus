@@ -1,17 +1,17 @@
-module ssh-cert-signer
+module github.com/pkilar/cerberus/ssh-cert-signer
 
 go 1.26.0
 
 toolchain go1.26.3
 
 require (
-	cerberus v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/service/kms v1.52.0
 	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.2.1
+	github.com/pkilar/cerberus v0.0.0-00010101000000-000000000000
 	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
 	golang.org/x/crypto v0.52.0
 )
@@ -36,4 +36,4 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 )
 
-replace cerberus => ../
+replace github.com/pkilar/cerberus => ../

@@ -7,7 +7,7 @@ import (
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
 
-	"ssh-cert-api/internal/config"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 )
 
 const casbinModel = `

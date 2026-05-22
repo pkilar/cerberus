@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"

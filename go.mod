@@ -1,4 +1,4 @@
-module cerberus
+module github.com/pkilar/cerberus
 
 go 1.26.0
 
@@ -10,7 +10,7 @@ require (
 	golang.org/x/crypto v0.52.0
 )
 
-replace ssh-cert-api => ./ssh-cert-api
+replace github.com/pkilar/cerberus/ssh-cert-api => ./ssh-cert-api
 
 require (
 	github.com/hashicorp/go-uuid v1.0.3 // indirect

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 )
 
 func TestLoadKeySignerHandler_MissingFile(t *testing.T) {

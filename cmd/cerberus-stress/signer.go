@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cerberus/messages"
+	"github.com/pkilar/cerberus/messages"
 
 	"github.com/mdlayher/vsock"
 )

@@ -23,10 +23,10 @@ import (
 	"github.com/mdlayher/vsock"
 	"golang.org/x/crypto/ssh"
 
-	"cerberus/constants"
-	"cerberus/logging"
-	"cerberus/messages"
-	"ssh-cert-signer/internal/attestation"
+	"github.com/pkilar/cerberus/constants"
+	"github.com/pkilar/cerberus/logging"
+	"github.com/pkilar/cerberus/messages"
+	"github.com/pkilar/cerberus/ssh-cert-signer/internal/attestation"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
@@ -53,14 +53,14 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	// Create custom HTTP client that routes through VSOCK proxy
 	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
 		tr.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-			logging.Debug("KMS SDK attempting to connect to: %s (network: %s)", addr, network)
-			logging.Debug("Intercepting connection via vsock (cid=%d, port=%d)", constants.InstanceCID, constants.InstanceListeningPort)
+			logging.DebugContext(ctx, "KMS SDK attempting to connect to: %s (network: %s)", addr, network)
+			logging.DebugContext(ctx, "Intercepting connection via vsock (cid=%d, port=%d)", constants.InstanceCID, constants.InstanceListeningPort)
 			conn, err := vsock.Dial(constants.InstanceCID, constants.InstanceListeningPort, nil)
 			if err != nil {
 				log.Printf("VSOCK dial failed: %v", err)
 				return nil, err
 			}
-			logging.Debug("VSOCK connection established successfully")
+			logging.DebugContext(ctx, "VSOCK connection established successfully")
 			return conn, nil
 		}
 	})
@@ -68,7 +68,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	// The AWS SDK must use the credentials from the parent instance.
 	credentialProvider := credentials.NewStaticCredentialsProvider(req.Credentials.AccessKeyId, req.Credentials.SecretAccessKey, req.Credentials.Token)
 
-	logging.Debug("Loading AWS configuration...")
+	logging.DebugContext(ctx, "Loading AWS configuration...")
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
 		config.WithHTTPClient(httpClient),
@@ -80,29 +80,29 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 	caKeyFilePath := cmp.Or(os.Getenv("CA_KEY_FILE_PATH"), "/app/ca_key.enc")
 
 	// Read the encrypted CA key from file
-	logging.Debug("Reading encrypted CA key from file: %s", caKeyFilePath)
+	logging.DebugContext(ctx, "Reading encrypted CA key from file: %s", caKeyFilePath)
 	// #nosec G304,G703 -- caKeyFilePath comes from the CA_KEY_FILE_PATH env
 	// var set by the operator (or a packaged systemd unit), not untrusted input.
 	encryptedKeyBytes, err := os.ReadFile(caKeyFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read encrypted key file '%s': %w", caKeyFilePath, err)
 	}
-	logging.Debug("Successfully read encrypted key file (%d bytes)", len(encryptedKeyBytes))
+	logging.DebugContext(ctx, "Successfully read encrypted key file (%d bytes)", len(encryptedKeyBytes))
 
 	kmsClient := kms.NewFromConfig(cfg)
-	logging.Debug("Created KMS client for region: %s", region)
-	logging.Debug("All HTTP requests will go through VSOCK proxy to parent instance")
+	logging.DebugContext(ctx, "Created KMS client for region: %s", region)
+	logging.DebugContext(ctx, "All HTTP requests will go through VSOCK proxy to parent instance")
 
 	// Build KMS Decrypt input
-	logging.Debug("Decrypting CA key with KMS...")
-	logging.Debug("Encrypted key size: %d bytes", len(encryptedKeyBytes))
+	logging.DebugContext(ctx, "Decrypting CA key with KMS...")
+	logging.DebugContext(ctx, "Encrypted key size: %d bytes", len(encryptedKeyBytes))
 	decryptInput := &kms.DecryptInput{
 		CiphertextBlob: encryptedKeyBytes,
 	}
 
 	// If running inside an enclave, attach attestation document
 	if attestProvider != nil && attestProvider.IsAvailable() {
-		logging.Debug("Generating NSM attestation document...")
+		logging.DebugContext(ctx, "Generating NSM attestation document...")
 		attestDoc, err := attestProvider.GenerateAttestationDoc()
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate attestation document: %w", err)
@@ -111,7 +111,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 			AttestationDocument:    attestDoc,
 			KeyEncryptionAlgorithm: types.KeyEncryptionMechanismRsaesOaepSha256,
 		}
-		logging.Debug("Attestation document attached to KMS Decrypt request (%d bytes)", len(attestDoc))
+		logging.DebugContext(ctx, "Attestation document attached to KMS Decrypt request (%d bytes)", len(attestDoc))
 	}
 
 	decryptOutput, err := kmsClient.Decrypt(ctx, decryptInput)
@@ -127,7 +127,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 		if len(decryptOutput.CiphertextForRecipient) == 0 {
 			return nil, fmt.Errorf("KMS returned empty CiphertextForRecipient despite Recipient being set")
 		}
-		logging.Debug("Decrypting CMS envelope from CiphertextForRecipient (%d bytes)...", len(decryptOutput.CiphertextForRecipient))
+		logging.DebugContext(ctx, "Decrypting CMS envelope from CiphertextForRecipient (%d bytes)...", len(decryptOutput.CiphertextForRecipient))
 		plaintextKey, err = attestProvider.DecryptCMSEnvelope(decryptOutput.CiphertextForRecipient)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt CiphertextForRecipient: %w", err)

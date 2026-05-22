@@ -354,3 +354,10 @@ See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full operations runbook covering:
 - RPM package management and systemd service control
 - Troubleshooting tables for common issues (signing failures, auth errors, VSOCK/KMS proxy, network)
 - Diagnostic commands reference
+
+[ci]: https://github.com/pkilar/cerberus/actions/workflows/go.yml
+[ci-badge]: https://github.com/pkilar/cerberus/actions/workflows/go.yml/badge.svg?branch=main
+[go-reportcard]: https://goreportcard.com/report/github.com/pkilar/cerberus
+[go-reportcard-badge]: https://goreportcard.com/badge/github.com/pkilar/cerberus
+[pkg.go.dev]: https://pkg.go.dev/github.com/pkilar/cerberus
+[pkg.go.dev-badge]: https://pkg.go.dev/badge/github.com/pkilar/cerberus.svg
