@@ -129,7 +129,7 @@ func main() {
 		for _, backend := range cfg.LDAP {
 			client, err := cerberusldap.NewClient(backend, cfg.KeytabPath, ldapMetrics)
 			if err != nil {
-				log.Fatalf("Failed to initialize LDAP backend %q: %v", backend.Name, err)
+				log.Fatalf("Failed to initialize LDAP backend %q", backend.Name)
 			}
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), backend.Timeout)
 			err = client.HealthCheck(probeCtx)
