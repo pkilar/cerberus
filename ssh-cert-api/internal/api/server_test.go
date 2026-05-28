@@ -34,7 +34,7 @@ type fakeAuthorizer struct {
 	err    error
 }
 
-func (f *fakeAuthorizer) Authorize(string, []string) (*authz.AuthorizationResult, error) {
+func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.AuthorizationResult, error) {
 	return f.result, f.err
 }
 

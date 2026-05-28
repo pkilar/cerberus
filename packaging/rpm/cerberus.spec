@@ -161,6 +161,11 @@ exit 0
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/sysconfig/cerberus-api
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/cerberus/config.yaml.example
 %dir %attr(0750,cerberus,cerberus) %{_localstatedir}/log/cerberus
+# Ghost-declare the optional LDAP simple-bind password file so `rpm -V` flags
+# accidentally world-readable rotations. The file is NOT shipped — operators
+# create it (mode 0600) only if they configure an LDAP backend with
+# bind.method=simple. If unused, the ghost entry is harmless.
+%ghost %attr(0600,cerberus,cerberus) %config(noreplace) %{_sysconfdir}/cerberus/ldap.pw
 
 %files signer
 %license LICENSE
