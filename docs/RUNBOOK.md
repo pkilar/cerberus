@@ -569,6 +569,17 @@ GET /health
   - `"enclave unreachable"` — the last probe failed (VSOCK dial error, timeout, or signer side closed).
   - `"signer not loaded"` — the enclave is reachable but reports the CA key isn't loaded yet.
 - The caching exists because the signer caps in-flight VSOCK connections at 32 (a shared semaphore covering `/sign` and health probes). Inline `/health` probing would let unauthenticated callers starve signing capacity, so **don't replace this with on-demand probing**.
+- When LDAP RBAC is configured, the response body gains an `ldap` array with one entry per backend:
+  ```json
+  {
+    "status": "healthy",
+    "ldap": [
+      { "name": "corp-ad", "healthy": true,  "last_checked": "2026-05-27T15:04:00Z" },
+      { "name": "corp-openldap", "healthy": false, "last_checked": "...", "last_error": "ldap: connection refused" }
+    ]
+  }
+  ```
+  Per-backend status is **advisory** — the top-level `status` stays gated on the enclave staleness path so that a transient LDAP outage cannot stop static-only certificate issuance. Alert on `ldap[].healthy` separately (or scrape `cerberus_ldap_backend_up{backend="..."}` from `/metrics`).
 
 ### Monitoring Recommendations
 
@@ -662,6 +673,21 @@ Because `ca_key.enc` is baked into the EIF at Docker build time (the signer Dock
    sudo systemctl restart cerberus-api
    ```
 
+### Managing LDAP RBAC
+
+If a Cerberus group is LDAP-backed (`ldap_groups:` instead of `members:`), membership changes are made in the directory, not in `config.yaml`. The cache TTL configured per backend (default 60s, hard cap 10m) bounds how long a removed user can still authorize.
+
+Operational notes:
+
+- **Adding/removing users:** edit the LDAP group. No service restart required. The change takes effect within `cache_ttl` of the next authentication attempt for that user.
+- **Adding a new LDAP backend or new Cerberus group binding:** edit `config.yaml` and restart `cerberus-api`. Backends are validated at startup; a misconfigured backend refuses to start the service (see [Troubleshooting](#authorization-failures)).
+- **Rotating LDAP credentials:**
+  - *Simple bind:* replace `/etc/cerberus/ldap.pw` (mode `0600`, owned by the service user) and `sudo systemctl restart cerberus-api`. The file is read once at startup; rotation requires a restart, the same model used by the Kerberos keytab.
+  - *GSSAPI bind:* rotate the underlying keytab (see [Rotating the Kerberos Keytab](#rotating-the-kerberos-keytab)). GSSAPI bind reuses the API's keytab; the same restart picks up both.
+  - *Anonymous bind:* no credentials to rotate.
+- **Failure semantics:** LDAP-backed groups fail closed if the directory is unreachable — a `/sign` request from a user whose realm is covered by an unhealthy backend is denied (logged as `authz.ldap.error`). Static-only groups (`members:`) keep working through an LDAP outage. The top-level `/health` status does NOT flip red on LDAP failure (see [Health Endpoint](#health-endpoint)); alert on `ldap[].healthy` or the `cerberus_ldap_backend_up` gauge.
+- **Disabling LDAP entirely:** delete the entire `ldap:` section from `config.yaml` and restart. Group definitions that still reference `ldap_groups:` will fail validation at startup, so either migrate them to `members:` or delete them at the same time.
+
 ### Restarting the Enclave
 
 ```bash
@@ -739,6 +765,9 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 | `Not authorized for requested principals` (HTTP 403) | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                               |
 | User gets wrong permissions                          | User matches the wrong group                        | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request. |
 | User not found in any group                          | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                            |
+| HTTP 403 with `authz.ldap.error` in logs             | LDAP backend unreachable or denied bind             | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                              |
+| Service refuses to start with `ldap[...] initial probe failed` | Misconfigured LDAP backend at startup       | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                              |
+| `realm "..." claimed by both backends`               | Two LDAP backends list overlapping realms           | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                            |
 
 ### VSOCK / KMS Proxy Issues
 

@@ -27,6 +27,7 @@ import (
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/authz"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
+	cerberusldap "github.com/pkilar/cerberus/ssh-cert-api/internal/ldap"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/proxy"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -50,13 +51,22 @@ func main() {
 	}
 	logging.Debug("Configuration loaded successfully.")
 
-	// Non-fatal config-hygiene warnings: static_attributes keys not namespaced
-	// per PROTOCOL.certkeys §4. Logged once at startup; the service continues.
+	// Non-fatal config-hygiene warnings: bare static_attributes keys and any
+	// LDAP-block diagnostics that don't justify refusing to start (e.g.,
+	// long cache TTL, plaintext URL). Logged once at startup; the service
+	// continues. The Kind field is the slog event name.
 	for _, w := range cfg.Warnings() {
-		slog.Warn("config.static_attribute.not_namespaced",
-			"group", w.Group,
-			"key", w.Key,
-			"guidance", "rename to "+w.Key+"@<domain> per PROTOCOL.certkeys §4")
+		attrs := []any{"detail", w.Detail}
+		if w.Backend != "" {
+			attrs = append(attrs, "backend", w.Backend)
+		}
+		if w.Group != "" {
+			attrs = append(attrs, "group", w.Group)
+		}
+		if w.Key != "" {
+			attrs = append(attrs, "key", w.Key)
+		}
+		slog.Warn(w.Kind, attrs...)
 	}
 
 	// --- 2. Initialize Dependencies ---
@@ -100,8 +110,54 @@ func main() {
 	// requires the enclave to call AWS at runtime, leave the proxy running.
 	vsockProxy.Stop()
 
+	// --- 4. Initialize LDAP backends (optional) ---
+	// One Client per configured backend. Refuse to start if any initial
+	// HealthCheck fails: a misconfigured directory is operator error, not
+	// a state we want to discover for the first time during a /sign denial.
+	// A nil resolver disables LDAP entirely and Authorize behaves as
+	// pre-LDAP code did. The clients themselves are also retained so the
+	// /health prober (task 7) can poll them.
+	var (
+		ldapResolver authz.LDAPResolver
+		ldapClients  map[string]cerberusldap.Client
+		ldapMetrics  *cerberusldap.Metrics
+	)
+	if len(cfg.LDAP) > 0 {
+		ldapMetrics = cerberusldap.NewMetrics(prometheus.DefaultRegisterer)
+		ldapClients = make(map[string]cerberusldap.Client, len(cfg.LDAP))
+		realmIndex := make(map[string]string, len(cfg.LDAP))
+		for _, backend := range cfg.LDAP {
+			client, err := cerberusldap.NewClient(backend, cfg.KeytabPath, ldapMetrics)
+			if err != nil {
+				log.Fatalf("Failed to initialize LDAP backend %q", backend.Name)
+			}
+			probeCtx, probeCancel := context.WithTimeout(context.Background(), backend.Timeout)
+			err = client.HealthCheck(probeCtx)
+			probeCancel()
+			if err != nil {
+				log.Fatalf("LDAP backend %q failed initial probe: %v", backend.Name, err)
+			}
+			ldapClients[backend.Name] = client
+			for _, realm := range backend.Realms {
+				realmIndex[realm] = backend.Name
+			}
+		}
+		ldapResolver = authz.NewLDAPResolver(ldapClients, realmIndex)
+		slog.Info("ldap.startup.ready", "backends", len(ldapClients))
+	}
+
+	// Ensure LDAP clients are closed on shutdown (proxy / signer paths
+	// already have their own cleanup).
+	defer func() {
+		for name, c := range ldapClients {
+			if err := c.Close(); err != nil {
+				slog.Warn("ldap.shutdown.close_failed", "backend", name, "error", err)
+			}
+		}
+	}()
+
 	// --- 4. Initialize Authorizer ---
-	authorizer, err := authz.NewCasbinAuthorizer(cfg)
+	authorizer, err := authz.NewCasbinAuthorizer(cfg, ldapResolver)
 	if err != nil {
 		log.Fatalf("Failed to initialize authorizer: %v", err)
 	}
@@ -132,6 +188,14 @@ func main() {
 	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient, healthMonitor)
 	if err != nil {
 		log.Fatalf("Failed to initialize API server: %v", err)
+	}
+
+	// LDAP health monitor — advisory: /health JSON exposes per-backend
+	// state but the top-level status remains gated on the enclave path.
+	if len(ldapClients) > 0 {
+		ldapMon := api.NewLDAPHealthMonitor(ldapClients, ldapMetrics)
+		server.SetLDAPHealth(ldapMon)
+		ldapMon.Start(rootCtx)
 	}
 
 	// --- 5. Define the HTTP server with authentication middleware ---

@@ -39,6 +39,7 @@ type Server struct {
 	authorizer    authz.Authorizer
 	enclaveClient enclave.Signer
 	healthMonitor *HealthMonitor
+	ldapHealth    *LDAPHealthMonitor
 	limiter       *principalLimiter
 	router        *http.ServeMux
 }
@@ -56,6 +57,14 @@ func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer 
 
 	s.setupRoutes()
 	return s, nil
+}
+
+// SetLDAPHealth installs an LDAP health monitor used by the /health handler
+// to surface per-backend status. Optional: a nil monitor (the default) means
+// the /health body simply omits the ldap field. Called from main after the
+// LDAP clients are constructed.
+func (s *Server) SetLDAPHealth(m *LDAPHealthMonitor) {
+	s.ldapHealth = m
 }
 
 func (s *Server) Router() http.Handler {
@@ -193,7 +202,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)
 
 	// Check authorization and get user's group configuration
-	result, authzErr := s.authorizer.Authorize(principal, req.Principals)
+	result, authzErr := s.authorizer.Authorize(r.Context(), principal, req.Principals)
 	if authzErr != nil {
 		outcome = outcomeAuthzError
 		slog.Error("authz.error", "principal", principal, "error", authzErr)
@@ -242,6 +251,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	slog.Info("sign.success",
 		"principal", principal,
 		"group", result.GroupName,
+		"source", result.Source,
 		"granted_principals", result.CertificateRules.AllowedPrincipals,
 		"remote_addr", r.RemoteAddr,
 	)
@@ -250,36 +260,53 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
 }
 
+// healthResponse is the JSON body /health emits. The top-level status is
+// gated on the enclave staleness/error path; LDAP backend status is
+// advisory — present in the body for observability but does not flip the
+// top-level status. Operators wanting LDAP outages to fail health checks
+// alert on the ldap[].healthy field directly.
+type healthResponse struct {
+	Status string                `json:"status"`
+	Reason string                `json:"reason,omitempty"`
+	LDAP   []LDAPBackendSnapshot `json:"ldap,omitempty"`
+}
+
 // handleHealth reads the cached enclave health snapshot maintained by the
-// background healthMonitor. The handler never touches VSOCK directly, so a
-// flood of unauthenticated /health requests cannot consume the signer's
-// bounded connection budget — only the monitor's 5s background probe does.
+// background healthMonitor and, if configured, the per-backend LDAP
+// snapshots from ldapHealth. The handler never touches VSOCK or LDAP
+// directly, so a flood of unauthenticated /health requests cannot consume
+// the signer's bounded connection budget or pin LDAP server sockets — only
+// the monitors' 5s background probes do.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	ldapSnaps := s.ldapHealth.Snapshots() // safe on nil receiver
+
+	writeReply := func(status int, reason string) {
+		w.WriteHeader(status)
+		body := healthResponse{
+			Status: "unhealthy",
+			Reason: reason,
+			LDAP:   ldapSnaps,
+		}
+		if status == http.StatusOK {
+			body.Status = "healthy"
+			body.Reason = ""
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	}
 
 	snap := s.healthMonitor.Snapshot()
-	if snap == nil {
-		// Background monitor hasn't completed its first probe.
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "starting up"})
-		return
+	switch {
+	case snap == nil:
+		writeReply(http.StatusServiceUnavailable, "starting up")
+	case time.Since(snap.LastChecked) > healthStaleAfter:
+		slog.Warn("health.stale", "age", time.Since(snap.LastChecked))
+		writeReply(http.StatusServiceUnavailable, "health check stale")
+	case snap.LastError != "":
+		writeReply(http.StatusServiceUnavailable, "enclave unreachable")
+	case !snap.SignerLoaded:
+		writeReply(http.StatusServiceUnavailable, "signer not loaded")
+	default:
+		writeReply(http.StatusOK, "")
 	}
-	if age := time.Since(snap.LastChecked); age > healthStaleAfter {
-		slog.Warn("health.stale", "age", age)
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "health check stale"})
-		return
-	}
-	if snap.LastError != "" {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "enclave unreachable"})
-		return
-	}
-	if !snap.SignerLoaded {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": "signer not loaded"})
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status": "healthy"}`))
 }

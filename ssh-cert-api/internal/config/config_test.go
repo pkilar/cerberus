@@ -572,10 +572,18 @@ func TestConfigValidation_MultipleGroups(t *testing.T) {
 
 func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
 	t.Parallel()
+	mkBare := func(group, key string) Warning {
+		return Warning{
+			Kind:   WarnStaticAttributeNotNamespaced,
+			Group:  group,
+			Key:    key,
+			Detail: "rename to " + key + "@<domain> per PROTOCOL.certkeys §4",
+		}
+	}
 	tests := []struct {
 		name string
 		cfg  Config
-		want []StaticAttributeWarning
+		want []Warning
 	}{
 		{
 			name: "no groups",
@@ -627,11 +635,12 @@ func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
 					},
 				},
 			},
-			// Sorted by (group, key).
-			want: []StaticAttributeWarning{
-				{Group: "admin", Key: "access-level"},
-				{Group: "admin", Key: "team"},
-				{Group: "users", Key: "region"},
+			// Sorted by (kind, backend, group, key); kind and backend are
+			// equal here so it reduces to (group, key).
+			want: []Warning{
+				mkBare("admin", "access-level"),
+				mkBare("admin", "team"),
+				mkBare("users", "region"),
 			},
 		},
 		{
@@ -653,6 +662,341 @@ func TestWarnings_StaticAttributesNamespacing(t *testing.T) {
 				t.Errorf("Warnings() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// validLDAPConfig returns a Config that passes Validate with one LDAP backend
+// and one LDAP-backed group. Each test mutates a clone before calling Validate.
+func validLDAPConfig() Config {
+	return Config{
+		KeytabPath: "/etc/keytab",
+		LDAP: []LDAPBackend{{
+			Name:       "corp",
+			Realms:     []string{"REALM.EXAMPLE.COM"},
+			URL:        "ldaps://ad.corp.example:636",
+			UserBaseDN: "DC=corp,DC=example",
+			UserFilter: "(sAMAccountName=%s)",
+			Bind: LDAPBind{
+				Method:       LDAPBindSimple,
+				DN:           "CN=svc,DC=corp,DC=example",
+				PasswordFile: "/etc/cerberus/ldap.pw",
+			},
+		}},
+		Groups: map[string]Group{
+			"ssh-admins": {
+				LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
+				CertificateRules: CertificateRules{
+					Validity:          "8h",
+					AllowedPrincipals: []string{"root"},
+				},
+			},
+		},
+	}
+}
+
+func TestValidate_LDAP(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(c *Config)
+		wantErr string
+	}{
+		{
+			name:    "baseline valid",
+			mutate:  func(c *Config) {},
+			wantErr: "",
+		},
+		{
+			name: "missing backend name",
+			mutate: func(c *Config) {
+				c.LDAP[0].Name = ""
+			},
+			wantErr: "name is required",
+		},
+		{
+			name: "duplicate backend names",
+			mutate: func(c *Config) {
+				dup := c.LDAP[0]
+				dup.Realms = []string{"OTHER.EXAMPLE.COM"}
+				c.LDAP = append(c.LDAP, dup)
+			},
+			wantErr: "duplicate backend name",
+		},
+		{
+			name: "empty realms",
+			mutate: func(c *Config) {
+				c.LDAP[0].Realms = nil
+			},
+			wantErr: "realms must be non-empty",
+		},
+		{
+			name: "overlapping realms across backends",
+			mutate: func(c *Config) {
+				dup := c.LDAP[0]
+				dup.Name = "second"
+				c.LDAP = append(c.LDAP, dup)
+			},
+			wantErr: "is claimed by both backends",
+		},
+		{
+			name: "missing url",
+			mutate: func(c *Config) {
+				c.LDAP[0].URL = ""
+			},
+			wantErr: "url is required",
+		},
+		{
+			name: "missing user_base_dn",
+			mutate: func(c *Config) {
+				c.LDAP[0].UserBaseDN = ""
+			},
+			wantErr: "user_base_dn is required",
+		},
+		{
+			name: "user_filter missing %s",
+			mutate: func(c *Config) {
+				c.LDAP[0].UserFilter = "(uid=fixed)"
+			},
+			wantErr: "user_filter must contain exactly one",
+		},
+		{
+			name: "user_filter has two %s",
+			mutate: func(c *Config) {
+				c.LDAP[0].UserFilter = "(|(uid=%s)(sAMAccountName=%s))"
+			},
+			wantErr: "user_filter must contain exactly one",
+		},
+		{
+			name: "simple bind missing dn",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind.DN = ""
+			},
+			wantErr: "simple bind requires dn",
+		},
+		{
+			name: "simple bind missing password_file",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind.PasswordFile = ""
+			},
+			wantErr: "simple bind requires password_file",
+		},
+		{
+			name: "gssapi bind missing client_principal",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind = LDAPBind{Method: LDAPBindGSSAPI}
+			},
+			wantErr: "gssapi bind requires client_principal",
+		},
+		{
+			name: "gssapi client_principal not user@REALM",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind = LDAPBind{
+					Method:          LDAPBindGSSAPI,
+					ClientPrincipal: "svc-account",
+				}
+			},
+			wantErr: "must be in user@REALM form",
+		},
+		{
+			name: "anonymous bind ok",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind = LDAPBind{Method: LDAPBindAnonymous}
+			},
+			wantErr: "",
+		},
+		{
+			name: "unknown bind method",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind.Method = "kerberos5"
+			},
+			wantErr: "unknown bind method",
+		},
+		{
+			name: "cache_ttl too long",
+			mutate: func(c *Config) {
+				c.LDAP[0].CacheTTL = 20 * time.Minute
+			},
+			wantErr: "cache_ttl",
+		},
+		{
+			name: "negative cache_ttl",
+			mutate: func(c *Config) {
+				c.LDAP[0].CacheTTL = -1 * time.Second
+			},
+			wantErr: "cache_ttl must not be negative",
+		},
+		{
+			name: "timeout too long",
+			mutate: func(c *Config) {
+				c.LDAP[0].Timeout = 60 * time.Second
+			},
+			wantErr: "timeout",
+		},
+		{
+			name: "group has both members and ldap_groups",
+			mutate: func(c *Config) {
+				g := c.Groups["ssh-admins"]
+				g.Members = []string{"bob@REALM.EXAMPLE.COM"}
+				c.Groups["ssh-admins"] = g
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "group references ldap_groups but no backends",
+			mutate: func(c *Config) {
+				c.LDAP = nil
+			},
+			wantErr: "no ldap: backends are configured",
+		},
+		{
+			name: "group has neither members nor ldap_groups",
+			mutate: func(c *Config) {
+				g := c.Groups["ssh-admins"]
+				g.LDAPGroups = nil
+				c.Groups["ssh-admins"] = g
+			},
+			wantErr: "no members and no ldap_groups",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validLDAPConfig()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("expected no error, got: %v", err)
+			case tt.wantErr != "" && err == nil:
+				t.Errorf("expected error containing %q, got nil", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestWarnings_LDAP(t *testing.T) {
+	t.Parallel()
+	mkWarn := func(kind, backend, key, detail string) Warning {
+		return Warning{Kind: kind, Backend: backend, Key: key, Detail: detail}
+	}
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+		want   []Warning
+	}{
+		{
+			name:   "no warnings on baseline",
+			mutate: func(c *Config) {},
+			want:   nil,
+		},
+		{
+			name: "insecure_skip_verify true",
+			mutate: func(c *Config) {
+				c.LDAP[0].TLS.InsecureSkipVerify = true
+			},
+			want: []Warning{
+				mkWarn(WarnLDAPInsecureSkipVerify, "corp", "",
+					"tls.insecure_skip_verify=true disables server certificate validation"),
+			},
+		},
+		{
+			name: "plaintext ldap on non-loopback",
+			mutate: func(c *Config) {
+				c.LDAP[0].URL = "ldap://ad.corp.example:389"
+			},
+			want: []Warning{
+				mkWarn(WarnLDAPPlaintextURL, "corp", "",
+					"url uses plaintext ldap:// against a non-loopback host; prefer ldaps://"),
+			},
+		},
+		{
+			name: "plaintext ldap on loopback is silent",
+			mutate: func(c *Config) {
+				c.LDAP[0].URL = "ldap://127.0.0.1:3893"
+			},
+			want: nil,
+		},
+		{
+			name: "anonymous bind non-loopback",
+			mutate: func(c *Config) {
+				c.LDAP[0].Bind = LDAPBind{Method: LDAPBindAnonymous}
+			},
+			want: []Warning{
+				mkWarn(WarnLDAPAnonymousNonLoopback, "corp", "",
+					"anonymous bind is used against a non-loopback host; consider simple or gssapi bind"),
+			},
+		},
+		{
+			name: "anonymous bind on loopback is silent",
+			mutate: func(c *Config) {
+				c.LDAP[0].URL = "ldap://localhost:3893"
+				c.LDAP[0].Bind = LDAPBind{Method: LDAPBindAnonymous}
+			},
+			want: nil,
+		},
+		{
+			name: "long cache_ttl",
+			mutate: func(c *Config) {
+				c.LDAP[0].CacheTTL = 8 * time.Minute
+			},
+			want: []Warning{
+				mkWarn(WarnLDAPCacheTTLLong, "corp", "",
+					"cache_ttl=8m0s exceeds 5m; LDAP-removed users remain authorized until expiry"),
+			},
+		},
+		{
+			name: "lowercase realm",
+			mutate: func(c *Config) {
+				c.LDAP[0].Realms = []string{"realm.example.com"}
+			},
+			want: []Warning{
+				mkWarn(WarnLDAPRealmLowercase, "corp", "realm.example.com",
+					"Kerberos realms are conventionally uppercase; matching is case-sensitive"),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validLDAPConfig()
+			tt.mutate(&cfg)
+			cfg.applyDefaults()
+			got := cfg.Warnings()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyDefaults_LDAP(t *testing.T) {
+	t.Parallel()
+	cfg := validLDAPConfig()
+	cfg.applyDefaults()
+	if cfg.LDAP[0].Timeout != 5*time.Second {
+		t.Errorf("timeout default = %v, want 5s", cfg.LDAP[0].Timeout)
+	}
+	if cfg.LDAP[0].CacheTTL != 60*time.Second {
+		t.Errorf("cache_ttl default = %v, want 60s", cfg.LDAP[0].CacheTTL)
+	}
+	if cfg.LDAP[0].GroupMembershipAttr != "memberOf" {
+		t.Errorf("group_membership_attr default = %q, want memberOf", cfg.LDAP[0].GroupMembershipAttr)
+	}
+}
+
+func TestApplyDefaults_LDAPKrb5ConfOnlyForGSSAPI(t *testing.T) {
+	t.Parallel()
+	cfg := validLDAPConfig()
+	cfg.applyDefaults()
+	if cfg.LDAP[0].Bind.Krb5ConfPath != "" {
+		t.Errorf("krb5_conf_path should stay empty for simple bind, got %q", cfg.LDAP[0].Bind.Krb5ConfPath)
+	}
+	cfg.LDAP[0].Bind = LDAPBind{Method: LDAPBindGSSAPI, ClientPrincipal: "svc@REALM"}
+	cfg.applyDefaults()
+	if cfg.LDAP[0].Bind.Krb5ConfPath != "/etc/krb5.conf" {
+		t.Errorf("krb5_conf_path default for gssapi = %q, want /etc/krb5.conf", cfg.LDAP[0].Bind.Krb5ConfPath)
 	}
 }
 

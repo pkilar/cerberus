@@ -58,6 +58,56 @@ listen: ""
 tls_cert: ""
 tls_key: ""
 
+# ──────────────────────────────────────────────────────────────────────
+# LDAP-backed RBAC (optional)
+# ──────────────────────────────────────────────────────────────────────
+# Each entry under `ldap:` declares one directory backend. Backends are
+# routed by Kerberos realm: when a user authenticates as `alice@REALM-A`,
+# the backend whose `realms:` includes `REALM-A` is consulted and `alice`
+# (the short uid) is looked up. Realms must not overlap across backends.
+#
+# Per-group rules:
+#   - A group is either `members:` (static) OR `ldap_groups:` (LDAP-backed),
+#     never both. Validated at startup.
+#   - LDAP failure for an LDAP-backed group fails closed (denies the
+#     request). Static groups are unaffected by LDAP state.
+#
+# Delete the entire `ldap:` section to disable directory-backed RBAC; the
+# service then behaves exactly as it did before LDAP support was added.
+#
+# ldap:
+#   - name: corp-ad
+#     realms: [CORP.EXAMPLE.COM]
+#     url: ldaps://ad.corp.example:636
+#     bind:
+#       method: simple                   # simple | gssapi | anonymous
+#       dn: "CN=ssh-cert-api,OU=Service,DC=corp,DC=example"
+#       password_file: /etc/cerberus/ldap.pw    # mode 0600 / 0400 only
+#     user_base_dn: "DC=corp,DC=example"
+#     # Exactly one %s placeholder, LDAP-escaped at request time.
+#     user_filter: "(sAMAccountName=%s)"
+#     group_membership_attr: memberOf           # default
+#     tls:
+#       ca_file: /etc/cerberus/ldap-ca.pem
+#       insecure_skip_verify: false             # warned at startup if true
+#     timeout: 5s                                # default
+#     cache_ttl: 60s                             # default; hard cap 10m
+#
+#   # GSSAPI bind reuses the API's own keytab. client_principal selects the
+#   # initiator identity within the keytab.
+#   - name: corp-openldap
+#     realms: [OTHER.EXAMPLE.COM]
+#     url: ldaps://ldap.other.example:636
+#     bind:
+#       method: gssapi
+#       client_principal: "HTTP/api.example.com@OTHER.EXAMPLE.COM"
+#       krb5_conf_path: /etc/krb5.conf          # default
+#     user_base_dn: "ou=people,dc=other,dc=example"
+#     user_filter: "(uid=%s)"
+#     group_membership_attr: memberOf
+#     tls:
+#       ca_file: /etc/cerberus/other-ca.pem
+
 groups:
   # The 'backend-engineers' group has access to production servers.
   backend-engineers:
@@ -137,3 +187,18 @@ groups:
       static_attributes:
         team@example.com: "data"
         access-level@example.com: "restricted"
+
+  # Example of an LDAP-backed group. Membership is decided at request time
+  # by querying the LDAP backend whose realms cover the user's Kerberos
+  # realm. A user qualifies for this group if their `memberOf` attribute
+  # in LDAP includes ANY of the DNs listed here. Cannot coexist with
+  # `members:` in the same group.
+  #
+  # ssh-admins:
+  #   ldap_groups:
+  #     - "CN=ssh-admins,OU=Groups,DC=corp,DC=example"
+  #   certificate_rules:
+  #     validity: "8h"
+  #     allowed_principals: ["root"]
+  #     permissions:
+  #       permit-pty: ""

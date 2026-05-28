@@ -7,6 +7,7 @@ import (
 	"cmp"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -27,13 +28,71 @@ type Config struct {
 	TlsCert                string           `yaml:"tls_cert"`
 	TlsKey                 string           `yaml:"tls_key"`
 	EnclaveMetricsInterval time.Duration    `yaml:"enclave_metrics_interval"`
+	LDAP                   []LDAPBackend    `yaml:"ldap"`
 }
 
 // Group defines a set of members and the certificate rules that apply to them.
+// Members and LDAPGroups are mutually exclusive: a group is either statically
+// enumerated (members) or LDAP-backed (ldap_groups), never both. Enforced by
+// Validate so operators wanting hybrid behavior must split into two groups.
 type Group struct {
 	Members          []string         `yaml:"members"`
+	LDAPGroups       []string         `yaml:"ldap_groups"`
 	CertificateRules CertificateRules `yaml:"certificate_rules"`
 }
+
+// LDAP bind methods. simple uses dn+password_file; gssapi reuses the API's
+// keytab via gokrb5; anonymous binds with no credentials.
+const (
+	LDAPBindSimple    = "simple"
+	LDAPBindGSSAPI    = "gssapi"
+	LDAPBindAnonymous = "anonymous"
+)
+
+// LDAPBackend describes one directory service the authorizer can consult.
+// Each backend declares the Kerberos realms it serves; a user authenticating
+// from REALM-A is routed to whichever backend's realms include REALM-A. A
+// realm may appear in at most one backend (overlap is a config error).
+type LDAPBackend struct {
+	Name                string        `yaml:"name"`
+	Realms              []string      `yaml:"realms"`
+	URL                 string        `yaml:"url"`
+	Bind                LDAPBind      `yaml:"bind"`
+	UserBaseDN          string        `yaml:"user_base_dn"`
+	UserFilter          string        `yaml:"user_filter"`
+	GroupMembershipAttr string        `yaml:"group_membership_attr"`
+	TLS                 LDAPTLS       `yaml:"tls"`
+	Timeout             time.Duration `yaml:"timeout"`
+	CacheTTL            time.Duration `yaml:"cache_ttl"`
+}
+
+// LDAPBind describes how the API authenticates to the directory. For
+// method=simple the DN and password_file are required; for gssapi the keytab
+// already configured on the API is reused and ClientPrincipal selects the
+// initiator identity within it; for anonymous no credentials are sent.
+type LDAPBind struct {
+	Method          string `yaml:"method"`
+	DN              string `yaml:"dn"`
+	PasswordFile    string `yaml:"password_file"`
+	ClientPrincipal string `yaml:"client_principal"`
+	Krb5ConfPath    string `yaml:"krb5_conf_path"`
+}
+
+// LDAPTLS configures TLS for ldaps:// dials. InsecureSkipVerify is honored
+// but emits a startup warning; production deployments should always pin a CA.
+type LDAPTLS struct {
+	CAFile             string `yaml:"ca_file"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+}
+
+// ldapCacheTTLMax caps the cache TTL hard, bounding the worst-case window
+// during which an LDAP-removed user could still be authorized. Operators who
+// want a longer window can re-issue certs less frequently instead.
+const ldapCacheTTLMax = 10 * time.Minute
+
+// ldapTimeoutMax bounds the per-query timeout. A pathological value here can
+// stall the entire /sign hot path through the enclave's 32-concurrent cap.
+const ldapTimeoutMax = 30 * time.Second
 
 // CertificateRules specifies the parameters for a signed SSH certificate.
 type CertificateRules struct {
@@ -117,6 +176,21 @@ func (c *Config) applyDefaults() {
 	if c.EnclaveMetricsInterval == 0 {
 		c.EnclaveMetricsInterval = 15 * time.Second
 	}
+	for i := range c.LDAP {
+		b := &c.LDAP[i]
+		if b.Timeout == 0 {
+			b.Timeout = 5 * time.Second
+		}
+		if b.CacheTTL == 0 {
+			b.CacheTTL = 60 * time.Second
+		}
+		if b.GroupMembershipAttr == "" {
+			b.GroupMembershipAttr = "memberOf"
+		}
+		if b.Bind.Krb5ConfPath == "" && b.Bind.Method == LDAPBindGSSAPI {
+			b.Bind.Krb5ConfPath = "/etc/krb5.conf"
+		}
+	}
 }
 
 // Validate checks the configuration for logical errors. It does not mutate
@@ -145,9 +219,24 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// LDAP blocks are validated before groups so we can reject groups that
+	// reference ldap_groups without any backend, and detect overlapping
+	// realm coverage early.
+	if err := c.validateLDAP(); err != nil {
+		return err
+	}
+
 	for name, group := range c.Groups {
-		if len(group.Members) == 0 {
-			return fmt.Errorf("group '%s' has no members", name)
+		hasStatic := len(group.Members) > 0
+		hasLDAP := len(group.LDAPGroups) > 0
+		if hasStatic && hasLDAP {
+			return fmt.Errorf("group '%s': members and ldap_groups are mutually exclusive — split into two groups", name)
+		}
+		if !hasStatic && !hasLDAP {
+			return fmt.Errorf("group '%s' has no members and no ldap_groups", name)
+		}
+		if hasLDAP && len(c.LDAP) == 0 {
+			return fmt.Errorf("group '%s' references ldap_groups but no ldap: backends are configured", name)
 		}
 
 		rules := group.CertificateRules
@@ -215,6 +304,84 @@ func validateListen(addr string) error {
 	return nil
 }
 
+// validateLDAP checks each LDAP backend in isolation, then rejects realm
+// overlap between backends. Per-backend rules are intentionally strict: a
+// misconfigured directory service is operator error, not runtime degradation.
+// Group-level coordination (members vs ldap_groups exclusivity, references to
+// missing backends) is enforced separately in the Validate group loop.
+func (c *Config) validateLDAP() error {
+	realmToBackend := map[string]string{}
+	names := map[string]struct{}{}
+	for i := range c.LDAP {
+		b := &c.LDAP[i]
+		if b.Name == "" {
+			return fmt.Errorf("ldap[%d]: name is required", i)
+		}
+		if _, dup := names[b.Name]; dup {
+			return fmt.Errorf("ldap[%d]: duplicate backend name %q", i, b.Name)
+		}
+		names[b.Name] = struct{}{}
+
+		if len(b.Realms) == 0 {
+			return fmt.Errorf("ldap[%s]: realms must be non-empty", b.Name)
+		}
+		for _, r := range b.Realms {
+			if existing, dup := realmToBackend[r]; dup {
+				return fmt.Errorf("ldap realm %q is claimed by both backends %q and %q", r, existing, b.Name)
+			}
+			realmToBackend[r] = b.Name
+		}
+
+		if b.URL == "" {
+			return fmt.Errorf("ldap[%s]: url is required", b.Name)
+		}
+		if _, err := url.Parse(b.URL); err != nil {
+			return fmt.Errorf("ldap[%s]: invalid url %q: %w", b.Name, b.URL, err)
+		}
+		if b.UserBaseDN == "" {
+			return fmt.Errorf("ldap[%s]: user_base_dn is required", b.Name)
+		}
+		if strings.Count(b.UserFilter, "%s") != 1 {
+			return fmt.Errorf("ldap[%s]: user_filter must contain exactly one %%s placeholder, got %q", b.Name, b.UserFilter)
+		}
+
+		switch b.Bind.Method {
+		case LDAPBindSimple:
+			if b.Bind.DN == "" {
+				return fmt.Errorf("ldap[%s]: simple bind requires dn", b.Name)
+			}
+			if b.Bind.PasswordFile == "" {
+				return fmt.Errorf("ldap[%s]: simple bind requires password_file", b.Name)
+			}
+		case LDAPBindGSSAPI:
+			if b.Bind.ClientPrincipal == "" {
+				return fmt.Errorf("ldap[%s]: gssapi bind requires client_principal (username@REALM in the API's keytab)", b.Name)
+			}
+			if !strings.Contains(b.Bind.ClientPrincipal, "@") {
+				return fmt.Errorf("ldap[%s]: gssapi client_principal %q must be in user@REALM form", b.Name, b.Bind.ClientPrincipal)
+			}
+		case LDAPBindAnonymous:
+			// no extra fields
+		default:
+			return fmt.Errorf("ldap[%s]: unknown bind method %q (must be simple, gssapi, or anonymous)", b.Name, b.Bind.Method)
+		}
+
+		if b.CacheTTL < 0 {
+			return fmt.Errorf("ldap[%s]: cache_ttl must not be negative, got %v", b.Name, b.CacheTTL)
+		}
+		if b.CacheTTL > ldapCacheTTLMax {
+			return fmt.Errorf("ldap[%s]: cache_ttl %v exceeds maximum %v", b.Name, b.CacheTTL, ldapCacheTTLMax)
+		}
+		if b.Timeout < 0 {
+			return fmt.Errorf("ldap[%s]: timeout must not be negative, got %v", b.Name, b.Timeout)
+		}
+		if b.Timeout > ldapTimeoutMax {
+			return fmt.Errorf("ldap[%s]: timeout %v exceeds maximum %v", b.Name, b.Timeout, ldapTimeoutMax)
+		}
+	}
+	return nil
+}
+
 // validateFlagExtensions rejects non-empty values on extensions/options that
 // the SSH cert format requires to be empty. Unknown keys pass through — the
 // signer treats them as opaque, which lets operators add OpenSSH extensions
@@ -230,33 +397,143 @@ func validateFlagExtensions(group, field string, m map[string]string) error {
 	return nil
 }
 
-// StaticAttributeWarning identifies one static_attributes key that does not
-// follow the `name@domain` namespacing convention from PROTOCOL.certkeys §4.
-type StaticAttributeWarning struct {
-	Group string
-	Key   string
+// Warning kinds. The string value is used directly as the slog event name at
+// startup so log aggregators can key on it; the prefix follows the
+// <area>.<event>[.<sub>] convention shared with the rest of the service.
+const (
+	WarnStaticAttributeNotNamespaced = "config.static_attribute.not_namespaced"
+	WarnLDAPInsecureSkipVerify       = "config.ldap.insecure_skip_verify"
+	WarnLDAPPlaintextURL             = "config.ldap.plaintext_url"
+	WarnLDAPAnonymousNonLoopback     = "config.ldap.anonymous_non_loopback"
+	WarnLDAPCacheTTLLong             = "config.ldap.cache_ttl_long"
+	WarnLDAPRealmLowercase           = "config.ldap.realm_lowercase"
+)
+
+// Warning is one non-fatal configuration issue surfaced at startup. Kind is
+// stable across releases (log-aggregator queries depend on it); Backend,
+// Group, and Key are populated only when relevant to the warning kind, and
+// Detail carries a human-readable explanation for direct operator viewing.
+type Warning struct {
+	Kind    string
+	Backend string
+	Group   string
+	Key     string
+	Detail  string
 }
 
 // Warnings returns non-fatal configuration issues discovered after Validate
-// has passed. Currently it surfaces static_attributes keys that lack the
-// `name@domain` namespace — unnamespaced names collide if OpenSSH later
-// standardises an extension with the same bare name. Reported as a warning
-// rather than a hard error so operators can migrate existing deployments
-// gradually. Results are sorted by (group, key) for stable output.
-func (c *Config) Warnings() []StaticAttributeWarning {
-	var warns []StaticAttributeWarning
+// has passed:
+//   - static_attributes keys that lack the `name@domain` namespace
+//     (unnamespaced names collide if OpenSSH later standardises an extension
+//     with the same bare name);
+//   - LDAP backends that disable certificate verification, use plaintext
+//     ldap:// against a non-loopback host, allow anonymous bind against a
+//     non-loopback host, set cache_ttl greater than 5 minutes, or list realms
+//     in lower case.
+//
+// All issues are reported as warnings rather than hard errors so operators
+// can migrate existing deployments gradually. Results are sorted by
+// (Kind, Backend, Group, Key) for stable output.
+func (c *Config) Warnings() []Warning {
+	var warns []Warning
 	for name, group := range c.Groups {
 		for k := range group.CertificateRules.StaticAttributes {
 			if !strings.Contains(k, "@") {
-				warns = append(warns, StaticAttributeWarning{Group: name, Key: k})
+				warns = append(warns, Warning{
+					Kind:   WarnStaticAttributeNotNamespaced,
+					Group:  name,
+					Key:    k,
+					Detail: "rename to " + k + "@<domain> per PROTOCOL.certkeys §4",
+				})
 			}
 		}
 	}
-	slices.SortFunc(warns, func(a, b StaticAttributeWarning) int {
+	for i := range c.LDAP {
+		b := &c.LDAP[i]
+		if b.TLS.InsecureSkipVerify {
+			warns = append(warns, Warning{
+				Kind:    WarnLDAPInsecureSkipVerify,
+				Backend: b.Name,
+				Detail:  "tls.insecure_skip_verify=true disables server certificate validation",
+			})
+		}
+		if isPlaintextLDAPNonLoopback(b.URL) {
+			warns = append(warns, Warning{
+				Kind:    WarnLDAPPlaintextURL,
+				Backend: b.Name,
+				Detail:  "url uses plaintext ldap:// against a non-loopback host; prefer ldaps://",
+			})
+		}
+		if b.Bind.Method == LDAPBindAnonymous && !isLoopbackURL(b.URL) {
+			warns = append(warns, Warning{
+				Kind:    WarnLDAPAnonymousNonLoopback,
+				Backend: b.Name,
+				Detail:  "anonymous bind is used against a non-loopback host; consider simple or gssapi bind",
+			})
+		}
+		if b.CacheTTL > 5*time.Minute {
+			warns = append(warns, Warning{
+				Kind:    WarnLDAPCacheTTLLong,
+				Backend: b.Name,
+				Detail:  fmt.Sprintf("cache_ttl=%v exceeds 5m; LDAP-removed users remain authorized until expiry", b.CacheTTL),
+			})
+		}
+		for _, r := range b.Realms {
+			if r != strings.ToUpper(r) {
+				warns = append(warns, Warning{
+					Kind:    WarnLDAPRealmLowercase,
+					Backend: b.Name,
+					Key:     r,
+					Detail:  "Kerberos realms are conventionally uppercase; matching is case-sensitive",
+				})
+			}
+		}
+	}
+	slices.SortFunc(warns, func(a, b Warning) int {
+		if g := cmp.Compare(a.Kind, b.Kind); g != 0 {
+			return g
+		}
+		if g := cmp.Compare(a.Backend, b.Backend); g != 0 {
+			return g
+		}
 		if g := cmp.Compare(a.Group, b.Group); g != 0 {
 			return g
 		}
 		return cmp.Compare(a.Key, b.Key)
 	})
 	return warns
+}
+
+// isPlaintextLDAPNonLoopback returns true if rawURL is a parseable ldap://
+// (not ldaps://) URL whose host is not 127.0.0.0/8, ::1, or "localhost".
+// Returns false for any other input (malformed URLs fail earlier in
+// validateLDAP, so we don't double-warn here).
+func isPlaintextLDAPNonLoopback(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "ldap" {
+		return false
+	}
+	return !isLoopbackHost(u.Hostname())
+}
+
+// isLoopbackURL returns true when the URL's host resolves to a loopback
+// literal. Used to suppress anonymous-bind warnings for local-only
+// development directories.
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "", "localhost":
+		return host == "localhost"
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/pkilar/cerberus/logging"
@@ -167,12 +166,5 @@ func parseSPNEGOAPReq(token []byte) (*messages.APReq, error) {
 // anyone other than the owner. A world-or-group-readable keytab hands the
 // service's Kerberos key to any local user, enabling token forgery.
 func checkKeytabPermissions(keytabPath string) error {
-	info, err := os.Stat(keytabPath)
-	if err != nil {
-		return fmt.Errorf("failed to stat keytab %s: %w", keytabPath, err)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return fmt.Errorf("keytab %s has insecure permissions %#o: must not be group- or world-readable", keytabPath, mode)
-	}
-	return nil
+	return CheckSecretFilePerms(keytabPath, "keytab")
 }
