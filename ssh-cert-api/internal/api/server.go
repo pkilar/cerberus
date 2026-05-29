@@ -31,6 +31,15 @@ const (
 	// maxSignRequestBytes caps /sign body size. An SSH RSA-4096 public key is
 	// ~750 bytes; with principals and JSON framing, 64 KB is generous.
 	maxSignRequestBytes = 64 * 1024
+
+	// SignTimeout bounds the enclave round trip for a single /sign request.
+	// It MUST be shorter than the enclave client's wall-clock backstop
+	// (enclave.vsockRoundTripDeadline, 30s) so that a slow request aborts
+	// with an observable handler error (500) rather than running to the
+	// backstop, and it MUST be shorter than the http.Server WriteTimeout
+	// (set in main from this value) so a slow-but-successful sign still gets
+	// its response written instead of being truncated on a dead connection.
+	SignTimeout = 25 * time.Second
 )
 
 type Server struct {
@@ -233,10 +242,15 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		CriticalOptions:  maps.Clone(result.CertificateRules.CriticalOptions),
 	}
 
-	// Sign the key — propagate r.Context() so client disconnect or upstream
-	// deadline tears the enclave call down rather than letting it run to the
-	// wall-clock backstop.
-	signedKey, err := s.enclaveClient.SignPublicKey(r.Context(), enclaveReq)
+	// Sign the key. Propagate r.Context() so client disconnect tears the
+	// enclave call down, but cap it with an explicit SignTimeout: that bounds
+	// the round trip below the http.Server WriteTimeout so a slow-but-
+	// successful sign still gets its response written, and makes an over-budget
+	// sign abort observably (500 below) instead of writing to a connection the
+	// server has already write-deadlined out from under us.
+	signCtx, cancelSign := context.WithTimeout(r.Context(), SignTimeout)
+	defer cancelSign()
+	signedKey, err := s.enclaveClient.SignPublicKey(signCtx, enclaveReq)
 	if err != nil {
 		outcome = outcomeFailed
 		enclaveErrorsTotal.Inc()

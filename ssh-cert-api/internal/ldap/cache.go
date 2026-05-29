@@ -49,11 +49,14 @@ func newCache(ttl time.Duration) *cache {
 
 // groups returns the cached groups for key, fetching them on miss or expiry.
 // Concurrent calls with the same key collapse to one fetch via singleflight.
-// Errors are propagated and never cached.
-func (c *cache) groups(ctx context.Context, key string, fetch fetchFunc) ([]string, error) {
+// Errors are propagated and never cached. The returned hit reports whether
+// THIS call was served from cache — derived from this call's own lookup, not
+// from a shared counter snapshot, so concurrent callers attribute their own
+// hit/miss correctly.
+func (c *cache) groups(ctx context.Context, key string, fetch fetchFunc) (groups []string, hit bool, err error) {
 	if v, ok := c.lookup(key); ok {
 		c.hits.Add(1)
-		return v, nil
+		return v, true, nil
 	}
 	c.misses.Add(1)
 
@@ -64,19 +67,19 @@ func (c *cache) groups(ctx context.Context, key string, fetch fetchFunc) ([]stri
 		if v, ok := c.lookup(key); ok {
 			return v, nil
 		}
-		groups, err := fetch(ctx)
-		if err != nil {
-			return nil, err
+		fetched, ferr := fetch(ctx)
+		if ferr != nil {
+			return nil, ferr
 		}
 		c.mu.Lock()
-		c.items[key] = cacheEntry{groups: groups, fetched: c.now()}
+		c.items[key] = cacheEntry{groups: fetched, fetched: c.now()}
 		c.mu.Unlock()
-		return groups, nil
+		return fetched, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return v.([]string), nil
+	return v.([]string), false, nil
 }
 
 func (c *cache) lookup(key string) ([]string, bool) {
@@ -89,7 +92,8 @@ func (c *cache) lookup(key string) ([]string, bool) {
 	return e.groups, true
 }
 
-// Hits and Misses are exposed so the surrounding Client can publish them
-// as Prometheus counters without the cache depending on prometheus directly.
+// Hits and Misses expose the aggregate cache counters for tests. Per-call
+// hit/miss attribution (for Prometheus) comes from groups' return value, not
+// these shared counters, to stay correct under concurrency.
 func (c *cache) Hits() int64   { return c.hits.Load() }
 func (c *cache) Misses() int64 { return c.misses.Load() }

@@ -57,7 +57,9 @@ func TestLoadKeySignerHandler_EmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
 
 	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
 
@@ -145,8 +147,12 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
 	}
-	tmpFile.WriteString("fake encrypted content")
-	tmpFile.Close()
+	if _, err := tmpFile.WriteString("fake encrypted content"); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
 
 	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
 

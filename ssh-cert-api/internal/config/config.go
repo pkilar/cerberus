@@ -341,8 +341,18 @@ func (c *Config) validateLDAP() error {
 		if b.UserBaseDN == "" {
 			return fmt.Errorf("ldap[%s]: user_base_dn is required", b.Name)
 		}
-		if strings.Count(b.UserFilter, "%s") != 1 {
-			return fmt.Errorf("ldap[%s]: user_filter must contain exactly one %%s placeholder, got %q", b.Name, b.UserFilter)
+		// user_filter must be exactly one %s substitution. strings.Count(...,
+		// "%s") == 1 is insufficient: "(uid=%%s)" contains the substring "%s"
+		// but fmt reads "%%" as a literal percent and drops the substitution,
+		// leaving the escaped UID unused — a silently broken filter. Model
+		// fmt's parsing by trial-formatting a sentinel and rejecting any
+		// template fmt cannot fill cleanly. The ldap package's SafeUserFilter
+		// (ldap.ValidFilterTemplate) applies the identical check at runtime;
+		// this rejects it at startup. (Kept inline rather than calling the ldap
+		// helper to avoid a config<->ldap import cycle — ldap imports config.)
+		const filterProbe = "cerberusFilterProbe"
+		if out := fmt.Sprintf(b.UserFilter, filterProbe); !strings.Contains(out, filterProbe) || strings.Contains(out, "%!") {
+			return fmt.Errorf("ldap[%s]: user_filter must contain exactly one %%s placeholder and no other format directive, got %q", b.Name, b.UserFilter)
 		}
 
 		switch b.Bind.Method {

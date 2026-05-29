@@ -13,10 +13,19 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/pkilar/cerberus/logging"
 
 	"github.com/mdlayher/vsock"
+)
+
+const (
+	// acceptBackoffInitial/Max bound the retry delay after a transient
+	// listener.Accept() error so a persistent fault (e.g. fd exhaustion)
+	// cannot spin the accept loop at 100% CPU while flooding the log.
+	acceptBackoffInitial = 5 * time.Millisecond
+	acceptBackoffMax     = 1 * time.Second
 )
 
 // Forwarder forwards VSOCK connections from the enclave to a target TCP
@@ -88,22 +97,33 @@ func (f *Forwarder) run(ctx context.Context) {
 	defer closeListener()
 	context.AfterFunc(ctx, closeListener)
 
+	var acceptBackoff time.Duration
 	for {
 		conn, err := f.listener.Accept()
 		if err != nil {
-			// Check if the context was cancelled, indicating a graceful shutdown.
+			// Graceful shutdown: ctx cancelled or the listener was closed.
+			// Distinguish this from a transient fault by the close signal
+			// itself, NOT by the error type — the mdlayher/vsock listener
+			// wraps every Accept error as *net.OpError, so a type check would
+			// treat a recoverable ECONNABORTED/EMFILE as fatal and kill the
+			// forwarder while the listener is still valid.
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Transient error: back off (capped) so we don't hot-spin or flood
+			// the log, and bail promptly if shutdown fires during the wait.
+			acceptBackoff = min(max(acceptBackoff*2, acceptBackoffInitial), acceptBackoffMax)
+			slog.Error("proxy.accept_failed", "error", err, "retry_in", acceptBackoff)
+			t := time.NewTimer(acceptBackoff)
 			select {
 			case <-ctx.Done():
-				return // Exit the loop.
-			default:
-				slog.Error("proxy.accept_failed", "error", err)
-				// If the listener is closed for other reasons, we should exit.
-				if _, ok := errors.AsType[*net.OpError](err); ok {
-					return
-				}
-				continue
+				t.Stop()
+				return
+			case <-t.C:
 			}
+			continue
 		}
+		acceptBackoff = 0 // reset after a successful accept
 
 		f.wg.Go(func() { f.handleConnection(ctx, conn) })
 	}

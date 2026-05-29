@@ -19,7 +19,7 @@ func TestCache_HitWithinTTL(t *testing.T) {
 		return []string{"g1", "g2"}, nil
 	}
 	for range 5 {
-		got, err := c.groups(t.Context(), "alice", fetch)
+		got, _, err := c.groups(t.Context(), "alice", fetch)
 		if err != nil {
 			t.Fatalf("groups: %v", err)
 		}
@@ -48,11 +48,11 @@ func TestCache_ExpiryTriggersRefresh(t *testing.T) {
 		return []string{"g1"}, nil
 	}
 
-	if _, err := c.groups(t.Context(), "alice", fetch); err != nil {
+	if _, _, err := c.groups(t.Context(), "alice", fetch); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	current = current.Add(100 * time.Millisecond) // past TTL
-	if _, err := c.groups(t.Context(), "alice", fetch); err != nil {
+	if _, _, err := c.groups(t.Context(), "alice", fetch); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	if got := calls.Load(); got != 2 {
@@ -70,7 +70,7 @@ func TestCache_ErrorsNotCached(t *testing.T) {
 		return nil, sentinel
 	}
 	for range 3 {
-		_, err := c.groups(t.Context(), "alice", fetch)
+		_, _, err := c.groups(t.Context(), "alice", fetch)
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("expected sentinel, got %v", err)
 		}
@@ -103,7 +103,7 @@ func TestCache_Singleflight_Collapses(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := c.groups(t.Context(), "alice", fetch)
+			_, _, err := c.groups(t.Context(), "alice", fetch)
 			if err != nil {
 				t.Errorf("groups: %v", err)
 			}
@@ -117,5 +117,28 @@ func TestCache_Singleflight_Collapses(t *testing.T) {
 
 	if got := calls.Load(); got != 1 {
 		t.Errorf("fetch called %d times, want 1 (singleflight should have collapsed)", got)
+	}
+}
+
+// TestCache_GroupsReportsHitMiss asserts that groups reports hit/miss for the
+// calling goroutine directly (the value the Prometheus counters key on), not
+// inferred from a shared counter snapshot.
+func TestCache_GroupsReportsHitMiss(t *testing.T) {
+	t.Parallel()
+	c := newCache(time.Minute)
+	fetch := func(ctx context.Context) ([]string, error) { return []string{"g1"}, nil }
+
+	if _, hit, err := c.groups(t.Context(), "alice", fetch); err != nil || hit {
+		t.Fatalf("first call: hit=%v err=%v, want hit=false (miss)", hit, err)
+	}
+	if _, hit, err := c.groups(t.Context(), "alice", fetch); err != nil || !hit {
+		t.Fatalf("second call: hit=%v err=%v, want hit=true", hit, err)
+	}
+
+	// A propagated error is reported as a miss (errors are never cached).
+	sentinel := errors.New("ldap down")
+	failing := func(ctx context.Context) ([]string, error) { return nil, sentinel }
+	if _, hit, err := c.groups(t.Context(), "bob", failing); !errors.Is(err, sentinel) || hit {
+		t.Fatalf("error call: hit=%v err=%v, want hit=false and sentinel error", hit, err)
 	}
 }

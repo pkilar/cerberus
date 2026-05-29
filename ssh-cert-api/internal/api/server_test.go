@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -248,6 +249,40 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	}
 	if rules.Permissions["permit-pty"] != "" {
 		t.Errorf("config permissions corrupted: %v", rules.Permissions)
+	}
+}
+
+// TestHandleSignRequest_TooManyPrincipals verifies the host caps the requested
+// principal count BEFORE authorization (the explicit DoS guard in
+// handleSignRequest, so per-request Casbin work can't scale with attacker
+// input). The enclave re-enforces the same cap; this asserts the host's 400
+// and that the over-cap request never reaches the signer.
+func TestHandleSignRequest_TooManyPrincipals(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	quoted := make([]string, 0, messages.MaxPrincipals+1)
+	for i := range messages.MaxPrincipals + 1 {
+		quoted = append(quoted, fmt.Sprintf("%q", fmt.Sprintf("p%d", i)))
+	}
+	body := `{"ssh_key":"ssh-rsa AAAA","principals":[` + strings.Join(quoted, ",") + `]}`
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(body))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Too many principals") {
+		t.Errorf("body missing 'Too many principals': %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("over-cap request must be rejected before reaching the signer")
 	}
 }
 

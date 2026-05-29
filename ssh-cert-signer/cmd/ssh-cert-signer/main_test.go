@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -458,6 +462,54 @@ func TestProcessRequest_PingNoSigner(t *testing.T) {
 	if resp.Pong.SignerLoaded {
 		t.Error("SignerLoaded should be false when caSigner is nil")
 	}
+}
+
+// TestHandleConnection_RejectsOversizeRequest drives a request larger than
+// maxRequestBytes through the enclave's scanner loop over an in-memory pipe
+// (no VSOCK needed) and asserts a structured "request exceeds" error comes
+// back rather than a silent truncation or hang. This is the enclave-side
+// mirror of the host's 413 body-cap test; CLAUDE.md calls the host/enclave
+// body-cap asymmetry a load-bearing invariant.
+func TestHandleConnection_RejectsOversizeRequest(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		handleConnection(ctx, serverConn)
+		close(done)
+	}()
+
+	// Push more than maxRequestBytes with no newline so the scanner overflows
+	// its buffer and returns bufio.ErrTooLong. Write in a goroutine: net.Pipe
+	// is unbuffered and the server stops reading once the token is too long, so
+	// the tail of this write stays blocked until the server closes the conn.
+	go func() {
+		_, _ = clientConn.Write(bytes.Repeat([]byte("A"), maxRequestBytes+1024))
+	}()
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	respBytes, err := bufio.NewReader(clientConn).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("reading error response: %v", err)
+	}
+	var resp messages.Response
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error response, got %+v", resp)
+	}
+	if !strings.Contains(*resp.Error, "request exceeds") {
+		t.Errorf("got error %q, want it to contain 'request exceeds'", *resp.Error)
+	}
+
+	_ = clientConn.Close()
+	cancel()
+	<-done
 }
 
 // Test for the nil signer case in SignPublicKey handler
