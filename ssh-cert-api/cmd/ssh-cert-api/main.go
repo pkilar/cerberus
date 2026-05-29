@@ -129,10 +129,7 @@ func main() {
 		for _, backend := range cfg.LDAP {
 			client, err := cerberusldap.NewClient(backend, cfg.KeytabPath, ldapMetrics)
 			if err != nil {
-				// Include err: this is a fail-closed startup abort and the cause
-				// (bad password-file perms, non-PEM ca_file, malformed gssapi
-				// principal, unparseable URL) is the operator's only diagnostic.
-				log.Fatalf("Failed to initialize LDAP backend %q: %v", backend.Name, err)
+				log.Fatalf("Failed to initialize LDAP backend %q due to invalid configuration", backend.Name)
 			}
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), backend.Timeout)
 			err = client.HealthCheck(probeCtx)

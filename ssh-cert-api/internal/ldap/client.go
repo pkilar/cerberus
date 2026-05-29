@@ -66,7 +66,7 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 	var password string
 	if backend.Bind.Method == config.LDAPBindSimple {
 		if err := auth.CheckSecretFilePerms(backend.Bind.PasswordFile, "ldap password file"); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ldap password file validation failed: %w", err)
 		}
 		// #nosec G304 -- path comes from the operator's config, validated
 		// already at config load; same trust model as the keytab path.
@@ -76,7 +76,7 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 		}
 		password = strings.TrimRight(string(data), "\n\r")
 		if password == "" {
-			return nil, fmt.Errorf("ldap password_file %s is empty", backend.Bind.PasswordFile)
+			return nil, fmt.Errorf("ldap password_file is empty")
 		}
 	}
 
