@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -31,7 +30,7 @@ func TestEnclaveMetricsCollector_PopulatesSnapshotOnSuccess(t *testing.T) {
 	}
 	c := NewEnclaveMetricsCollector(signer, time.Hour)
 
-	c.probe(context.Background())
+	c.probe(t.Context())
 
 	snap := c.state.Load()
 	if snap == nil {
@@ -62,7 +61,7 @@ func TestEnclaveMetricsCollector_FailureKeepsPreviousSnapshot(t *testing.T) {
 	c := NewEnclaveMetricsCollector(signer, time.Hour)
 
 	// First probe succeeds.
-	c.probe(context.Background())
+	c.probe(t.Context())
 	first := c.state.Load()
 	if first == nil || first.CPU.User != 7 {
 		t.Fatalf("first probe didn't seed snapshot: %+v", first)
@@ -71,7 +70,7 @@ func TestEnclaveMetricsCollector_FailureKeepsPreviousSnapshot(t *testing.T) {
 	// Switch the fake to error mode and probe again.
 	signer.metricsResp = nil
 	signer.metricsErr = errors.New("vsock dial: connection refused")
-	c.probe(context.Background())
+	c.probe(t.Context())
 
 	if c.scrapeErrors.Load() != 1 {
 		t.Errorf("scrapeErrors = %d, want 1", c.scrapeErrors.Load())
@@ -97,7 +96,7 @@ func TestEnclaveMetricsCollector_PrometheusOutput(t *testing.T) {
 		},
 	}
 	c := NewEnclaveMetricsCollector(signer, time.Hour)
-	c.probe(context.Background())
+	c.probe(t.Context())
 
 	reg := prometheus.NewRegistry()
 	if err := reg.Register(c); err != nil {
@@ -195,7 +194,7 @@ func TestEnclaveMetricsCollector_NoSnapshotEmitsOnlyErrorCounter(t *testing.T) {
 	t.Parallel()
 	signer := &fakeSigner{metricsErr: errors.New("never connected")}
 	c := NewEnclaveMetricsCollector(signer, time.Hour)
-	c.probe(context.Background())
+	c.probe(t.Context())
 
 	reg := prometheus.NewRegistry()
 	if err := reg.Register(c); err != nil {

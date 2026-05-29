@@ -1,8 +1,13 @@
 package handlers
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -471,5 +476,185 @@ func TestSignPublicKey_CriticalOptions(t *testing.T) {
 	// Test that permit-pty permission is present
 	if _, exists := cert.Permissions.Extensions["permit-pty"]; !exists {
 		t.Error("expected permit-pty permission to be present")
+	}
+}
+
+// sshAuthorizedKey marshals a crypto public key (RSA/ECDSA *.PublicKey or an
+// ed25519.PublicKey) into authorized_keys form for use as a signing input.
+func sshAuthorizedKey(t *testing.T, pub any) string {
+	t.Helper()
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("ssh.NewPublicKey: %v", err)
+	}
+	return string(ssh.MarshalAuthorizedKey(sshPub))
+}
+
+func rsaAuthorizedKey(t *testing.T, bits int) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey(%d): %v", bits, err)
+	}
+	return sshAuthorizedKey(t, &k.PublicKey)
+}
+
+func ecdsaAuthorizedKey(t *testing.T, curve elliptic.Curve) string {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	return sshAuthorizedKey(t, &k.PublicKey)
+}
+
+func ed25519AuthorizedKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return sshAuthorizedKey(t, pub)
+}
+
+// TestSignPublicKey_KeyAlgorithmAllowlist exercises validatePublicKey's
+// security contract directly: weak RSA is refused, while RSA-2048+, the ECDSA
+// NIST-curve allowlist, and Ed25519 are accepted. Without this a regression
+// dropping the BitLen check or widening the type switch would weaken the CA
+// with no functional symptom.
+func TestSignPublicKey_KeyAlgorithmAllowlist(t *testing.T) {
+	t.Parallel()
+	signer := createTestSigner(t)
+
+	tests := []struct {
+		name    string
+		sshKey  string
+		wantErr string // empty == expect success
+	}{
+		{"rsa-1024 rejected", rsaAuthorizedKey(t, 1024), "RSA key too small"},
+		{"rsa-2048 accepted", rsaAuthorizedKey(t, 2048), ""},
+		{"ecdsa-p256 accepted", ecdsaAuthorizedKey(t, elliptic.P256()), ""},
+		{"ecdsa-p384 accepted", ecdsaAuthorizedKey(t, elliptic.P384()), ""},
+		{"ed25519 accepted", ed25519AuthorizedKey(t), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp, err := SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+				SSHKey: tt.sshKey, KeyID: "algo-test", Principals: []string{"u1"}, Validity: "1h",
+			})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("got err=%v, want containing %q", err, tt.wantErr)
+				}
+				if resp != nil {
+					t.Error("expected nil response on rejection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp == nil || resp.SignedKey == "" {
+				t.Fatal("expected a signed certificate")
+			}
+		})
+	}
+}
+
+// TestSignPublicKey_RejectsCertificateAsKey verifies that feeding a previously
+// issued certificate back in as the public key is refused (it is not an
+// ssh.CryptoPublicKey), rather than re-certified.
+func TestSignPublicKey_RejectsCertificateAsKey(t *testing.T) {
+	t.Parallel()
+	signer := createTestSigner(t)
+	seed, err := SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+		SSHKey: createTestPublicKey(t), KeyID: "seed", Principals: []string{"u1"}, Validity: "1h",
+	})
+	if err != nil {
+		t.Fatalf("seed sign: %v", err)
+	}
+	_, err = SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+		SSHKey: seed.SignedKey, KeyID: "recert", Principals: []string{"u1"}, Validity: "1h",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported public key wrapper") {
+		t.Fatalf("got err=%v, want 'unsupported public key wrapper'", err)
+	}
+}
+
+// TestSignPublicKey_SignatureVerifiesAgainstCA asserts the core CA guarantee:
+// the emitted certificate carries a valid signature made by our CA key — not
+// merely a structurally well-formed cert. Field assertions elsewhere do not
+// cover the cryptographic binding.
+func TestSignPublicKey_SignatureVerifiesAgainstCA(t *testing.T) {
+	t.Parallel()
+	signer := createTestSigner(t)
+	resp, err := SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+		SSHKey: createTestPublicKey(t), KeyID: "verify", Principals: []string{"testuser"}, Validity: "1h",
+	})
+	if err != nil {
+		t.Fatalf("signing failed: %v", err)
+	}
+
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(resp.SignedKey))
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("expected *ssh.Certificate, got %T", pub)
+	}
+
+	if cert.Signature == nil {
+		t.Fatal("certificate has no signature")
+	}
+	if !bytes.Equal(cert.SignatureKey.Marshal(), signer.PublicKey().Marshal()) {
+		t.Error("certificate SignatureKey does not match the CA signer")
+	}
+
+	checker := &ssh.CertChecker{
+		IsUserAuthority: func(auth ssh.PublicKey) bool {
+			return bytes.Equal(auth.Marshal(), signer.PublicKey().Marshal())
+		},
+	}
+	if err := checker.CheckCert("testuser", cert); err != nil {
+		t.Errorf("CheckCert (signature + validity + principal) failed: %v", err)
+	}
+}
+
+// TestSignPublicKey_RejectsPermissionAttributeCollision verifies the
+// ambiguity-rejection guard: the same key in both Permissions and
+// CustomAttributes (which both merge into Extensions) must be refused, not
+// silently overwritten by map iteration order.
+func TestSignPublicKey_RejectsPermissionAttributeCollision(t *testing.T) {
+	t.Parallel()
+	signer := createTestSigner(t)
+	_, err := SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+		SSHKey:           createTestPublicKey(t),
+		KeyID:            "collide",
+		Principals:       []string{"u1"},
+		Validity:         "1h",
+		Permissions:      map[string]string{"x@cerberus": ""},
+		CustomAttributes: map[string]string{"x@cerberus": "v"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "present in both permissions and custom_attributes") {
+		t.Fatalf("got err=%v, want collision rejection", err)
+	}
+}
+
+// TestSignPublicKey_TooManyPrincipals verifies the enclave's own MaxPrincipals
+// cap (the host enforces it too; this is the enclave-side belt-and-braces).
+func TestSignPublicKey_TooManyPrincipals(t *testing.T) {
+	t.Parallel()
+	signer := createTestSigner(t)
+	principals := make([]string, messages.MaxPrincipals+1)
+	for i := range principals {
+		principals[i] = fmt.Sprintf("p%d", i)
+	}
+	_, err := SignPublicKey(t.Context(), signer, messages.EnclaveSigningRequest{
+		SSHKey: createTestPublicKey(t), KeyID: "too-many", Principals: principals, Validity: "1h",
+	})
+	if err == nil || !strings.Contains(err.Error(), "too many principals") {
+		t.Fatalf("got err=%v, want 'too many principals'", err)
 	}
 }

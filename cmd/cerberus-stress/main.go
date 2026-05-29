@@ -92,6 +92,14 @@ type result struct {
 // runner drives a worker pool that calls do() until ctx is done or the
 // request count is reached, feeding each outcome to a stats aggregator.
 func runner(ctx context.Context, c commonFlags, label string, do func(ctx context.Context) error) {
+	// Reject a non-positive worker count up front: make(chan, c.concurrency*2)
+	// below would otherwise panic ("makechan: size out of range") on a negative
+	// value, and 0 silently produces an empty no-op run.
+	if c.concurrency < 1 {
+		fmt.Fprintln(os.Stderr, "error: -concurrency must be >= 1")
+		os.Exit(2)
+	}
+
 	if c.duration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.duration)
@@ -163,6 +171,17 @@ func (s *stats) add(r result) {
 }
 
 func (s *stats) run(results <-chan result, tick time.Duration) {
+	// A non-positive tick disables live progress reporting instead of panicking
+	// in time.NewTicker ("non-positive interval"). Just drain to the final
+	// report — a natural "final report only" mode for -progress-tick 0.
+	if tick <= 0 {
+		for r := range results {
+			s.add(r)
+		}
+		s.printFinal()
+		return
+	}
+
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 

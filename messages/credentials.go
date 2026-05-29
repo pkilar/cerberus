@@ -45,6 +45,13 @@ func (c Credentials) String() string {
 // RedactedJSON returns r marshalled to JSON with sensitive fields replaced by
 // placeholders. Use this — never bare json.Marshal — when logging request
 // bodies that may cross the LoadKeySigner path, which carries AWS credentials.
+//
+// MAINTAINER NOTE: LoadKeySigner is currently the only Request variant that
+// carries secret material. If a new variant is added that includes secrets,
+// it MUST be redacted here too — otherwise debug logging of that request would
+// leak the secret. Redaction is per-variant by necessity (Go has no reflective
+// "redact all secret-tagged fields"); keep this in lockstep with the Request
+// type.
 func RedactedJSON(r Request) string {
 	if r.LoadKeySigner != nil {
 		red := *r.LoadKeySigner

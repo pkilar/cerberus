@@ -39,8 +39,9 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 	default:
 	}
 
-	// Validate inputs
-	if err := validateSigningRequest(req); err != nil {
+	// Validate inputs; this also parses the validity duration (once).
+	validityDuration, err := validateSigningRequest(req)
+	if err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
 	}
 
@@ -65,11 +66,6 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 
 	if err := validatePublicKey(publicKey); err != nil {
 		return nil, fmt.Errorf("rejected public key: %w", err)
-	}
-
-	validityDuration, err := time.ParseDuration(req.Validity)
-	if err != nil {
-		return nil, fmt.Errorf("invalid validity duration string '%s': %w", req.Validity, err)
 	}
 
 	// Reject zero/negative durations: a 0 or negative duration produces a cert
@@ -152,40 +148,45 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 	}, nil
 }
 
-// validateSigningRequest performs comprehensive input validation
-func validateSigningRequest(req messages.EnclaveSigningRequest) error {
+// validateSigningRequest performs comprehensive input validation and returns
+// the parsed validity duration so the caller does not re-parse it. The
+// positive/maximum bounds on the duration are enforced by the caller against
+// the returned value.
+func validateSigningRequest(req messages.EnclaveSigningRequest) (time.Duration, error) {
 	if strings.TrimSpace(req.SSHKey) == "" {
-		return fmt.Errorf("SSH key cannot be empty")
+		return 0, fmt.Errorf("SSH key cannot be empty")
 	}
 
 	if strings.TrimSpace(req.KeyID) == "" {
-		return fmt.Errorf("KeyID cannot be empty")
+		return 0, fmt.Errorf("KeyID cannot be empty")
 	}
 
 	if strings.TrimSpace(req.Validity) == "" {
-		return fmt.Errorf("validity duration cannot be empty")
+		return 0, fmt.Errorf("validity duration cannot be empty")
 	}
 
-	// Validate validity duration format
-	if _, err := time.ParseDuration(req.Validity); err != nil {
-		return fmt.Errorf("invalid validity duration format: %w", err)
+	// Parse the validity duration once, here; the caller uses the returned
+	// value rather than parsing the string a second time.
+	validity, err := time.ParseDuration(req.Validity)
+	if err != nil {
+		return 0, fmt.Errorf("invalid validity duration format: %w", err)
 	}
 
 	// Refuse an empty principals slice. The host API rejects this too; this
 	// is the enclave-side belt-and-braces for any future host that forgets.
 	if len(req.Principals) == 0 {
-		return fmt.Errorf("principals cannot be empty")
+		return 0, fmt.Errorf("principals cannot be empty")
 	}
 
 	// Limit number of principals for security
 	if len(req.Principals) > messages.MaxPrincipals {
-		return fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), messages.MaxPrincipals)
+		return 0, fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), messages.MaxPrincipals)
 	}
 
 	// Validate principals are not empty strings
 	for i, principal := range req.Principals {
 		if strings.TrimSpace(principal) == "" {
-			return fmt.Errorf("principal at index %d cannot be empty", i)
+			return 0, fmt.Errorf("principal at index %d cannot be empty", i)
 		}
 	}
 
@@ -195,11 +196,11 @@ func validateSigningRequest(req messages.EnclaveSigningRequest) error {
 	// request rather than letting that ambiguity reach the signed cert.
 	for k := range req.CustomAttributes {
 		if _, exists := req.Permissions[k]; exists {
-			return fmt.Errorf("key %q present in both permissions and custom_attributes", k)
+			return 0, fmt.Errorf("key %q present in both permissions and custom_attributes", k)
 		}
 	}
 
-	return nil
+	return validity, nil
 }
 
 // validatePublicKey restricts the algorithms and key sizes the signer will
@@ -213,6 +214,11 @@ func validatePublicKey(publicKey ssh.PublicKey) error {
 	}
 	switch k := cpk.CryptoPublicKey().(type) {
 	case *rsa.PublicKey:
+		// No upper bound is enforced here: ssh.ParseAuthorizedKey (called
+		// above, inside the enclave) already rejects RSA moduli larger than
+		// 8192 bits ("ssh: rsa modulus too large"), so an oversized key never
+		// reaches this switch. 8192-bit RSA is strong, not pathological, so we
+		// only enforce the lower bound here.
 		if k.N.BitLen() < minRSAKeyBits {
 			return fmt.Errorf("RSA key too small: %d bits (minimum %d)", k.N.BitLen(), minRSAKeyBits)
 		}

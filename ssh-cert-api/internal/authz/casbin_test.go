@@ -136,6 +136,19 @@ func TestAuthorize_WildcardPrincipal(t *testing.T) {
 			t.Fatalf("expected allowed for wildcard principal %q", principal)
 		}
 	}
+
+	// A wildcard group must also cover a multi-principal request in one shot
+	// (every requested principal matched by "*" within the single group).
+	result, err := a.Authorize(t.Context(), "admin@REALM.COM", []string{"root", "deploy", "ec2-user"})
+	if err != nil {
+		t.Fatalf("Authorize multi-principal: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected allowed for multi-principal request against wildcard group")
+	}
+	if result.GroupName != "superadmins" {
+		t.Fatalf("expected group 'superadmins', got %q", result.GroupName)
+	}
 }
 
 func TestAuthorize_MultiGroup(t *testing.T) {

@@ -73,7 +73,7 @@ func parseProcStat(data []byte, clkTck float64) (messages.EnclaveCPUTimes, error
 			return messages.EnclaveCPUTimes{}, fmt.Errorf("aggregate cpu line has %d fields, need >= 8", len(fields))
 		}
 		var jiffies [7]uint64
-		for i := 0; i < 7; i++ {
+		for i := range 7 {
 			v, err := strconv.ParseUint(fields[i+1], 10, 64)
 			if err != nil {
 				return messages.EnclaveCPUTimes{}, fmt.Errorf("field %q at index %d: %w", fields[i+1], i+1, err)
@@ -110,7 +110,6 @@ func parseProcMeminfo(data []byte) (messages.EnclaveMemoryStats, error) {
 	wanted["Buffers"] = &stats.BuffersBytes
 	wanted["Cached"] = &stats.CachedBytes
 
-	seen := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -132,7 +131,6 @@ func parseProcMeminfo(data []byte) (messages.EnclaveMemoryStats, error) {
 			return messages.EnclaveMemoryStats{}, fmt.Errorf("%s value %q: %w", key, fields[0], err)
 		}
 		*dst = kB * 1024
-		seen++
 	}
 	if err := scanner.Err(); err != nil {
 		return messages.EnclaveMemoryStats{}, err

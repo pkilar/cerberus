@@ -129,7 +129,7 @@ func main() {
 		for _, backend := range cfg.LDAP {
 			client, err := cerberusldap.NewClient(backend, cfg.KeytabPath, ldapMetrics)
 			if err != nil {
-				log.Fatalf("Failed to initialize LDAP backend %q", backend.Name)
+				log.Fatalf("Failed to initialize LDAP backend %q due to invalid configuration", backend.Name)
 			}
 			probeCtx, probeCancel := context.WithTimeout(context.Background(), backend.Timeout)
 			err = client.HealthCheck(probeCtx)
@@ -204,8 +204,14 @@ func main() {
 		Handler:           server.Router(), // The router now includes the middleware
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// WriteTimeout must exceed the per-/sign budget (api.SignTimeout) so a
+		// legitimately slow signing round trip is not truncated mid-response:
+		// the handler's own context deadline (SignTimeout) governs and aborts
+		// observably, while this connection-level write deadline stays a
+		// backstop above it. ReadHeaderTimeout/ReadTimeout cover slow-loris on
+		// the request side.
+		WriteTimeout: api.SignTimeout + 10*time.Second,
+		IdleTimeout:  60 * time.Second,
 		// Pin the TLS policy explicitly rather than relying on Go's defaults.
 		// TLS 1.2 minimum keeps older Kerberos-aware HTTP clients working; the
 		// cipher list is restricted to AEAD constructions (TLS 1.3 has its

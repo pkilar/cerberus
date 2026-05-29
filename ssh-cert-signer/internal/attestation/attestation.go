@@ -97,9 +97,10 @@ func (p *Provider) GenerateAttestationDoc() ([]byte, error) {
 //
 // KMS emits BER (with indefinite-length wrappers and occasionally a
 // constructed encrypted-content OCTET STRING), which Go's encoding/asn1
-// rejects. We delegate to the edgebit Nitro SDK's cms package, which performs
-// a BER→DER pass and concatenates constructed OCTET STRINGs before
-// unmarshaling — the same path AWS's reference implementations take.
+// rejects. We delegate to the github.com/pkilar/nitro-enclaves-sdk-go cms
+// package (our hard fork of edgebit's SDK, carrying a ber2der data-race fix),
+// which performs a BER→DER pass and concatenates constructed OCTET STRINGs
+// before unmarshaling — the same path AWS's reference implementations take.
 //
 // The gate is narrower than IsAvailable on purpose: decryption needs only
 // the RSA key, not the NSM session. Callers that require end-to-end

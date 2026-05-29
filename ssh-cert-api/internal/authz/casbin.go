@@ -118,9 +118,10 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 
 // Authorize checks if the user is allowed to sign for all requested SSH
 // principals. Per-group enforcement: all requested principals must be allowed
-// within a single group. The candidate set is the union of static-membership
-// groups and LDAP-derived groups; first alphabetical Cerberus group name
-// whose allowed_principals cover the request wins.
+// within a single group. The candidate set is the static-membership groups
+// plus — when an LDAP resolver is configured and matches — the LDAP-derived
+// groups; the first alphabetical Cerberus group name whose allowed_principals
+// cover the request wins.
 //
 // LDAP failure mode is fail-closed: if a resolver is configured AND it
 // returns an error for this principal, the request is denied without
@@ -137,6 +138,15 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	if len(requestedPrincipals) == 0 {
 		return &AuthorizationResult{Allowed: false}, nil
 	}
+
+	// Dedup requested principals: the per-group Casbin loop below need not
+	// re-check the same principal, and a request padded with duplicates must
+	// not inflate the per-request enforcement work. Order is irrelevant to the
+	// all-must-be-allowed decision, and the granted principals returned to the
+	// caller come from the matched group's config, not this slice.
+	reqPrincipals := slices.Clone(requestedPrincipals)
+	slices.Sort(reqPrincipals)
+	reqPrincipals = slices.Compact(reqPrincipals)
 
 	staticGroups := ca.userGroups[userPrincipal]
 	candidates := slices.Clone(staticGroups)
@@ -175,7 +185,7 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 
 	for _, groupName := range candidates {
 		allAllowed := true
-		for _, reqPrincipal := range requestedPrincipals {
+		for _, reqPrincipal := range reqPrincipals {
 			allowed, err := ca.enforcer.Enforce(groupName, reqPrincipal, "sign")
 			if err != nil {
 				return nil, fmt.Errorf("casbin enforcement error: %w", err)

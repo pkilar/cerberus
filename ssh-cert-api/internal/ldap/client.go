@@ -35,6 +35,17 @@ var _ Client = (*client)(nil)
 // declared in config. A single mutex serializes dial, bind, and search; QPS
 // is bounded by the cache TTL and the upstream signing-request rate, so
 // connection pooling is deliberately out of scope.
+//
+// TEST COVERAGE NOTE: the dial/bind/search round trip in this file and in
+// bind.go is currently exercised only against a live directory — there is no
+// in-tree stub speaking the LDAP wire protocol, so fetchUserGroups,
+// searchWithReconnect, HealthCheck, and the bind methods are not run in CI.
+// The filter-injection defense (SafeUserFilter) and the cache are unit-tested
+// directly; the connection plumbing is not. Analogous to the VSOCK-vs-TCP gap
+// documented in CLAUDE.md, this is a known gap, not an oversight. Closing it
+// would mean introducing a seam over *goldap.Conn so a stub can return canned
+// search results and errors (asserting the escaped filter is what gets sent
+// and that errors propagate fail-closed).
 type client struct {
 	backend  config.LDAPBackend
 	bindCred *bindCreds
@@ -55,7 +66,7 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 	var password string
 	if backend.Bind.Method == config.LDAPBindSimple {
 		if err := auth.CheckSecretFilePerms(backend.Bind.PasswordFile, "ldap password file"); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ldap password file validation failed: %w", err)
 		}
 		// #nosec G304 -- path comes from the operator's config, validated
 		// already at config load; same trust model as the keytab path.
@@ -65,7 +76,7 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 		}
 		password = strings.TrimRight(string(data), "\n\r")
 		if password == "" {
-			return nil, fmt.Errorf("ldap password_file %s is empty", backend.Bind.PasswordFile)
+			return nil, fmt.Errorf("ldap password_file is empty")
 		}
 	}
 
@@ -93,8 +104,7 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 // LDAP query via singleflight. Errors are not cached and bubble up so the
 // authorizer can fail closed.
 func (c *client) UserGroups(ctx context.Context, shortUID string) ([]string, error) {
-	hitsBefore := c.cache.Hits()
-	groups, err := c.cache.groups(ctx, shortUID, func(ctx context.Context) ([]string, error) {
+	groups, hit, err := c.cache.groups(ctx, shortUID, func(ctx context.Context) ([]string, error) {
 		start := time.Now()
 		g, err := c.fetchUserGroups(ctx, shortUID)
 		if c.metrics != nil {
@@ -102,10 +112,12 @@ func (c *client) UserGroups(ctx context.Context, shortUID string) ([]string, err
 		}
 		return g, err
 	})
-	// Publish cache counters once per call. Doing this only here (not inside
-	// cache.groups) keeps the cache prometheus-free for unit testability.
+	// Publish cache counters from this call's own hit/miss result. Doing it
+	// here (not inside cache.groups) keeps the cache prometheus-free for unit
+	// testability; using the returned bool (not a shared-counter snapshot)
+	// keeps attribution correct when calls run concurrently.
 	if c.metrics != nil {
-		if c.cache.Hits() > hitsBefore {
+		if hit {
 			c.metrics.CacheHits.WithLabelValues(c.backend.Name).Inc()
 		} else {
 			c.metrics.CacheMisses.WithLabelValues(c.backend.Name).Inc()

@@ -44,6 +44,13 @@ const (
 	// adds principals/permissions/audit attributes on top, so 256 KiB
 	// gives generous headroom while still bounding memory per connection.
 	maxRequestBytes = 256 * 1024
+	// acceptBackoffInitial/Max bound the retry delay after a transient
+	// listener.Accept() error. accept(2) on the non-blocking vsock socket
+	// returns instantly, so an unconditional retry would spin at 100% CPU and
+	// flood the log under a persistent fault (e.g. fd exhaustion); a capped
+	// backoff lets the listener recover instead.
+	acceptBackoffInitial = 5 * time.Millisecond
+	acceptBackoffMax     = 1 * time.Second
 )
 
 var (
@@ -91,6 +98,7 @@ func main() {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxConcurrentConnections)
 
+	var acceptBackoff time.Duration
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -98,9 +106,22 @@ func main() {
 				log.Println("Shutdown signal received — stopping accept loop")
 				break
 			}
-			log.Printf("ERROR: failed to accept connection: %v", err)
-			continue
+			// Transient Accept error (e.g. EMFILE/ENFILE under fd exhaustion):
+			// back off with a capped delay instead of hot-spinning, and stop
+			// promptly if shutdown fires during the wait.
+			acceptBackoff = min(max(acceptBackoff*2, acceptBackoffInitial), acceptBackoffMax)
+			log.Printf("ERROR: failed to accept connection (retrying in %s): %v", acceptBackoff, err)
+			t := time.NewTimer(acceptBackoff)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				log.Println("Shutdown during accept backoff — stopping accept loop")
+			case <-t.C:
+				continue
+			}
+			break
 		}
+		acceptBackoff = 0 // reset after a successful accept
 
 		// Bounded concurrency: block here if at the per-process limit.
 		// During shutdown, drop the just-accepted conn instead of queueing.
