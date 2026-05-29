@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/pkilar/cerberus/messages"
@@ -205,6 +206,20 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
 		return
+	}
+
+	// Reject empty/whitespace principals before authorization. An empty
+	// principal could be matched by a group whose allowed_principals contains
+	// "" or "*"; the enclave rejects it regardless, so fail fast here with a
+	// clear 400 instead of burning an enclave round trip on a 500.
+	for _, p := range req.Principals {
+		if strings.TrimSpace(p) == "" {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Empty principal"})
+			return
+		}
 	}
 
 	principal := user.Username + "@" + user.Realm

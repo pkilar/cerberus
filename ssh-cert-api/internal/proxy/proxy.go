@@ -66,6 +66,7 @@ func (f *Forwarder) Start(ctx context.Context) error {
 	// Listen on the specified port (vsock in production; TCP in tests).
 	listener, err := f.listen(f.vsockPort)
 	if err != nil {
+		cancel() // release the lifecycle context created above; Start failed
 		return fmt.Errorf("proxy failed to listen on port %d: %w", f.vsockPort, err)
 	}
 	f.listener = listener

@@ -767,6 +767,22 @@ func TestValidate_LDAP(t *testing.T) {
 			wantErr: "user_filter must contain exactly one",
 		},
 		{
+			// "%%s" passes a naive strings.Count("%s")==1 check but fmt reads
+			// "%%" as a literal percent, dropping the substitution entirely.
+			name: "user_filter escaped %%s is rejected",
+			mutate: func(c *Config) {
+				c.LDAP[0].UserFilter = "(uid=%%s)"
+			},
+			wantErr: "user_filter must contain exactly one",
+		},
+		{
+			name: "realms with whitespace-only entry",
+			mutate: func(c *Config) {
+				c.LDAP[0].Realms = []string{"  "}
+			},
+			wantErr: "must not contain empty or whitespace entries",
+		},
+		{
 			name: "simple bind missing dn",
 			mutate: func(c *Config) {
 				c.LDAP[0].Bind.DN = ""

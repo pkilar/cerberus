@@ -10,7 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -57,7 +57,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 			logging.DebugContext(ctx, "Intercepting connection via vsock (cid=%d, port=%d)", constants.InstanceCID, constants.InstanceListeningPort)
 			conn, err := vsock.Dial(constants.InstanceCID, constants.InstanceListeningPort, nil)
 			if err != nil {
-				log.Printf("VSOCK dial failed: %v", err)
+				slog.ErrorContext(ctx, "loadkey.vsock_dial_failed", "error", err)
 				return nil, err
 			}
 			logging.DebugContext(ctx, "VSOCK connection established successfully")
@@ -116,7 +116,7 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 
 	decryptOutput, err := kmsClient.Decrypt(ctx, decryptInput)
 	if err != nil {
-		log.Printf("KMS decrypt error details: %v", err)
+		slog.ErrorContext(ctx, "loadkey.kms_decrypt.failed", "error", err)
 		return nil, fmt.Errorf("failed to decrypt key with KMS: %w", err)
 	}
 
@@ -132,11 +132,15 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt CiphertextForRecipient: %w", err)
 		}
-		log.Println("Successfully decrypted CA key with KMS (attested)")
+		slog.InfoContext(ctx, "loadkey.kms_decrypt.attested")
 	} else {
-		// Non-attested path: plaintext is directly available
+		// Non-attested path: plaintext is directly available. This is a
+		// security-relevant downgrade (no enclave isolation guarantee), so it
+		// is surfaced at WARN with a stable event name an aggregator can alert
+		// on — never run production this way.
 		plaintextKey = decryptOutput.Plaintext
-		log.Println("Successfully decrypted CA key with KMS (non-attested)")
+		slog.WarnContext(ctx, "loadkey.attestation.disabled",
+			"detail", "CA key decrypted via non-attested KMS Decrypt; no enclave isolation guarantee")
 	}
 
 	// Best-effort zero of the plaintext key buffer once parsing has consumed

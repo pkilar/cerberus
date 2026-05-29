@@ -326,6 +326,9 @@ func (c *Config) validateLDAP() error {
 			return fmt.Errorf("ldap[%s]: realms must be non-empty", b.Name)
 		}
 		for _, r := range b.Realms {
+			if strings.TrimSpace(r) == "" {
+				return fmt.Errorf("ldap[%s]: realms must not contain empty or whitespace entries", b.Name)
+			}
 			if existing, dup := realmToBackend[r]; dup {
 				return fmt.Errorf("ldap realm %q is claimed by both backends %q and %q", r, existing, b.Name)
 			}
