@@ -298,6 +298,14 @@ func validateListen(addr string) error {
 	if err != nil {
 		return fmt.Errorf("listen %q has non-numeric port %q", addr, port)
 	}
+	// Port 0 is syntactically valid in Go ("pick an ephemeral port") but
+	// disallowed in production config: operators need to know which port
+	// to scrape, route to, and open in security groups. If you need
+	// ephemeral ports for an integration test, construct Config{} directly
+	// and skip Validate.
+	if p == 0 {
+		return fmt.Errorf("listen %q uses port 0; pick a fixed port so operators can locate the service", addr)
+	}
 	if p < 1 || p > 65535 {
 		return fmt.Errorf("listen %q port %d out of range 1..65535", addr, p)
 	}

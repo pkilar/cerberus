@@ -117,8 +117,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// starts with a no-Authorization probe so the client can pick
 			// up the WWW-Authenticate: Negotiate challenge. Logging that
 			// as auth.failed at WARN floods logs and obscures genuine
-			// rejected-token errors, so demote it to debug.
-			if r.Header.Get("Authorization") == "" {
+			// rejected-token errors, so the authenticator returns a
+			// sentinel for that case and we demote it to debug here.
+			// Any other error means a token was submitted and rejected,
+			// which stays at WARN.
+			if errors.Is(err, auth.ErrNoAuthorizationHeader) {
 				slog.Debug("auth.challenge", "remote_addr", r.RemoteAddr)
 			} else {
 				slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)

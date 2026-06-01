@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -133,5 +135,99 @@ func TestParseProcMeminfo_NonNumericValueIsError(t *testing.T) {
 	_, err := parseProcMeminfo([]byte(data))
 	if err == nil {
 		t.Fatal("expected error for non-numeric MemTotal value")
+	}
+}
+
+// withProcPaths swaps the package-level /proc path vars to the given fixtures
+// and returns a cleanup. Cannot run in parallel with anything else that
+// touches the same vars.
+func withProcPaths(t *testing.T, statPath, meminfoPath string) {
+	t.Helper()
+	origStat, origMem := procStatPath, procMeminfoPath
+	procStatPath, procMeminfoPath = statPath, meminfoPath
+	t.Cleanup(func() {
+		procStatPath, procMeminfoPath = origStat, origMem
+	})
+}
+
+func TestReadEnclaveMetrics_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	meminfoPath := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(statPath, []byte(sampleProcStat), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	if err := os.WriteFile(meminfoPath, []byte(sampleProcMeminfo), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	withProcPaths(t, statPath, meminfoPath)
+
+	resp, err := ReadEnclaveMetrics()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.CPU.User != 1.0 {
+		t.Errorf("CPU,User = %v, want 1.0", resp.CPU.User)
+	}
+	if resp.CPU.Idle != 50.0 {
+		t.Errorf("CPU.Idle = %v, want 50.0", resp.CPU.Idle)
+	}
+	if resp.Memory.TotalBytes != 16384000*1024 {
+		t.Errorf("Memory.TotalBytes = %d, want %d", resp.Memory.TotalBytes, 16384000*1024)
+	}
+	if resp.Memory.AvailableBytes != 12288000*1024 {
+		t.Errorf("Memory.AvailableBytes = %d", resp.Memory.AvailableBytes)
+	}
+}
+
+func TestReadEnclaveMetrics_StatReadError(t *testing.T) {
+	dir := t.TempDir()
+	meminfoPath := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(meminfoPath, []byte(sampleProcMeminfo), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	withProcPaths(t, filepath.Join(dir, "does-not-exist"), meminfoPath)
+
+	_, err := ReadEnclaveMetrics()
+	if err == nil {
+		t.Fatal("expected error when /proc/stat is missing")
+	}
+	if !strings.Contains(err.Error(), "read") {
+		t.Errorf("error %v does not contain expected substring 'read'", err)
+	}
+}
+
+func TestReadEnclaveMetrics_MeminfoReadError(t *testing.T) {
+	dir := t.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	if err := os.WriteFile(statPath, []byte(sampleProcStat), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	withProcPaths(t, statPath, filepath.Join(dir, "does-not-exist"))
+
+	_, err := ReadEnclaveMetrics()
+	if err == nil {
+		t.Fatal("expected error when /proc/meminfo is missing")
+	}
+}
+
+func TestReadEnclaveMetrics_StatParseError(t *testing.T) {
+	dir := t.TempDir()
+	statPath := filepath.Join(dir, "stat")
+	meminfoPath := filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(statPath, []byte("garbage with no cpu line\n"), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+	if err := os.WriteFile(meminfoPath, []byte(sampleProcMeminfo), 0o600); err != nil {
+		t.Fatalf("write meminfo: %v", err)
+	}
+	withProcPaths(t, statPath, meminfoPath)
+
+	_, err := ReadEnclaveMetrics()
+	if err == nil {
+		t.Fatal("expected parse error from malformed /proc/stat")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error %v should be wrapped as a parse error", err)
 	}
 }

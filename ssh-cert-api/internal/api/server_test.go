@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/authz"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // --- Test doubles for the three injection points on Server. ---
@@ -490,5 +492,163 @@ func TestMetrics_BypassesAuthAndExposesCounters(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing series %q", want)
 		}
+	}
+}
+
+// TestMetrics_ExposesEnclaveResourceSeries proves that the
+// EnclaveMetricsCollector - once registered with the default Prometheus
+// registry as main.go does - actually surfaces through the Server's /metrics
+// endpoint. This is the integration step the unit-level collector tests
+// don't cover: a regression in route registration, in promhttp.Handler's
+// registry choice, or in the auth-bypass list would all fail this test.
+
+// Cannot run in parallel: it registers and unregisters on the process-global
+// default registry. Uses an authenticator that errors when invoked to prove
+// /metrics genuinely bypasses auth (no header present on the request).
+func TestMetrics_ExposesEnclaveResourceSeries(t *testing.T) {
+	signer := &fakeSigner{
+		metricsResp: &messages.EnclaveMetricsResponse{
+			CPU: messages.EnclaveCPUTimes{
+				User: 11, Nice: 0, System: 7, Idle: 9000,
+				IOWait: 1, IRQ: 0, SoftIRQ: 0,
+			},
+			Memory: messages.EnclaveMemoryStats{
+				TotalBytes:     4 * 1024 * 1024 * 1024,
+				AvailableBytes: 2 * 1024 * 1024 * 1024,
+				FreeBytes:      1 * 1024 * 1024 * 1024,
+				BuffersBytes:   128 * 1024 * 1024,
+				CachedBytes:    512 * 1024 * 1024,
+			},
+		},
+	}
+	collector := NewEnclaveMetricsCollector(signer, time.Hour)
+	collector.probe(t.Context())
+
+	if err := prometheus.Register(collector); err != nil {
+		t.Fatalf("prometheus.Register: %v", err)
+	}
+
+	t.Cleanup(func() { prometheus.Unregister(collector) })
+
+	authN := &fakeAuthenticator{err: errors.New("must not be called for /metrics")}
+	s := newServerForTest(t, authN, &fakeAuthorizer{}, signer)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("/metrics: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Each labeled series should appear at least once for a representative
+	// label value. We don't assert on the exact float formatting promhttp
+	// emits "1,1e+10" or "11" depending on scale - just that the labeled
+	// metric line is present.
+
+	wantSubstrings := []string{
+		`cerberus_enclave_cpu_seconds_total{mode="user"}`,
+		`cerberus_enclave_cpu_seconds_total{mode="idle"}`,
+		`cerberus_enclave_memory_bytes{type="total"}`,
+		`cerberus_enclave_memory_bytes{type="available"}`,
+		"cerberus_enclave_metrics_scrape_errors_total",
+		"cerberus_enclave_metrics_last_scrape_timestamp_seconds",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\nfull body:\n%s", want, body)
+		}
+	}
+}
+
+// captureLogs swaps slog's default logger for one that records every record
+// and returns a snapshot accessor plus the cleanup that restores the prior
+// default. Cannot run in parallel with anything else that touches slog
+// global state.
+func captureLogs(t *testing.T) func() []slog.Record {
+	t.Helper()
+	h := &capturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []slog.Record {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		out := make([]slog.Record, len(h.records))
+		copy(out, h.records)
+		return out
+	}
+}
+
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestAuthMiddleware_LogClassification proves the SPNEGO challenge round-trip
+// (no Authorization header) is logged at Debug as auth.challenge, while a
+// genuinely rejected token logs at Warn as auth.failed. Both still respond 401
+// with the same WWW-Authenticate challenge - only the log channel differs.
+func TestAuthMiddleware_LogClassification(t *testing.T) {
+	tests := []struct {
+		name      string
+		authErr   error
+		wantMsg   string
+		wantLevel slog.Level
+	}{
+		{
+			name:      "no auth header is challenge at debug",
+			authErr:   auth.ErrNoAuthorizationHeader,
+			wantMsg:   "auth.challenge",
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "rejected token is failure at warn",
+			authErr:   errors.New("AP-REQ verification failed: token rejected"),
+			wantMsg:   "auth.failed",
+			wantLevel: slog.LevelWarn,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records := captureLogs(t)
+
+			authN := &fakeAuthenticator{err: tt.authErr}
+			s := newServerForTest(t, authN, &fakeAuthorizer{}, &fakeSigner{})
+
+			r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{}`))
+			w := httptest.NewRecorder()
+			s.Router().ServeHTTP(w, r)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", w.Code)
+			}
+
+			var found bool
+			for _, rec := range records() {
+				if rec.Message == tt.wantMsg {
+					found = true
+					if rec.Level != tt.wantLevel {
+						t.Errorf("%s: level = %v, want %v", tt.wantMsg, rec.Level, tt.wantLevel)
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected log record with message %q; got: %+v", tt.wantMsg, records())
+			}
+		})
 	}
 }

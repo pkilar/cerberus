@@ -1,0 +1,26 @@
+# EditorConfig — https://editorconfig.org
+# Advisory only: there is no CI gate for line length. gofmt/goimports remain
+# the authority on Go formatting (they never wrap by width); this just nudges
+# editors toward a 120-column target.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 120
+
+# Go is tab-indented (gofmt enforces this); editors should not convert to spaces.
+[*.go]
+indent_style = tab
+
+[*.{yml,yaml,json}]
+indent_style = space
+indent_size = 2
+
+# Markdown: keep trailing whitespace (two-space hard line breaks) and don't
+# nag about prose line length.
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = off

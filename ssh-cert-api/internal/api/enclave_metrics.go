@@ -40,8 +40,9 @@ type EnclaveMetricsCollector struct {
 	interval time.Duration
 	timeout  time.Duration
 
-	state        atomic.Pointer[enclaveMetricsSnapshot]
-	scrapeErrors atomic.Uint64
+	state           atomic.Pointer[enclaveMetricsSnapshot]
+	scrapeErrors    atomic.Uint64
+	lastProbeFailed atomic.Bool
 
 	cpuDesc          *prometheus.Desc
 	memDesc          *prometheus.Desc
@@ -74,7 +75,7 @@ func NewEnclaveMetricsCollector(signer enclave.Signer, interval time.Duration) *
 		),
 		lastScrapeDesc: prometheus.NewDesc(
 			"cerberus_enclave_metrics_last_scrape_timestamp_seconds",
-			"Unix timestamp (seconds) of the most recent successful enclave metrics poll.",
+			"Unix timestamp (seconds) of the most recent successful enclave metrics poll. 0 until the first successful probe; staleness alerts of the form `time() - X > threshold` fire from process start until then, which is the intended behavior.",
 			nil, nil,
 		),
 	}
@@ -103,19 +104,22 @@ func (c *EnclaveMetricsCollector) loop(ctx context.Context) {
 
 // probe runs one bounded VSOCK call. On success it replaces the cached
 // snapshot; on failure it increments scrapeErrors and leaves the snapshot
-// alone. Logs gated on transitions to avoid flooding during an outage.
+// alone. Logs are gated on healthy<->degraded transitions so a sustained
+// outage doesn't flood at the poll interval, but the first failure (and
+// the eventual recovery) are visible at the default log level - matching
+// the HealthMonitor pattern in health.go.
 func (c *EnclaveMetricsCollector) probe(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
+	prevFailed := c.lastProbeFailed.Load()
 	resp, err := c.signer.GetEnclaveMetrics(ctx)
 	if err != nil {
 		c.scrapeErrors.Add(1)
-		// Log on every error here would flood at the poll interval during
-		// a sustained outage; debug level is appropriate — operators see
-		// the failure via cerberus_enclave_metrics_scrape_errors_total
-		// and the staleness of last_scrape_timestamp_seconds.
-		slog.Debug("enclave_metrics.probe_failed", "error", err)
+		c.lastProbeFailed.Store(true)
+		if !prevFailed {
+			slog.Warn("enclave_metrics.degraded", "error", err)
+		}
 		return
 	}
 	c.state.Store(&enclaveMetricsSnapshot{
@@ -123,6 +127,10 @@ func (c *EnclaveMetricsCollector) probe(parent context.Context) {
 		Memory:    resp.Memory,
 		SampledAt: time.Now(),
 	})
+	c.lastProbeFailed.Store(false)
+	if prevFailed {
+		slog.Info("enclave_metrics.recovered")
+	}
 }
 
 // Describe implements prometheus.Collector.
@@ -134,8 +142,11 @@ func (c *EnclaveMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements prometheus.Collector. Emits the scrape-error counter
-// unconditionally (so dashboards can alert even when no successful poll has
-// happened) and the snapshot-derived metrics only when a snapshot exists.
+// and last-scrape-timestamp gauge unconditionally so staleness alerts
+// (`time() - last_scrape > threshold`) fire from process start until the
+// first successful probe; the cpu/memory series are only emitted once a
+// snapshot exists, since labeled series with no underlying data have no
+// meaningful zero value.
 func (c *EnclaveMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.scrapeErrorsDesc,
@@ -144,15 +155,20 @@ func (c *EnclaveMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	snap := c.state.Load()
-	if snap == nil {
-		return
+	var lastScrapeUnix float64
+	if snap != nil {
+		lastScrapeUnix = float64(snap.SampledAt.Unix())
 	}
 
 	ch <- prometheus.MustNewConstMetric(
 		c.lastScrapeDesc,
 		prometheus.GaugeValue,
-		float64(snap.SampledAt.Unix()),
+		lastScrapeUnix,
 	)
+
+	if snap == nil {
+		return
+	}
 
 	cpuModes := []struct {
 		mode  string

@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -190,7 +191,7 @@ func scalarValue(t *testing.T, families map[string]*dto.MetricFamily, name strin
 	return 0
 }
 
-func TestEnclaveMetricsCollector_NoSnapshotEmitsOnlyErrorCounter(t *testing.T) {
+func TestEnclaveMetricsCollector_NoSnapshotEmitsErrorAndZeroTimestamp(t *testing.T) {
 	t.Parallel()
 	signer := &fakeSigner{metricsErr: errors.New("never connected")}
 	c := NewEnclaveMetricsCollector(signer, time.Hour)
@@ -201,26 +202,99 @@ func TestEnclaveMetricsCollector_NoSnapshotEmitsOnlyErrorCounter(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	// Only the scrape-errors counter should be present; the cpu/memory/last
-	// scrape series must not appear before the first successful probe.
+	// Before the first successful probe: scrape_errors_total and
+	// last_scrape_timestamp_seconds (=0) are both present so staleness
+	// alerts of the form `time() - X > threshold` can fire from process
+	// start. The cpu/memory labeled series stay absent because they have
+	// no meaningful zero value.
 	got, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}
-	names := make(map[string]bool)
-	for _, mf := range got {
-		names[mf.GetName()] = true
-	}
-	if !names["cerberus_enclave_metrics_scrape_errors_total"] {
+	families := indexFamilies(got)
+	if _, ok := families["cerberus_enclave_metrics_scrape_errors_total"]; !ok {
 		t.Error("expected scrape_errors_total to be present")
+	}
+	if v := scalarValue(t, families, "cerberus_enclave_metrics_last_scrape_timestamp_seconds"); v != 0 {
+		t.Errorf("last_scrape_timestamp_seconds = %v, want 0 (no successful probe yet)", v)
 	}
 	for _, forbidden := range []string{
 		"cerberus_enclave_cpu_seconds_total",
 		"cerberus_enclave_memory_bytes",
-		"cerberus_enclave_metrics_last_scrape_timestamp_seconds",
 	} {
-		if names[forbidden] {
+		if _, present := families[forbidden]; present {
 			t.Errorf("did not expect %s before first successful probe", forbidden)
 		}
+	}
+}
+
+func TestEnclaveMetricsCollector_LogsTransitions(t *testing.T) {
+	// captureLogs swaps the global slog default, so this test cannot run in
+	// parallel (same constraint as TestAuthMiddleware_LogClassification).
+	records := captureLogs(t)
+
+	// countLevel returns how many captured records carry msg at level.
+	countLevel := func(msg string, level slog.Level) int {
+		n := 0
+		for _, rec := range records() {
+			if rec.Message == msg && rec.Level == level {
+				n++
+			}
+		}
+		return n
+	}
+
+	signer := &fakeSigner{
+		metricsResp: &messages.EnclaveMetricsResponse{
+			CPU:    messages.EnclaveCPUTimes{User: 1},
+			Memory: messages.EnclaveMemoryStats{TotalBytes: 1024},
+		},
+	}
+	c := NewEnclaveMetricsCollector(signer, time.Hour)
+
+	// Initial state: no probe yet, lastProbeFailed defaults to false.
+	if c.lastProbeFailed.Load() {
+		t.Fatal("lastProbeFailed should default to false")
+	}
+
+	// Successful probe from a clean start: no transition, so nothing logged.
+	c.probe(t.Context())
+	if c.lastProbeFailed.Load() {
+		t.Fatal("lastProbeFailed should remain false after a successful probe")
+	}
+	if n := len(records()); n != 0 {
+		t.Fatalf("clean successful probe should emit no transition logs, got %d", n)
+	}
+
+	// First failure: enclave_metrics.degraded logged once at Warn.
+	signer.metricsResp = nil
+	signer.metricsErr = errors.New("vsock dial: connection refused")
+	c.probe(t.Context())
+	if !c.lastProbeFailed.Load() {
+		t.Fatal("lastProbeFailed should be true after a failed probe")
+	}
+	if n := countLevel("enclave_metrics.degraded", slog.LevelWarn); n != 1 {
+		t.Fatalf("first failure: enclave_metrics.degraded@Warn count = %d, want 1", n)
+	}
+
+	// Sustained outage: a second consecutive failure must NOT re-log — the
+	// prevFailed gate exists precisely to avoid flooding at the poll interval.
+	c.probe(t.Context())
+	if n := countLevel("enclave_metrics.degraded", slog.LevelWarn); n != 1 {
+		t.Fatalf("sustained outage re-logged: enclave_metrics.degraded@Warn count = %d, want 1", n)
+	}
+
+	// Recovery: enclave_metrics.recovered logged once at Info.
+	signer.metricsErr = nil
+	signer.metricsResp = &messages.EnclaveMetricsResponse{
+		CPU:    messages.EnclaveCPUTimes{User: 2},
+		Memory: messages.EnclaveMemoryStats{TotalBytes: 2048},
+	}
+	c.probe(t.Context())
+	if c.lastProbeFailed.Load() {
+		t.Fatal("lastProbeFailed should be false after recovery")
+	}
+	if n := countLevel("enclave_metrics.recovered", slog.LevelInfo); n != 1 {
+		t.Fatalf("recovery: enclave_metrics.recovered@Info count = %d, want 1", n)
 	}
 }

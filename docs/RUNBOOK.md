@@ -581,17 +581,33 @@ GET /health
   ```
   Per-backend status is **advisory** — the top-level `status` stays gated on the enclave staleness path so that a transient LDAP outage cannot stop static-only certificate issuance. Alert on `ldap[].healthy` separately (or scrape `cerberus_ldap_backend_up{backend="..."}` from `/metrics`).
 
+### Metrics Endpoint
+
+```
+GET /metrics
+```
+
+- **No authentication required.** Standard Prometheus exposition format from `promhttp.Handler()`.
+- Exposes `cerberus_sign_*` and `cerberus_enclave_errors_total` (request-path counters), plus the enclave-resource series populated by the background poller in `EnclaveMetricsCollector`:
+  - `cerberus_enclave_cpu_seconds_total{mode="user|nice|system|idle|iowait|irq|softirq"}` - counter, seconds.
+  - `cerberus_enclave_memory_bytes{type="total|available|free|buffers|cached"}` - gauge, bytes.
+  - `cerberus_enclave_metrics_scrape_errors_total` - counter; increments on every failed VSOCK probe.
+  - `cerberus_enclave_metrics_last_scrape_timestamp_seconds` - gauge; **0 until the first successful probe**, otherwise the Unix timestamp of the most recent success. use `time() - cerberus_enclave_metrics_last_scrape_timestamp_seconds > 60` as a staleness alert; this fires from process start until the first successful poll, which is the desired behavior.
+  - **Network exposure**: like `/health`, this endpoint is unauthenticated by design so Prometheus can scrape without Kerberos. Unlike `/health`, the response now includes enclave-internal CPU and memory pressure data, which can be a useful side-channel signal to an attacker probing for OOM-triggering inputs or covert-channel timing. **Restrict `/metrics` to the Prometheus scraper subnet via security groups, ALB listener rules, or an in-service IP allow-list** - do not rely on obscurity.
+  - Tune the poll cadence with `ENCLAVE_METRICS_INTERVAL` (Go duration, default `15s`, minimum `1s`). The poller probe-times-out at 2s per call; failed polls leave the previous snapshot in place, so dashboards see stale-but-monotonic counters until the enclave recovers.
+
 ### Monitoring Recommendations
 
-| Check                    | Method                                                                                                                | Frequency |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------- | --------- |
-| API + enclave health     | `GET /health` → HTTP 200 (`status: healthy`); 503 includes a `reason` field — see [Health Endpoint](#health-endpoint) | Every 30s |
-| Enclave process running  | `nitro-cli describe-enclaves` → State = RUNNING                                                                       | Every 60s |
-| End-to-end signing       | Test sign request with a service account                                                                              | Every 5m  |
-| TLS certificate expiry   | Check cert NotAfter date                                                                                              | Daily     |
-| Kerberos keytab validity | `klist -k /etc/krb5.keytab`                                                                                           | Daily     |
-| KMS key accessibility    | `aws kms describe-key`                                                                                                | Every 5m  |
-| Disk space               | Standard OS monitoring                                                                                                | Every 5m  |
+| Check                    | Method                                                                                                                                                                                                       | Frequency |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| API + enclave health     | `GET /health` → HTTP 200 (`status: healthy`); 503 includes a `reason` field — see [Health Endpoint](#health-endpoint)                                                                                        | Every 30s |
+| Enclave resource metrics | `GET /metrics`; alert on `time() - cerberus_enclave_metrics_last_scrape_timestamp_seconds > 60` and on rate (`cerberus_enclave_metrics_scrape_errors_total`) > 0 - see [Metrics Endpoint](#metrics-endpoint) | Every 15s |
+| Enclave process running  | `nitro-cli describe-enclaves` → State = RUNNING                                                                                                                                                              | Every 60s |
+| End-to-end signing       | Test sign request with a service account                                                                                                                                                                     | Every 5m  |
+| TLS certificate expiry   | Check cert NotAfter date                                                                                                                                                                                     | Daily     |
+| Kerberos keytab validity | `klist -k /etc/krb5.keytab`                                                                                                                                                                                  | Daily     |
+| KMS key accessibility    | `aws kms describe-key`                                                                                                                                                                                       | Every 5m  |
+| Disk space               | Standard OS monitoring                                                                                                                                                                                       | Every 5m  |
 
 ### Key Log Messages
 
@@ -760,14 +776,14 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 
 ### Authorization Failures
 
-| Error                                                | Likely Cause                                        | Resolution                                                                                                                                                                                                                                                                                                          |
-| ---------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Not authorized for requested principals` (HTTP 403) | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                               |
-| User gets wrong permissions                          | User matches the wrong group                        | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request. |
-| User not found in any group                          | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                            |
-| HTTP 403 with `authz.ldap.error` in logs             | LDAP backend unreachable or denied bind             | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                              |
-| Service refuses to start with `ldap[...] initial probe failed` | Misconfigured LDAP backend at startup       | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                              |
-| `realm "..." claimed by both backends`               | Two LDAP backends list overlapping realms           | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                            |
+| Error                                                          | Likely Cause                                        | Resolution                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Not authorized for requested principals` (HTTP 403)           | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                               |
+| User gets wrong permissions                                    | User matches the wrong group                        | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request. |
+| User not found in any group                                    | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                            |
+| HTTP 403 with `authz.ldap.error` in logs                       | LDAP backend unreachable or denied bind             | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                            |
+| Service refuses to start with `ldap[...] initial probe failed` | Misconfigured LDAP backend at startup               | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                             |
+| `realm "..." claimed by both backends`                         | Two LDAP backends list overlapping realms           | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                           |
 
 ### VSOCK / KMS Proxy Issues
 
@@ -843,6 +859,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - The enclave has **no network access** — all external calls go through the VSOCK KMS proxy on the host.
 - The API listens on HTTPS only (TLS required).
 - Restrict access to port 8443 via security groups to authorized networks.
+- **`/metrics` and `/health` are intentionally unauthenticated** so Prometheus and load balancers can reach them without Kerberos tickets. Both expose information about enclave state — `/metrics` in particular surfaces enclave CPU/memory pressure (see [Metrics Endpoint](#metrics-endpoint)). **Restrict these paths to known-good source ranges at the network layer** (security group, ALB listener rule, or in-service IP allow-list); the application does not enforce a source check.
 
 ### Authentication & Authorization
 
