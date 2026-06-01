@@ -1115,7 +1115,7 @@ func TestValidateListen(t *testing.T) {
 		{name: "host without port", addr: "0.0.0.0", wantError: true, errSubstr: "missing port"},
 		{name: "host without port (loopback)", addr: "127.0.0.1", wantError: true, errSubstr: "missing port"},
 		{name: "non-numeric port", addr: "0.0.0.0:https", wantError: true, errSubstr: "non-numeric port"},
-		{name: "port zero", addr: ":0", wantError: true, errSubstr: "out of range"},
+		{name: "port zero", addr: ":0", wantError: true, errSubstr: "pick a fixed port"},
 		{name: "port too high", addr: ":70000", wantError: true, errSubstr: "out of range"},
 		{name: "port negative", addr: ":-1", wantError: true, errSubstr: "out of range"},
 	}

@@ -25,6 +25,14 @@ import (
 // NegTokenResp continuation token where an initial token was expected.
 var errNotNegTokenInit = errors.New("expected NegTokenInit, got NegTokenResp")
 
+// ErrNoAuthorizationHeader is returned by AuthenticateRequest when the
+// request carries no Authorization header. This is the expected first leg
+// of every SPNEGO exchange (the client sends an empty request to discover
+// the WWW-Authenticate: Negotiate challenge), so callers that distinguish
+// "challenge round-trip" from "rejected token" should match this sentinel
+// with errors.Is rather than treating every error as a failure.
+var ErrNoAuthorizationHeader = errors.New("missing Authorization header")
+
 type Authenticator interface {
 	AuthenticateRequest(r *http.Request) (*AuthenticatedUser, error)
 }
@@ -76,7 +84,7 @@ func NewKerberosAuthenticator(keytabPath string, servicePrincipal string) (*Kerb
 func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*AuthenticatedUser, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return nil, fmt.Errorf("missing Authorization header")
+		return nil, ErrNoAuthorizationHeader
 	}
 
 	token, ok := strings.CutPrefix(authHeader, "Negotiate ")
