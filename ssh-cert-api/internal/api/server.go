@@ -215,12 +215,25 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// principal could be matched by a group whose allowed_principals contains
 	// "" or "*"; the enclave rejects it regardless, so fail fast here with a
 	// clear 400 instead of burning an enclave round trip on a 500.
+	//
+	// Also reject a literal "*": it is only meaningful as a wildcard inside a
+	// group's allowed_principals policy, never as a certificate principal. The
+	// cert below is minted for exactly what was requested, and sshd matches
+	// cert principals literally (not as a glob), so a "*" would yield a useless
+	// certificate while a wildcard group would silently authorize it.
 	for _, p := range req.Principals {
 		if strings.TrimSpace(p) == "" {
 			outcome = outcomeInvalidBody
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Empty principal"})
+			return
+		}
+		if strings.TrimSpace(p) == "*" {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Wildcard principal not allowed"})
 			return
 		}
 	}
@@ -250,10 +263,23 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	// Static attributes from config become custom extensions on the cert.
 	customAttributes := maps.Clone(result.CertificateRules.StaticAttributes)
 
+	// Issue the certificate for exactly the principals the user requested, not
+	// the group's full allowed_principals set. Authorization above has already
+	// confirmed every requested principal is permitted by the matched group, so
+	// honoring the request is least-privilege: a user asking for ["deploy"]
+	// receives a cert valid only for "deploy", even if their group also allows
+	// "root". This also makes wildcard groups (allowed_principals: ["*"]) behave
+	// correctly — the cert carries the concrete requested names rather than a
+	// literal "*". Deduplicate so a request padded with repeats does not bloat
+	// the cert's ValidPrincipals.
+	grantedPrincipals := slices.Clone(req.Principals)
+	slices.Sort(grantedPrincipals)
+	grantedPrincipals = slices.Compact(grantedPrincipals)
+
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,
 		KeyID:            principal,
-		Principals:       slices.Clone(result.CertificateRules.AllowedPrincipals),
+		Principals:       grantedPrincipals,
 		Validity:         result.CertificateRules.Validity,
 		Permissions:      maps.Clone(result.CertificateRules.Permissions),
 		CustomAttributes: customAttributes,
@@ -284,7 +310,8 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		"principal", principal,
 		"group", result.GroupName,
 		"source", result.Source,
-		"granted_principals", result.CertificateRules.AllowedPrincipals,
+		"granted_principals", grantedPrincipals,
+		"group_allowed_principals", result.CertificateRules.AllowedPrincipals,
 		"remote_addr", r.RemoteAddr,
 	)
 	w.Header().Set("Content-Type", "application/json")

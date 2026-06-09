@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,6 +252,87 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	}
 	if rules.Permissions["permit-pty"] != "" {
 		t.Errorf("config permissions corrupted: %v", rules.Permissions)
+	}
+}
+
+// TestHandleSignRequest_CertScopedToRequest verifies that the certificate is
+// issued for exactly the principals the user requested, not the group's full
+// allowed_principals set. Requesting a subset must not silently widen the cert
+// to every principal the group permits (least privilege).
+func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: []string{"root", "ubuntu", "deploy"},
+	}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["deploy"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"deploy"}) {
+		t.Errorf("cert principals = %v, want exactly [deploy] (the requested subset)", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_WildcardGroupGetsConcretePrincipal verifies that a group
+// with allowed_principals: ["*"] yields a cert carrying the concrete requested
+// principal, never a literal "*".
+func TestHandleSignRequest_WildcardGroupGetsConcretePrincipal(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"root"}) {
+		t.Errorf("cert principals = %v, want exactly [root]", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_WildcardRequestRejected verifies the host refuses a
+// literal "*" as a requested principal before it ever reaches the signer.
+func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["*"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Wildcard principal not allowed") {
+		t.Errorf("body missing wildcard rejection: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("wildcard request must be rejected before reaching the signer")
 	}
 }
 

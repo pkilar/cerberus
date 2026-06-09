@@ -183,10 +183,17 @@ func validateSigningRequest(req messages.EnclaveSigningRequest) (time.Duration, 
 		return 0, fmt.Errorf("too many principals: %d (maximum: %d)", len(req.Principals), messages.MaxPrincipals)
 	}
 
-	// Validate principals are not empty strings
+	// Validate principals are not empty strings, and reject a literal "*".
+	// "*" is only meaningful as a wildcard in the host's allowed_principals
+	// policy; as a certificate principal it is matched literally by sshd and so
+	// is useless. The host rejects it too — this is the enclave-side
+	// belt-and-braces against a compromised or buggy host forwarding it.
 	for i, principal := range req.Principals {
 		if strings.TrimSpace(principal) == "" {
 			return 0, fmt.Errorf("principal at index %d cannot be empty", i)
+		}
+		if strings.TrimSpace(principal) == "*" {
+			return 0, fmt.Errorf("principal at index %d cannot be the wildcard %q", i, "*")
 		}
 	}
 

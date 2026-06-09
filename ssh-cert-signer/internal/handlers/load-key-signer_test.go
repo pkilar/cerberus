@@ -92,6 +92,8 @@ func TestAttestationRequired(t *testing.T) {
 		{"true", true},
 		{"1", true},
 		{"yes", true},
+		{"TRUE", true},
+		{" true ", true},
 		{"false", false},
 		{"0", false},
 		{"no", false},
@@ -100,18 +102,43 @@ func TestAttestationRequired(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("REQUIRE_ATTESTATION="+tt.envValue, func(t *testing.T) {
 			t.Setenv("REQUIRE_ATTESTATION", tt.envValue)
-			if got := attestationRequired(); got != tt.want {
+			got, err := attestationRequired()
+			if err != nil {
+				t.Fatalf("attestationRequired() unexpected error: %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("attestationRequired() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 
-	// Unrecognized value falls through to /dev/nsm detection.
-	t.Run("REQUIRE_ATTESTATION=garbage falls through", func(t *testing.T) {
+	// An unrecognized value must fail closed rather than silently auto-detect:
+	// a typo on a host without /dev/nsm would otherwise disable attestation.
+	t.Run("REQUIRE_ATTESTATION=garbage fails closed", func(t *testing.T) {
 		t.Setenv("REQUIRE_ATTESTATION", "garbage")
+		if _, err := attestationRequired(); err == nil {
+			t.Error("expected error for unrecognized REQUIRE_ATTESTATION value, got nil")
+		}
+	})
+
+	// An explicitly empty value is treated as a misconfiguration, not unset.
+	t.Run("REQUIRE_ATTESTATION=empty fails closed", func(t *testing.T) {
+		t.Setenv("REQUIRE_ATTESTATION", "")
+		if _, err := attestationRequired(); err == nil {
+			t.Error("expected error for empty REQUIRE_ATTESTATION value, got nil")
+		}
+	})
+
+	// When unset entirely, fall through to /dev/nsm detection.
+	t.Run("REQUIRE_ATTESTATION unset auto-detects", func(t *testing.T) {
+		os.Unsetenv("REQUIRE_ATTESTATION")
 		_, nsmErr := os.Stat("/dev/nsm")
 		wantAuto := nsmErr == nil
-		if got := attestationRequired(); got != wantAuto {
+		got, err := attestationRequired()
+		if err != nil {
+			t.Fatalf("attestationRequired() unexpected error: %v", err)
+		}
+		if got != wantAuto {
 			t.Errorf("attestationRequired() = %v, want %v (auto-detect)", got, wantAuto)
 		}
 	})

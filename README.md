@@ -99,7 +99,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
   - **Environment Variables**:
     - `CA_KEY_FILE_PATH`: Path to the encrypted CA key file (default: `/app/ca_key.enc`)
     - `AWS_REGION`: AWS region for KMS operations (default: `us-east-1`)
-    - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device.
+    - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device. Accepts `true/1/yes` or `false/0/no` (case-insensitive); leave it **unset** to auto-detect `/dev/nsm`. An unrecognized or empty value is rejected at startup so the setting fails closed.
     - `LOG_FORMAT`: `json` for structured slog JSON; anything else (default) emits text
     - `DEBUG`: `true` raises the log level to Debug
 
