@@ -41,7 +41,11 @@ import (
 // attestation provider. This prevents silent downgrade to plaintext KMS Decrypt
 // if the NSM device becomes unavailable.
 func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest, attestProvider *attestation.Provider) (ssh.Signer, error) {
-	if attestationRequired() {
+	required, err := attestationRequired()
+	if err != nil {
+		return nil, err
+	}
+	if required {
 		if attestProvider == nil || !attestProvider.IsAvailable() {
 			return nil, errors.New("attestation is required but unavailable; refusing to load CA key (set REQUIRE_ATTESTATION=false to override — not recommended in production)")
 		}
@@ -67,6 +71,15 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 
 	// The AWS SDK must use the credentials from the parent instance.
 	credentialProvider := credentials.NewStaticCredentialsProvider(req.Credentials.AccessKeyId, req.Credentials.SecretAccessKey, req.Credentials.Token)
+
+	// Drop our reference to the credential material once the provider has copied
+	// it. req is passed by value, so this clears the only copy this function
+	// holds; the static provider retains its own, which is unavoidable for the
+	// KMS call below. Go strings are immutable so this does not wipe the backing
+	// bytes, but releasing the reference lets the GC reclaim them and shrinks the
+	// window in which a heap scan finds the secret in this struct — the same
+	// best-effort defense-in-depth applied to the plaintext key buffers later.
+	req.Credentials = messages.Credentials{}
 
 	logging.DebugContext(ctx, "Loading AWS configuration...")
 	cfg, err := config.LoadDefaultConfig(ctx,
@@ -167,16 +180,29 @@ func LoadKeySignerHandler(ctx context.Context, req messages.LoadKeySignerRequest
 // attestationRequired reports whether KMS Decrypt must use a Recipient attestation
 // document. Defaults to true when /dev/nsm is present (i.e. running inside a Nitro
 // Enclave). REQUIRE_ATTESTATION=true|false overrides the auto-detection.
-func attestationRequired() bool {
+func attestationRequired() (bool, error) {
 	// Case-insensitive so REQUIRE_ATTESTATION=True / =TRUE / =Yes are honored.
 	// Misreading these as "fall through to auto-detect" silently disables a
 	// security-critical setting on hosts without /dev/nsm.
-	switch strings.ToLower(os.Getenv("REQUIRE_ATTESTATION")) {
+	raw, set := os.LookupEnv("REQUIRE_ATTESTATION")
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "true", "1", "yes":
-		return true
+		return true, nil
 	case "false", "0", "no":
-		return false
+		return false, nil
+	case "":
+		if set {
+			// Explicitly set to empty: treat as a misconfiguration rather than
+			// silently auto-detecting, so a blanked-out value fails closed.
+			return false, fmt.Errorf("REQUIRE_ATTESTATION is set but empty; use true/false (or unset it to auto-detect /dev/nsm)")
+		}
+		// Unset: auto-detect by probing for the NSM device.
+		_, err := os.Stat("/dev/nsm")
+		return err == nil, nil
+	default:
+		// An unrecognized value (e.g. a typo) must NOT silently fall through to
+		// auto-detection — that could disable attestation on a host without
+		// /dev/nsm. Fail closed so the misconfiguration is caught at startup.
+		return false, fmt.Errorf("REQUIRE_ATTESTATION has unrecognized value %q; use true/false (or unset it to auto-detect /dev/nsm)", raw)
 	}
-	_, err := os.Stat("/dev/nsm")
-	return err == nil
 }

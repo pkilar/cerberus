@@ -134,6 +134,21 @@ func TestSignPublicKey(t *testing.T) {
 			errorMsg:    "principals cannot be empty",
 		},
 		{
+			// Defense-in-depth: even if a compromised host forwards a literal
+			// "*" principal, the enclave refuses it — "*" is a policy wildcard,
+			// not a usable certificate principal.
+			name:   "wildcard principal rejected",
+			signer: signer,
+			request: messages.EnclaveSigningRequest{
+				SSHKey:     testPublicKey,
+				KeyID:      "test-key-wildcard",
+				Principals: []string{"*"},
+				Validity:   "1h",
+			},
+			expectError: true,
+			errorMsg:    "wildcard",
+		},
+		{
 			// PR #35: zero validity would produce a cert "valid" only inside
 			// the 300s clock-skew window. Refuse instead.
 			name:   "zero validity",

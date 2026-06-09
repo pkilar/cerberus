@@ -137,7 +137,7 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 | --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key                                                                                                                                                                                |
 | `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations                                                                                                                                                                                       |
-| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production. |
+| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production. Accepts `true/1/yes` or `false/0/no` (case-insensitive); when **unset** it auto-detects `/dev/nsm`. Any other value (a typo, or an explicitly empty string) is rejected at startup so a misconfiguration fails closed instead of silently disabling attestation. |
 | `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                         |
 | `DEBUG`               | `false`                       | Enable debug-level logging                                                                                                                                                                                          |
 
@@ -865,7 +865,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
 - All signing requests require **Kerberos/SPNEGO authentication**.
 - Authorization is **group-based** with per-group certificate rules.
-- Principals support **wildcard matching** — use carefully.
+- Principals support **wildcard matching** — use carefully. A group with `allowed_principals: ["*"]` authorizes a user to request *any* principal, but the **issued certificate is always scoped to exactly the principals the user requested**, never the group's full `allowed_principals` list and never a literal `"*"`. Requesting `"*"` itself is rejected (it is meaningful only as a policy wildcard, not as a certificate principal).
 - When a user is in multiple groups, the **first group alphabetically by name** whose `allowed_principals` cover the request wins. Reordering YAML keys won't change this — rename groups if you need a different winner.
 - Per-principal rate limiting on `/sign` is on by default (`RATE_LIMIT_RPS=5`, `RATE_LIMIT_BURST=10`). Tune via env vars if needed.
 
@@ -875,6 +875,8 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - Certificates include a **5-minute clock skew** tolerance (valid 5 minutes before issuance).
 - Each certificate gets a **cryptographically random** serial and nonce.
 - `critical_options` like `source-address` can restrict certificate use to specific networks.
+
+> **Enclave trust model:** the enclave validates structural properties of every signing request it receives over VSOCK (key algorithm and minimum strength, validity bound, principal count, empty/`"*"` principals, extension/critical-option key collisions) as defense-in-depth, but it does **not** re-run the host's authorization policy. The host API (`ssh-cert-api`) remains the authority for *which* principals, permissions, and critical options a given user may obtain. A compromise of the host process is therefore in scope for cert misuse (the CA key itself stays protected by the enclave + KMS PCR policy); protect the host accordingly.
 
 ### Credential Handling
 
