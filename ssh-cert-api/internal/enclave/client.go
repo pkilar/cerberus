@@ -17,8 +17,6 @@ import (
 	"github.com/pkilar/cerberus/constants"
 	"github.com/pkilar/cerberus/logging"
 	"github.com/pkilar/cerberus/messages"
-
-	"github.com/mdlayher/vsock"
 )
 
 // Signer is the host-side interface to the enclave's signing service.
@@ -54,11 +52,16 @@ const vsockRoundTripDeadline = 30 * time.Second
 
 // Call sends a JSON request to the enclave and decodes the response into
 // response. The supplied ctx governs the call: if it is cancelled or expires,
-// the underlying VSOCK connection is closed so any in-flight Read/Write
-// unblocks promptly. A wall-clock backstop bounds requests whose context
-// lacks a deadline.
+// the underlying connection is closed so any in-flight Read/Write unblocks
+// promptly. A wall-clock backstop bounds requests whose context lacks a
+// deadline.
+//
+// The dial target defaults to the enclave VSOCK CID/port but can be overridden
+// via SignerEndpointEnv to point at an alternative signer (e.g. the usbhsm
+// hardware bridge) over TCP/Unix/VSOCK. Framing and deadlines are identical
+// across transports.
 func Call(ctx context.Context, enclaveCID uint32, request messages.Request, response *messages.Response) error {
-	conn, err := vsock.Dial(enclaveCID, constants.EnclaveListeningPort, nil)
+	conn, err := dialSigner(ctx, enclaveCID)
 	if err != nil {
 		return fmt.Errorf("failed to connect to enclave: %w", err)
 	}
