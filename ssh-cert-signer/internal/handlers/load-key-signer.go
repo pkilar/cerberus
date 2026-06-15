@@ -6,6 +6,7 @@
 package handlers
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -144,15 +145,49 @@ func decryptDirect(ctx context.Context, encryptedKeyBytes []byte) (ssh.Signer, e
 	return parseCASigner(ctx, out.Plaintext)
 }
 
-// parseCASigner parses the decrypted PEM private key into an ssh.Signer.
-// CA public-key pinning is layered on in Task 7.
+// parseCASigner parses the decrypted PEM private key into an ssh.Signer and, if
+// CA_PUBLIC_KEY_PATH is set, verifies the resulting public key matches the
+// pinned CA public key baked into the (PCR0-measured) enclave image. This closes
+// the only integrity gap introduced by host-mediated decryption: a compromised
+// host could otherwise feed the enclave a CiphertextForRecipient derived from a
+// substituted ciphertext, causing it to load an attacker-chosen CA. With the
+// pin, such a key fails to match and is refused.
 func parseCASigner(ctx context.Context, plaintextKey []byte) (ssh.Signer, error) {
 	logging.DebugContext(ctx, "Parsing decrypted CA private key (%d bytes)", len(plaintextKey))
 	signer, err := ssh.ParsePrivateKey(plaintextKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse decrypted private key: %w", err)
 	}
+	if err := verifyPinnedCAPublicKey(ctx, signer); err != nil {
+		return nil, err
+	}
 	return signer, nil
+}
+
+// verifyPinnedCAPublicKey enforces CA_PUBLIC_KEY_PATH when set. The pinned key is
+// non-secret and is expected to be baked into the enclave image (and thus covered
+// by PCR0), so a host cannot tamper with it.
+func verifyPinnedCAPublicKey(ctx context.Context, signer ssh.Signer) error {
+	path := os.Getenv("CA_PUBLIC_KEY_PATH")
+	if path == "" {
+		slog.WarnContext(ctx, "loadkey.ca_pubkey.unpinned",
+			"detail", "CA_PUBLIC_KEY_PATH not set; loaded CA key is not verified against a pinned public key")
+		return nil
+	}
+	// #nosec G304 -- path is operator-supplied configuration, not untrusted input.
+	pinnedBytes, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read pinned CA public key '%s': %w", path, err)
+	}
+	pinned, _, _, _, err := ssh.ParseAuthorizedKey(pinnedBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse pinned CA public key '%s': %w", path, err)
+	}
+	if !bytes.Equal(pinned.Marshal(), signer.PublicKey().Marshal()) {
+		return errors.New("decrypted CA key does not match pinned CA public key (CA_PUBLIC_KEY_PATH); refusing to load")
+	}
+	slog.InfoContext(ctx, "loadkey.ca_pubkey.verified")
+	return nil
 }
 
 // LoadKeySignerHandler loads an encrypted CA key from a file and decrypts it with KMS.

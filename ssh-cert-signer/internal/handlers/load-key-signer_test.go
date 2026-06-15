@@ -1,9 +1,15 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/pkilar/cerberus/messages"
 )
@@ -265,4 +271,78 @@ func TestCompleteKeyLoad_NoProvider(t *testing.T) {
 	if !strings.Contains(err.Error(), "without an available attestation provider") {
 		t.Errorf("unexpected error: %v", err)
 	}
+}
+
+func TestParseCASigner_PinMatch(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	pemBytes := pemEncodeRSA(t, key)
+	signer, err := ssh.ParsePrivateKey(pemBytes)
+	if err != nil {
+		t.Fatalf("parse signer: %v", err)
+	}
+	pinPath := writeTempFile(t, ssh.MarshalAuthorizedKey(signer.PublicKey()))
+	t.Setenv("CA_PUBLIC_KEY_PATH", pinPath)
+
+	if _, err := parseCASigner(t.Context(), pemBytes); err != nil {
+		t.Fatalf("expected pin to match, got: %v", err)
+	}
+}
+
+func TestParseCASigner_PinMismatch(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	other, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	otherSigner, err := ssh.ParsePrivateKey(pemEncodeRSA(t, other))
+	if err != nil {
+		t.Fatalf("parse other: %v", err)
+	}
+	pinPath := writeTempFile(t, ssh.MarshalAuthorizedKey(otherSigner.PublicKey()))
+	t.Setenv("CA_PUBLIC_KEY_PATH", pinPath)
+
+	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key)); err == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+}
+
+func TestParseCASigner_Unpinned(t *testing.T) {
+	t.Setenv("CA_PUBLIC_KEY_PATH", "")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key)); err != nil {
+		t.Fatalf("unpinned should warn and proceed, got: %v", err)
+	}
+}
+
+// pemEncodeRSA returns the PKCS#1 PEM encoding of key.
+func pemEncodeRSA(t *testing.T, key *rsa.PrivateKey) []byte {
+	t.Helper()
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+}
+
+func writeTempFile(t *testing.T, data []byte) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "ca_pub_*")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp: %v", err)
+	}
+	return f.Name()
 }
