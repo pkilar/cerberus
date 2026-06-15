@@ -3,7 +3,11 @@
 // Every request/response crossing VSOCK is encoded as one of these types.
 package messages
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // MaxPrincipals is the maximum number of SSH principals accepted in a single
 // signing request. Enforced by the host (before authorization, to bound the
@@ -21,7 +25,6 @@ const MaxValidity = 24 * time.Hour
 type Request struct {
 	BeginKeyLoad      *BeginKeyLoadRequest      `json:"beginKeyLoad,omitempty"`
 	CompleteKeyLoad   *CompleteKeyLoadRequest   `json:"completeKeyLoad,omitempty"`
-	LoadKeySigner     *LoadKeySignerRequest     `json:"loadKeySigner,omitempty"`
 	SignSshKey        *EnclaveSigningRequest    `json:"signSshKey,omitempty"`
 	Ping              *PingRequest              `json:"ping,omitempty"`
 	GetEnclaveMetrics *GetEnclaveMetricsRequest `json:"getEnclaveMetrics,omitempty"`
@@ -30,7 +33,6 @@ type Request struct {
 type Response struct {
 	BeginKeyLoad    *BeginKeyLoadResponse    `json:"beginKeyLoad,omitempty"`
 	CompleteKeyLoad *CompleteKeyLoadResponse `json:"completeKeyLoad,omitempty"`
-	LoadKeySigner   *LoadKeySignerResponse   `json:"loadKeySigner,omitempty"`
 	Error           *string                  `json:"error,omitempty"`
 	SignSshKey      *SigningResponse         `json:"signSshKey,omitempty"`
 	Pong            *PingResponse            `json:"pong,omitempty"`
@@ -82,22 +84,10 @@ type EnclaveMemoryStats struct {
 }
 
 // PingResponse is the enclave's reply to a PingRequest. SignerLoaded is
-// false during the brief window between process start and LoadKeySigner
+// false during the brief window between process start and the CA key load
 // completing; load balancers should treat that as unhealthy.
 type PingResponse struct {
 	SignerLoaded bool `json:"signerLoaded"`
-}
-
-// LoadKeySignerRequest carries the AWS credentials the enclave uses to decrypt
-// the CA key via KMS. The encrypted key itself lives on the enclave filesystem
-// (CA_KEY_FILE_PATH); it does not travel over the wire.
-type LoadKeySignerRequest struct {
-	Credentials Credentials `json:"credentials"`
-}
-
-type LoadKeySignerResponse struct {
-	Success bool   `json:"success,omitempty"`
-	Error   string `json:"error,omitempty"`
 }
 
 // BeginKeyLoadRequest asks the enclave to begin loading the CA key. The host
@@ -164,4 +154,19 @@ type EnclaveSigningRequest struct {
 	Permissions      map[string]string `json:"permissions,omitempty"`
 	CustomAttributes map[string]string `json:"custom_attributes,omitempty"`
 	CriticalOptions  map[string]string `json:"critical_options,omitempty"`
+}
+
+// RedactedJSON marshals a Request for safe debug logging.
+//
+// MAINTAINER NOTE: No Request variant currently carries secret material —
+// credentials are no longer sent over the wire (the host performs the KMS
+// Decrypt and only enclave-decryptable ciphertext crosses VSOCK). If a future
+// variant carries a secret, redact it here BEFORE marshalling, or debug logging
+// of that request will leak it.
+func RedactedJSON(r Request) string {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
 }

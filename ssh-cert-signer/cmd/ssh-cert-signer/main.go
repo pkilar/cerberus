@@ -194,7 +194,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 // processRequest handles a single request and returns the response. It
 // recovers from panics so a single buggy handler doesn't drop the connection
 // without a structured log, and redacts the parsed request before debug
-// logging so LoadKeySigner credentials never reach stderr.
+// logging so any future secret material never reaches stderr.
 func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Response) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -223,9 +223,6 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	if req.CompleteKeyLoad != nil {
 		nVariants++
 	}
-	if req.LoadKeySigner != nil {
-		nVariants++
-	}
 	if req.SignSshKey != nil {
 		nVariants++
 	}
@@ -244,8 +241,6 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 		return handleBeginKeyLoad(ctx)
 	case req.CompleteKeyLoad != nil:
 		return handleCompleteKeyLoad(ctx, *req.CompleteKeyLoad)
-	case req.LoadKeySigner != nil:
-		return handleLoadKeySigner(ctx, *req.LoadKeySigner)
 	case req.SignSshKey != nil:
 		return handleSignSshKey(ctx, *req.SignSshKey)
 	case req.Ping != nil:
@@ -303,18 +298,6 @@ func handleCompleteKeyLoad(ctx context.Context, req messages.CompleteKeyLoadRequ
 	}
 	caSigner.Store(&signer)
 	return messages.Response{CompleteKeyLoad: &messages.CompleteKeyLoadResponse{Success: true}}
-}
-
-func handleLoadKeySigner(ctx context.Context, req messages.LoadKeySignerRequest) messages.Response {
-	signer, err := handlers.LoadKeySignerHandler(ctx, req, attestProvider)
-	if err != nil {
-		return createErrorResponse(err)
-	}
-	caSigner.Store(&signer)
-
-	return messages.Response{
-		LoadKeySigner: &messages.LoadKeySignerResponse{Success: true},
-	}
 }
 
 func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) messages.Response {

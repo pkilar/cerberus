@@ -396,27 +396,27 @@ func TestCASignerAtomicSwapUnderLoad(t *testing.T) {
 
 // TestProcessRequest_RejectsAmbiguousVariants verifies that processRequest
 // refuses a Request payload with more than one variant set (PR #35). The
-// wire-protocol contract says exactly one of LoadKeySigner / SignSshKey /
-// Ping is non-nil; a malicious or buggy host that sets two must not have
-// one operation silently picked while the other is "smuggled".
+// wire-protocol contract says exactly one of BeginKeyLoad / CompleteKeyLoad /
+// SignSshKey / Ping is non-nil; a malicious or buggy host that sets two must
+// not have one operation silently picked while the other is "smuggled".
 func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
 	cases := []messages.Request{
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			SignSshKey:    &messages.EnclaveSigningRequest{},
+			BeginKeyLoad: &messages.BeginKeyLoadRequest{},
+			SignSshKey:   &messages.EnclaveSigningRequest{},
 		},
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			Ping:          &messages.PingRequest{},
+			CompleteKeyLoad: &messages.CompleteKeyLoadRequest{},
+			Ping:            &messages.PingRequest{},
 		},
 		{
 			SignSshKey: &messages.EnclaveSigningRequest{},
 			Ping:       &messages.PingRequest{},
 		},
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			SignSshKey:    &messages.EnclaveSigningRequest{},
-			Ping:          &messages.PingRequest{},
+			BeginKeyLoad: &messages.BeginKeyLoadRequest{},
+			SignSshKey:   &messages.EnclaveSigningRequest{},
+			Ping:         &messages.PingRequest{},
 		},
 	}
 	for i, req := range cases {
@@ -433,7 +433,7 @@ func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
 				t.Errorf("expected 'multiple request variants' in error, got: %s", *resp.Error)
 			}
 			// Belt-and-braces: no variant of the response should be set.
-			if resp.LoadKeySigner != nil || resp.SignSshKey != nil || resp.Pong != nil {
+			if resp.BeginKeyLoad != nil || resp.SignSshKey != nil || resp.Pong != nil {
 				t.Errorf("ambiguous request must not be dispatched; got resp=%+v", resp)
 			}
 		})

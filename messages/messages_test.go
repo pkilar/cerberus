@@ -121,8 +121,8 @@ func TestRequest_JSON(t *testing.T) {
 	}
 
 	// Verify other fields are nil
-	if decoded.LoadKeySigner != nil {
-		t.Error("expected LoadKeySigner to be nil")
+	if decoded.BeginKeyLoad != nil {
+		t.Error("expected BeginKeyLoad to be nil")
 	}
 }
 
@@ -182,82 +182,6 @@ func TestResponse_WithError(t *testing.T) {
 	}
 	if *decoded.Error != errorMsg {
 		t.Errorf("expected Error %s, got %s", errorMsg, *decoded.Error)
-	}
-}
-
-func TestCredentials_Redacted(t *testing.T) {
-	t.Parallel()
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		Token:           "FwoGZXIvYXdzEKL//////////wEa",
-	}
-
-	red := creds.Redacted()
-	if red.AccessKeyId != creds.AccessKeyId {
-		t.Errorf("AccessKeyId should be preserved, got %q", red.AccessKeyId)
-	}
-	if red.SecretAccessKey != "***" {
-		t.Errorf("SecretAccessKey not fully redacted: %q", red.SecretAccessKey)
-	}
-	if red.Token != "***" {
-		t.Errorf("Token not fully redacted: %q", red.Token)
-	}
-
-	// Empty secrets stay empty so callers can tell unset apart from set-but-redacted.
-	empty := Credentials{AccessKeyId: "AKIAEXAMPLE"}.Redacted()
-	if empty.SecretAccessKey != "" || empty.Token != "" {
-		t.Errorf("empty secrets should not be redacted: %+v", empty)
-	}
-}
-
-func TestCredentials_String_NoSecretLeak(t *testing.T) {
-	t.Parallel()
-	secret := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-	token := "FwoGZXIvYXdzEKL//////////wEa"
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: secret,
-		Token:           token,
-	}
-
-	s := creds.String()
-	for _, frag := range []string{secret, secret[:4], token, token[:4]} {
-		if strings.Contains(s, frag) {
-			t.Errorf("String() leaked secret material %q in %q", frag, s)
-		}
-	}
-}
-
-func TestCredentials_JSON(t *testing.T) {
-	t.Parallel()
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		Token:           "token123",
-	}
-
-	// Test marshaling
-	data, err := json.Marshal(creds)
-	if err != nil {
-		t.Fatalf("failed to marshal credentials: %v", err)
-	}
-
-	// Test unmarshaling
-	var decoded Credentials
-	err = json.Unmarshal(data, &decoded)
-	if err != nil {
-		t.Fatalf("failed to unmarshal credentials: %v", err)
-	}
-
-	if decoded.AccessKeyId != creds.AccessKeyId {
-		t.Errorf("expected AccessKeyId %s, got %s", creds.AccessKeyId, decoded.AccessKeyId)
-	}
-	if decoded.SecretAccessKey != creds.SecretAccessKey {
-		t.Errorf("expected SecretAccessKey %s, got %s", creds.SecretAccessKey, decoded.SecretAccessKey)
-	}
-	if decoded.Token != creds.Token {
-		t.Errorf("expected Token %s, got %s", creds.Token, decoded.Token)
 	}
 }
 

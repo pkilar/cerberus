@@ -23,7 +23,9 @@ type fakeSigner struct {
 func (f *fakeSigner) SignPublicKey(context.Context, *messages.EnclaveSigningRequest) (string, error) {
 	return "", errors.New("unused")
 }
-func (f *fakeSigner) Ping(context.Context) (*messages.PingResponse, error) { return nil, errors.New("unused") }
+func (f *fakeSigner) Ping(context.Context) (*messages.PingResponse, error) {
+	return nil, errors.New("unused")
+}
 func (f *fakeSigner) GetEnclaveMetrics(context.Context) (*messages.EnclaveMetricsResponse, error) {
 	return nil, errors.New("unused")
 }
