@@ -30,10 +30,10 @@ Cerberus is an SSH Certificate Authority that runs inside an AWS Nitro Enclave. 
 
 | Service             | Runs On       | Purpose                                                                     |
 | ------------------- | ------------- | --------------------------------------------------------------------------- |
-| **ssh-cert-api**    | EC2 host      | HTTPS API with Kerberos/SPNEGO authentication, authorization, and KMS proxy |
+| **ssh-cert-api**    | EC2 host      | HTTPS API with Kerberos/SPNEGO authentication and authorization              |
 | **ssh-cert-signer** | Nitro Enclave | Decrypts CA private key via KMS, signs SSH certificates                     |
 
-The CA private key **never exists in plaintext outside the enclave**. The enclave has no network access — all KMS calls are proxied through the host via VSOCK.
+The CA private key **never exists in plaintext outside the enclave**. The enclave has no network access — the host performs a host-mediated attested KMS Decrypt on behalf of the enclave at startup.
 
 ---
 
@@ -49,16 +49,18 @@ User ← signed certificate ← [ssh-cert-api] ← VSOCK ← [ssh-cert-signer si
 
 ### VSOCK Channels
 
-| Channel   | CID              | Port | Direction      | Purpose                                |
-| --------- | ---------------- | ---- | -------------- | -------------------------------------- |
-| Signing   | 16 (ENCLAVE_CID) | 5000 | Host → Enclave | Certificate signing requests           |
-| KMS Proxy | 3 (INSTANCE_CID) | 8000 | Enclave → Host | KMS API calls (enclave has no network) |
+| Channel | CID              | Port | Direction      | Purpose                      |
+| ------- | ---------------- | ---- | -------------- | ---------------------------- |
+| Signing | 16 (ENCLAVE_CID) | 5000 | Host → Enclave | Key-load and signing traffic |
+
+The host no longer listens on any VSOCK port. The old port-8000 KMS proxy channel has been removed.
 
 ### Message Protocol
 
 Services communicate using JSON-encoded messages over VSOCK:
 
-- **LoadKeySigner** — Sent at startup. Carries AWS credentials so the enclave can decrypt the CA key via KMS.
+- **BeginKeyLoad** — Sent by the host at startup. In production (with `/dev/nsm`) the enclave generates an NSM attestation document (containing its ephemeral RSA public key) and returns it together with the KMS-encrypted CA-key ciphertext read from `CA_KEY_FILE_PATH`. In development (no `/dev/nsm`) the enclave decrypts the CA key directly and returns `Loaded=true`.
+- **CompleteKeyLoad** — Sent by the host after it has called `kms:Decrypt` with the enclave's attestation document as `Recipient`. Carries the `CiphertextForRecipient` CMS envelope (CA-key plaintext encrypted to the enclave's attestation public key); the enclave decrypts it with its ephemeral private key and installs the CA signer. AWS credentials are **not** sent to the enclave — the host uses its EC2 instance role directly for the KMS call.
 - **SignSshKey** — Carries a signing request (public key, principals, validity, permissions, attributes). Returns the signed certificate.
 
 ---
@@ -135,9 +137,10 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 
 | Variable              | Default                       | Description                                                                                                                                                                                                         |
 | --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key                                                                                                                                                                                |
-| `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations                                                                                                                                                                                       |
-| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device — never in production. Accepts `true/1/yes` or `false/0/no` (case-insensitive); when **unset** it auto-detects `/dev/nsm`. Any other value (a typo, or an explicitly empty string) is rejected at startup so a misconfiguration fails closed instead of silently disabling attestation. |
+| `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key (non-secret ciphertext baked into the EIF)                                                                                                                                    |
+| `CA_PUBLIC_KEY_PATH`  | —                             | Path to the CA public key (baked into the EIF alongside the ciphertext). When set, the enclave verifies that the decrypted CA key's public half matches this file; a mismatch causes a hard refusal. Strongly recommended in production. Omitting it logs `loadkey.ca_pubkey.unpinned` at WARN. |
+| `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations (used by the **host** when it calls `kms:Decrypt` on behalf of the enclave)                                                                                                          |
+| `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer generates an NSM attestation document for the host-mediated KMS Decrypt flow. Set to `false` only for local development without a Nitro device — never in production. Accepts `true/1/yes` or `false/0/no` (case-insensitive); when **unset** it auto-detects `/dev/nsm`. Any other value (a typo, or an explicitly empty string) is rejected at startup so a misconfiguration fails closed instead of silently disabling attestation. |
 | `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                         |
 | `DEBUG`               | `false`                       | Enable debug-level logging                                                                                                                                                                                          |
 
@@ -614,7 +617,8 @@ GET /metrics
 **Startup (API):**
 ```
 Starting SSH Certificate API...
-VSOCK proxy on port 8000
+Loading CA key into enclave (host-mediated attested KMS decrypt)...
+Enclave CA key loaded successfully
 ```
 
 **Successful signing:**
@@ -628,7 +632,7 @@ Successfully signed SSH key ID: alice@REALM.COM
 Signing failed: <error details>
 ```
 
-**Debug mode** (`DEBUG=true`) adds verbose output including credential handling and VSOCK communication details. Credentials are automatically redacted (truncated to 4 chars + `***`).
+**Debug mode** (`DEBUG=true`) adds verbose output including VSOCK communication details. AWS credentials are not sent to the enclave; the host uses its EC2 instance role directly for the KMS call, so there is nothing to redact on the wire.
 
 ---
 
@@ -718,7 +722,7 @@ nitro-cli run-enclave \
   --enclave-cid 16
 ```
 
-After restarting the enclave, the API service will automatically send a `LoadKeySigner` message on the next signing request to reinitialize the CA key.
+After restarting the enclave, restart the API service as well (`sudo systemctl restart cerberus-api`). On startup the API performs the `BeginKeyLoad` / `CompleteKeyLoad` handshake: it reads `CA_KEY_FILE_PATH`, receives the enclave's NSM attestation document, calls `kms:Decrypt` with that document as `Recipient`, and sends the resulting `CiphertextForRecipient` to the enclave to install the CA signer. No manual intervention is required once both services are running.
 
 ### Updating the EIF (Enclave Image)
 
@@ -760,7 +764,7 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 
 | Error                                           | Likely Cause                         | Resolution                                                                                  |
 | ----------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `CA signer is not initialized`                  | Enclave hasn't loaded the CA key yet | Check enclave logs; verify KMS credentials are reachable                                    |
+| `CA signer is not initialized`                  | Enclave hasn't loaded the CA key yet | Check enclave logs; verify the host can reach KMS (outbound TCP 443) and the instance role has `kms:Decrypt` with the attestation-conditioned key policy |
 | `failed to decrypt key with KMS`                | KMS permissions or PCR mismatch      | Verify IAM role has `kms:Decrypt`; check PCR values in KMS key policy match the running EIF |
 | `validity duration exceeds maximum allowed 24h` | Requested validity too long          | Reduce `validity` in config.yaml to ≤ 24h                                                   |
 | `failed to parse public key`                    | Malformed SSH public key in request  | Verify the key is a valid SSH public key (e.g., `ssh-keygen -l -f key.pub`)                 |
@@ -785,15 +789,19 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 | Service refuses to start with `ldap[...] initial probe failed` | Misconfigured LDAP backend at startup               | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                             |
 | `realm "..." claimed by both backends`                         | Two LDAP backends list overlapping realms           | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                           |
 
-### VSOCK / KMS Proxy Issues
+### VSOCK / KMS Issues
 
-| Symptom                        | Likely Cause                               | Resolution                                                                   |
-| ------------------------------ | ------------------------------------------ | ---------------------------------------------------------------------------- |
-| Signing requests timeout       | Enclave not running or VSOCK misconfigured | `nitro-cli describe-enclaves` — verify state is RUNNING and CID is 16        |
-| KMS decrypt fails from enclave | KMS proxy not running on host              | Verify the API service is running (it runs the KMS proxy on port 8000)       |
-| `connection refused` on VSOCK  | Wrong CID or port                          | Verify CID=16 and port=5000 match between host and enclave                   |
-| KMS proxy TLS errors           | AWS endpoint unreachable                   | Check outbound HTTPS (443) to `kms.<region>.amazonaws.com` from the EC2 host |
-| Intermittent VSOCK failures    | Resource exhaustion in enclave             | Check enclave memory allocation (1024 MB minimum recommended)                |
+There is no longer a VSOCK KMS proxy. The host calls `kms:Decrypt` directly over its own network using the EC2 instance role; only the `CiphertextForRecipient` CMS envelope crosses VSOCK to the enclave.
+
+| Symptom                                            | Likely Cause                                               | Resolution                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Signing requests timeout                           | Enclave not running or VSOCK misconfigured                 | `nitro-cli describe-enclaves` — verify state is RUNNING and CID is 16                                                                             |
+| `connection refused` on VSOCK                      | Wrong CID or port                                          | Verify CID=16 and port=5000 match between host and enclave                                                                                         |
+| `Failed to load CA key into enclave` at API start  | Host KMS Decrypt failed                                    | Check outbound HTTPS (443) to `kms.<region>.amazonaws.com`; verify the instance role has `kms:Decrypt` with the PCR0-conditioned attestation policy |
+| `KMS AccessDenied` in API logs                     | Instance role lacks `kms:Decrypt` or PCR mismatch         | Confirm the key policy requires `kms:RecipientAttestation:ImageSha384` matching the running EIF's PCR0 (see `pcr-manifest-<arch>.json`); confirm the instance role is the calling principal in the policy |
+| `CA key does not match pinned public key`          | Decrypted key does not match `CA_PUBLIC_KEY_PATH`          | Verify `CA_PUBLIC_KEY_PATH` in `/etc/sysconfig/cerberus-signer` points to the public key that corresponds to the encrypted `CA_KEY_FILE_PATH`      |
+| `loadkey.ca_pubkey.unpinned` WARN in enclave logs | `CA_PUBLIC_KEY_PATH` not set                               | Set `CA_PUBLIC_KEY_PATH` to the EIF-baked CA public key to enable pinning; absence is allowed but not recommended for production                   |
+| Intermittent VSOCK failures                        | Resource exhaustion in enclave                             | Check enclave memory allocation (1024 MB minimum recommended)                                                                                      |
 
 ### Network & Connectivity
 
@@ -838,7 +846,7 @@ curl -k https://localhost:8443/health
 socat - VSOCK-CONNECT:16:5000
 
 # Check listening ports
-ss -tlnp | grep -E '8443|8000'
+ss -tlnp | grep 8443
 
 # Check AWS credentials on the instance
 curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
@@ -853,10 +861,11 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - The CA private key is **KMS-encrypted at rest** and only decrypted inside the Nitro Enclave.
 - The plaintext key **never leaves the enclave** — it exists only in enclave memory.
 - Use **attestation-based KMS policies** (PCR conditions) so only the specific enclave image can decrypt the key.
+- **CRITICAL — KMS key policy requirement:** Because the host now holds `ca_key.enc` and calls `kms:Decrypt` itself, the KMS key policy **must** require a `kms:RecipientAttestation:ImageSha384` condition (PCR0) on every `Decrypt` action for the instance role. The policy must **not** grant the instance role any unconditioned `kms:Decrypt` — a compromised host that can call a plaintext Decrypt would read the CA private key. The calling principal (the instance IAM role) is unchanged from the previous design. See `docs/kms-attestation-policy.md` for the recommended policy template.
 
 ### Network Security
 
-- The enclave has **no network access** — all external calls go through the VSOCK KMS proxy on the host.
+- The enclave has **no network access** — it makes no external calls. The host performs the attested `kms:Decrypt` on the enclave's behalf using its own EC2 instance role; only the resulting CMS envelope (already encrypted to the enclave's attestation public key) crosses VSOCK.
 - The API listens on HTTPS only (TLS required).
 - Restrict access to port 8443 via security groups to authorized networks.
 - **`/metrics` and `/health` are intentionally unauthenticated** so Prometheus and load balancers can reach them without Kerberos tickets. Both expose information about enclave state — `/metrics` in particular surfaces enclave CPU/memory pressure (see [Metrics Endpoint](#metrics-endpoint)). **Restrict these paths to known-good source ranges at the network layer** (security group, ALB listener rule, or in-service IP allow-list); the application does not enforce a source check.
@@ -880,8 +889,8 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
 ### Credential Handling
 
-- AWS credentials sent to the enclave are **redacted in logs** (truncated to 4 characters).
-- Debug mode provides more verbose output but still redacts secrets.
+- AWS credentials are **not sent to the enclave**. The host uses its EC2 instance role directly for the `kms:Decrypt` call; only the resulting `CiphertextForRecipient` CMS envelope (which is already encrypted to the enclave's ephemeral attestation public key) crosses VSOCK.
+- Debug mode provides more verbose output about VSOCK message flow. There is no AWS secret material on the wire to redact.
 
 ### Audit Trail
 
@@ -1081,8 +1090,7 @@ ssh ec2-user@server.example.com
 
 ### Port Reference
 
-| Port | Protocol | Service         | Purpose                            |
-| ---- | -------- | --------------- | ---------------------------------- |
-| 8443 | HTTPS    | ssh-cert-api    | Client-facing API                  |
-| 5000 | VSOCK    | ssh-cert-signer | Signing channel (Host → Enclave)   |
-| 8000 | VSOCK    | ssh-cert-api    | KMS proxy channel (Enclave → Host) |
+| Port | Protocol | Service         | Purpose                          |
+| ---- | -------- | --------------- | -------------------------------- |
+| 8443 | HTTPS    | ssh-cert-api    | Client-facing API                |
+| 5000 | VSOCK    | ssh-cert-signer | Key-load and signing (Host → Enclave) |
