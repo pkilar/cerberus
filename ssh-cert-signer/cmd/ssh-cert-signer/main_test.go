@@ -440,9 +440,8 @@ func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
 	}
 }
 
-// TestProcessRequest_PingNoSigner verifies that Ping works before any
-// LoadKeySigner has been called — /health depends on this being cheap and
-// non-failing.
+// TestProcessRequest_PingNoSigner verifies that Ping works before the CA key
+// has been loaded — /health depends on this being cheap and non-failing.
 func TestProcessRequest_PingNoSigner(t *testing.T) {
 	// Force caSigner to its zero state.
 	var zero *ssh.Signer

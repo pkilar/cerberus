@@ -303,7 +303,7 @@ func handleCompleteKeyLoad(ctx context.Context, req messages.CompleteKeyLoadRequ
 func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) messages.Response {
 	signer := caSigner.Load()
 	if signer == nil {
-		return createErrorResponse(errors.New("CA signer is not initialized; call LoadKeySigner first"))
+		return createErrorResponse(errors.New("CA signer is not initialized; the CA key has not been loaded yet"))
 	}
 
 	signResponse, err := handlers.SignPublicKey(ctx, *signer, req)
