@@ -34,6 +34,9 @@ func Run(ctx context.Context, signer enclave.Signer, kmsDecrypter KMSDecrypter) 
 	if err != nil {
 		return fmt.Errorf("begin key load: %w", err)
 	}
+	if begin == nil {
+		return errors.New("enclave returned a nil BeginKeyLoad response")
+	}
 	if begin.Loaded {
 		// Development enclave decrypted the key itself; nothing more to do.
 		return nil

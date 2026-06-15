@@ -117,3 +117,11 @@ func TestRun_BeginError(t *testing.T) {
 		t.Fatal("expected error when BeginKeyLoad fails")
 	}
 }
+
+func TestRun_NilBegin(t *testing.T) {
+	// A misbehaving signer that returns (nil, nil) must not panic Run.
+	signer := &fakeSigner{begin: nil}
+	if err := Run(t.Context(), signer, &fakeKMS{}); err == nil {
+		t.Fatal("expected error when BeginKeyLoad returns a nil response")
+	}
+}

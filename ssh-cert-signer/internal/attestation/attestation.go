@@ -116,7 +116,7 @@ func (p *Provider) DecryptCMSEnvelope(data []byte) (plaintext []byte, err error)
 	// Trust-boundary defense: the upstream BER parser has at least one
 	// known panic on adversarial input (off-by-one bound check in
 	// readObject's multi-byte-tag loop). Since the input here is the KMS
-	// response body proxied via VSOCK from the parent instance, a
+	// CiphertextForRecipient relayed by the host via CompleteKeyLoad, a
 	// compromised host could inject crafted bytes. Convert any panic into
 	// an error so the enclave fails closed instead of crashing — and log
 	// it, because a panic here is a strong signal of a hostile host and
