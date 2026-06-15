@@ -261,6 +261,85 @@ func TestCredentials_JSON(t *testing.T) {
 	}
 }
 
+func TestBeginKeyLoad_JSON(t *testing.T) {
+	t.Parallel()
+	req := Request{BeginKeyLoad: &BeginKeyLoadRequest{}}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decodedReq Request
+	if err := json.Unmarshal(data, &decodedReq); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if decodedReq.BeginKeyLoad == nil {
+		t.Fatal("expected BeginKeyLoad to be non-nil")
+	}
+
+	resp := Response{BeginKeyLoad: &BeginKeyLoadResponse{
+		AttestationDocument: []byte("doc-bytes"),
+		CiphertextBlob:      []byte("ciphertext"),
+	}}
+	rdata, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	var decodedResp Response
+	if err := json.Unmarshal(rdata, &decodedResp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if decodedResp.BeginKeyLoad == nil {
+		t.Fatal("expected BeginKeyLoad response to be non-nil")
+	}
+	if string(decodedResp.BeginKeyLoad.AttestationDocument) != "doc-bytes" {
+		t.Errorf("AttestationDocument round-trip mismatch: %q", decodedResp.BeginKeyLoad.AttestationDocument)
+	}
+	if string(decodedResp.BeginKeyLoad.CiphertextBlob) != "ciphertext" {
+		t.Errorf("CiphertextBlob round-trip mismatch: %q", decodedResp.BeginKeyLoad.CiphertextBlob)
+	}
+	if decodedResp.BeginKeyLoad.Loaded {
+		t.Error("Loaded should be false")
+	}
+
+	// Loaded-only (development) shape must omit the byte fields.
+	loaded, err := json.Marshal(Response{BeginKeyLoad: &BeginKeyLoadResponse{Loaded: true}})
+	if err != nil {
+		t.Fatalf("marshal loaded: %v", err)
+	}
+	if strings.Contains(string(loaded), "attestationDocument") || strings.Contains(string(loaded), "ciphertextBlob") {
+		t.Errorf("loaded response should omit empty byte fields, got %s", loaded)
+	}
+}
+
+func TestCompleteKeyLoad_JSON(t *testing.T) {
+	t.Parallel()
+	req := Request{CompleteKeyLoad: &CompleteKeyLoadRequest{CiphertextForRecipient: []byte("cms-envelope")}}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decodedReq Request
+	if err := json.Unmarshal(data, &decodedReq); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if decodedReq.CompleteKeyLoad == nil || string(decodedReq.CompleteKeyLoad.CiphertextForRecipient) != "cms-envelope" {
+		t.Fatalf("CompleteKeyLoad round-trip mismatch: %+v", decodedReq.CompleteKeyLoad)
+	}
+
+	resp := Response{CompleteKeyLoad: &CompleteKeyLoadResponse{Success: true}}
+	rdata, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	var decodedResp Response
+	if err := json.Unmarshal(rdata, &decodedResp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if decodedResp.CompleteKeyLoad == nil || !decodedResp.CompleteKeyLoad.Success {
+		t.Fatalf("CompleteKeyLoad response round-trip mismatch: %+v", decodedResp.CompleteKeyLoad)
+	}
+}
+
 // Benchmark JSON operations
 func BenchmarkSshSigningRequest_Marshal(b *testing.B) {
 	req := EnclaveSigningRequest{

@@ -19,6 +19,8 @@ const MaxValidity = 24 * time.Hour
 // These messages define the API between the ssh-cert-signer and ssh-cert-api.
 // Only one of each field is expected to be set at any given time.
 type Request struct {
+	BeginKeyLoad      *BeginKeyLoadRequest      `json:"beginKeyLoad,omitempty"`
+	CompleteKeyLoad   *CompleteKeyLoadRequest   `json:"completeKeyLoad,omitempty"`
 	LoadKeySigner     *LoadKeySignerRequest     `json:"loadKeySigner,omitempty"`
 	SignSshKey        *EnclaveSigningRequest    `json:"signSshKey,omitempty"`
 	Ping              *PingRequest              `json:"ping,omitempty"`
@@ -26,11 +28,13 @@ type Request struct {
 }
 
 type Response struct {
-	LoadKeySigner  *LoadKeySignerResponse  `json:"loadKeySigner,omitempty"`
-	Error          *string                 `json:"error,omitempty"`
-	SignSshKey     *SigningResponse        `json:"signSshKey,omitempty"`
-	Pong           *PingResponse           `json:"pong,omitempty"`
-	EnclaveMetrics *EnclaveMetricsResponse `json:"enclaveMetrics,omitempty"`
+	BeginKeyLoad    *BeginKeyLoadResponse    `json:"beginKeyLoad,omitempty"`
+	CompleteKeyLoad *CompleteKeyLoadResponse `json:"completeKeyLoad,omitempty"`
+	LoadKeySigner   *LoadKeySignerResponse   `json:"loadKeySigner,omitempty"`
+	Error           *string                  `json:"error,omitempty"`
+	SignSshKey      *SigningResponse         `json:"signSshKey,omitempty"`
+	Pong            *PingResponse            `json:"pong,omitempty"`
+	EnclaveMetrics  *EnclaveMetricsResponse  `json:"enclaveMetrics,omitempty"`
 }
 
 // PingRequest is a no-op request used by /health to verify the enclave is
@@ -94,6 +98,43 @@ type LoadKeySignerRequest struct {
 type LoadKeySignerResponse struct {
 	Success bool   `json:"success,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// BeginKeyLoadRequest asks the enclave to begin loading the CA key. The host
+// sends this once at startup. The enclave's reply (BeginKeyLoadResponse) tells
+// the host whether it must perform a host-mediated attested KMS Decrypt
+// (production) or whether the enclave already loaded the key itself (dev).
+type BeginKeyLoadRequest struct{}
+
+// BeginKeyLoadResponse is the enclave's reply to BeginKeyLoadRequest.
+//
+// Production (attested enclave): AttestationDocument and CiphertextBlob are set
+// and Loaded is false. The host calls KMS Decrypt with the attestation document
+// as the Recipient and the ciphertext blob, then returns the result via
+// CompleteKeyLoadRequest. Neither field is secret to the host — the blob is KMS
+// ciphertext and the attestation document is a signed public artifact.
+//
+// Development (no /dev/nsm): Loaded is true and the other fields are empty — the
+// enclave performed a direct (non-attested) KMS Decrypt over its own network and
+// installed the CA signer. No CompleteKeyLoad follows.
+type BeginKeyLoadResponse struct {
+	AttestationDocument []byte `json:"attestationDocument,omitempty"`
+	CiphertextBlob      []byte `json:"ciphertextBlob,omitempty"`
+	Loaded              bool   `json:"loaded,omitempty"`
+}
+
+// CompleteKeyLoadRequest carries the KMS CiphertextForRecipient back to the
+// enclave. It is a CMS envelope encrypting the CA-key plaintext to the enclave's
+// attestation public key (RSAES_OAEP_SHA_256); only the originating enclave can
+// open it, so this value is not secret to the host.
+type CompleteKeyLoadRequest struct {
+	CiphertextForRecipient []byte `json:"ciphertextForRecipient"`
+}
+
+// CompleteKeyLoadResponse reports whether the enclave decrypted the envelope and
+// installed the CA signer.
+type CompleteKeyLoadResponse struct {
+	Success bool `json:"success,omitempty"`
 }
 
 // SigningRequest is the structure for JSON requests coming from the web API.
