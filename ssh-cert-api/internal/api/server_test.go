@@ -90,6 +90,14 @@ func (f *fakeSigner) GetEnclaveMetrics(_ context.Context) (*messages.EnclaveMetr
 
 func (f *fakeSigner) Close() error { return nil }
 
+func (f *fakeSigner) BeginKeyLoad(context.Context, *messages.BeginKeyLoadRequest) (*messages.BeginKeyLoadResponse, error) {
+	return nil, errors.New("fakeSigner.BeginKeyLoad not implemented")
+}
+
+func (f *fakeSigner) CompleteKeyLoad(context.Context, *messages.CompleteKeyLoadRequest) (*messages.CompleteKeyLoadResponse, error) {
+	return nil, errors.New("fakeSigner.CompleteKeyLoad not implemented")
+}
+
 // newServerForTest constructs a Server with fake dependencies. A fresh Server
 // gets a fresh rate-limiter, isolating tests from each other despite the
 // package-level Prometheus counters. The health monitor is built with a
