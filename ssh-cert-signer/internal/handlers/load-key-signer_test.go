@@ -203,3 +203,66 @@ func TestLoadKeySignerHandler_EnvironmentVariables(t *testing.T) {
 		t.Errorf("expected AWS/KMS related error, got: %v", err)
 	}
 }
+
+func TestBeginKeyLoad_MissingFile_DevPath(t *testing.T) {
+	// No NSM provider + attestation not required => dev path, which reads the
+	// CA key file first and fails there before any KMS call.
+	t.Setenv("REQUIRE_ATTESTATION", "false")
+	t.Setenv("CA_KEY_FILE_PATH", "/nonexistent/path/to/key.enc")
+
+	_, err := BeginKeyLoad(t.Context(), nil)
+	if err == nil {
+		t.Fatal("expected error when CA key file is missing")
+	}
+	if !strings.Contains(err.Error(), "failed to read encrypted key file") {
+		t.Errorf("expected file read error, got: %v", err)
+	}
+}
+
+func TestBeginKeyLoad_AttestationRequiredButUnavailable(t *testing.T) {
+	t.Setenv("REQUIRE_ATTESTATION", "true")
+
+	_, err := BeginKeyLoad(t.Context(), nil)
+	if err == nil {
+		t.Fatal("expected error when attestation is required but provider is nil")
+	}
+	if !strings.Contains(err.Error(), "attestation is required") {
+		t.Errorf("expected attestation-required error, got: %v", err)
+	}
+}
+
+func TestBeginKeyLoad_DevPath_FailsAtKMS(t *testing.T) {
+	t.Setenv("REQUIRE_ATTESTATION", "false")
+
+	// Create a temporary file with some content (not a real encrypted key)
+	tmpFile, err := os.CreateTemp(t.TempDir(), "test_key_*.enc")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	if _, err := tmpFile.WriteString("fake encrypted content"); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+	t.Setenv("CA_KEY_FILE_PATH", tmpFile.Name())
+
+	_, err = BeginKeyLoad(t.Context(), nil)
+	if err == nil {
+		t.Fatal("expected error due to AWS/KMS failure in dev path")
+	}
+	if !strings.Contains(err.Error(), "failed to decrypt key with KMS") &&
+		!strings.Contains(err.Error(), "failed to load AWS default config") {
+		t.Errorf("expected AWS/KMS related error, got: %v", err)
+	}
+}
+
+func TestCompleteKeyLoad_NoProvider(t *testing.T) {
+	_, err := CompleteKeyLoad(t.Context(), nil, []byte("envelope"))
+	if err == nil {
+		t.Fatal("expected error when attestation provider is unavailable")
+	}
+	if !strings.Contains(err.Error(), "without an available attestation provider") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

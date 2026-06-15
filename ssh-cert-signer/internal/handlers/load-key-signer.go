@@ -31,6 +31,130 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
+// BeginKeyLoadResult is returned by BeginKeyLoad. Exactly one outcome is set:
+//   - AttestationDocument + CiphertextBlob: production path. The host must call
+//     KMS Decrypt with the attestation document as the Recipient, then return
+//     the CiphertextForRecipient to the enclave via CompleteKeyLoad.
+//   - Signer non-nil: development path (no /dev/nsm). The enclave already
+//     decrypted the key itself. No CompleteKeyLoad follows.
+type BeginKeyLoadResult struct {
+	AttestationDocument []byte
+	CiphertextBlob      []byte
+	Signer              ssh.Signer
+}
+
+// BeginKeyLoad starts the host-mediated CA-key load sequence. In production the
+// enclave generates an attestation document and returns the KMS-encrypted CA key
+// blob to the host; the host performs the KMS Decrypt and sends the resulting
+// CiphertextForRecipient back via CompleteKeyLoad. In development (no /dev/nsm
+// and REQUIRE_ATTESTATION not true) the enclave decrypts the key over its own
+// network (development only).
+func BeginKeyLoad(ctx context.Context, attestProvider *attestation.Provider) (*BeginKeyLoadResult, error) {
+	required, err := attestationRequired()
+	if err != nil {
+		return nil, err
+	}
+
+	if attestProvider != nil && attestProvider.IsAvailable() {
+		encryptedKeyBytes, err := readEncryptedCAKey(ctx)
+		if err != nil {
+			return nil, err
+		}
+		attestDoc, err := attestProvider.GenerateAttestationDoc()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate attestation document: %w", err)
+		}
+		slog.InfoContext(ctx, "loadkey.begin.attested",
+			"ciphertext_bytes", len(encryptedKeyBytes),
+			"attestation_doc_bytes", len(attestDoc))
+		return &BeginKeyLoadResult{
+			AttestationDocument: attestDoc,
+			CiphertextBlob:      encryptedKeyBytes,
+		}, nil
+	}
+
+	if required {
+		return nil, errors.New("attestation is required but unavailable; refusing to load CA key without an available attestation provider (set REQUIRE_ATTESTATION=false to override — not recommended in production)")
+	}
+
+	// Development fallback: no enclave isolation guarantee. The signer has real
+	// network here, so it decrypts directly with its ambient credential chain.
+	encryptedKeyBytes, err := readEncryptedCAKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	signer, err := decryptDirect(ctx, encryptedKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	slog.WarnContext(ctx, "loadkey.attestation.disabled",
+		"detail", "CA key decrypted via non-attested KMS Decrypt; no enclave isolation guarantee")
+	return &BeginKeyLoadResult{Signer: signer}, nil
+}
+
+// CompleteKeyLoad finishes the host-mediated key load by decrypting the CMS
+// envelope that KMS returned as CiphertextForRecipient. Only reached in the
+// production attested path; requires a live attestation provider.
+func CompleteKeyLoad(ctx context.Context, attestProvider *attestation.Provider, ciphertextForRecipient []byte) (ssh.Signer, error) {
+	if attestProvider == nil || !attestProvider.IsAvailable() {
+		return nil, errors.New("cannot complete key load without an available attestation provider")
+	}
+	plaintextKey, err := attestProvider.DecryptCMSEnvelope(ciphertextForRecipient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt CiphertextForRecipient: %w", err)
+	}
+	// Best-effort zero of the plaintext once parsing has copied it out.
+	defer clear(plaintextKey)
+	signer, err := parseCASigner(ctx, plaintextKey)
+	if err != nil {
+		return nil, err
+	}
+	slog.InfoContext(ctx, "loadkey.complete.attested")
+	return signer, nil
+}
+
+// readEncryptedCAKey reads the KMS-encrypted CA key from CA_KEY_FILE_PATH.
+func readEncryptedCAKey(ctx context.Context) ([]byte, error) {
+	caKeyFilePath := cmp.Or(os.Getenv("CA_KEY_FILE_PATH"), "/app/ca_key.enc")
+	// #nosec G304 -- caKeyFilePath comes from the CA_KEY_FILE_PATH env var set by
+	// the operator (or a packaged systemd unit), not untrusted input.
+	encryptedKeyBytes, err := os.ReadFile(caKeyFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read encrypted key file '%s': %w", caKeyFilePath, err)
+	}
+	logging.DebugContext(ctx, "Read encrypted CA key file (%d bytes)", len(encryptedKeyBytes))
+	return encryptedKeyBytes, nil
+}
+
+// decryptDirect performs a non-attested KMS Decrypt over the process's own
+// network using the ambient AWS credential chain. Only reached in development
+// (no /dev/nsm and REQUIRE_ATTESTATION not true).
+func decryptDirect(ctx context.Context, encryptedKeyBytes []byte) (ssh.Signer, error) {
+	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS default config: %w", err)
+	}
+	out, err := kms.NewFromConfig(cfg).Decrypt(ctx, &kms.DecryptInput{CiphertextBlob: encryptedKeyBytes})
+	if err != nil {
+		slog.ErrorContext(ctx, "loadkey.kms_decrypt.failed", "error", err)
+		return nil, fmt.Errorf("failed to decrypt key with KMS: %w", err)
+	}
+	defer clear(out.Plaintext)
+	return parseCASigner(ctx, out.Plaintext)
+}
+
+// parseCASigner parses the decrypted PEM private key into an ssh.Signer.
+// CA public-key pinning is layered on in Task 7.
+func parseCASigner(ctx context.Context, plaintextKey []byte) (ssh.Signer, error) {
+	logging.DebugContext(ctx, "Parsing decrypted CA private key (%d bytes)", len(plaintextKey))
+	signer, err := ssh.ParsePrivateKey(plaintextKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse decrypted private key: %w", err)
+	}
+	return signer, nil
+}
+
 // LoadKeySignerHandler loads an encrypted CA key from a file and decrypts it with KMS.
 // If attestProvider is non-nil and available, an NSM attestation document is attached
 // to the KMS Decrypt call for full enclave attestation. Pass nil to skip attestation
