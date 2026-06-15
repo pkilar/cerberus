@@ -19,20 +19,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pkilar/cerberus/constants"
 	"github.com/pkilar/cerberus/logging"
-	"github.com/pkilar/cerberus/messages"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/api"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/auth"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/authz"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
+	"github.com/pkilar/cerberus/ssh-cert-api/internal/keyload"
 	cerberusldap "github.com/pkilar/cerberus/ssh-cert-api/internal/ldap"
-	"github.com/pkilar/cerberus/ssh-cert-api/internal/proxy"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
-	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 )
@@ -77,38 +72,27 @@ func main() {
 	enclaveClient := enclave.New()
 	defer func() { _ = enclaveClient.Close() }()
 
-	// --- 3. Start VSOCK Proxy for AWS Services ---
-	// This proxy allows the enclave to communicate with AWS services
-	// Get the current AWS region for KMS endpoint
+	// --- 3. Load the CA key into the enclave (host-mediated attested decrypt) ---
+	// The enclave has no network. Rather than proxy its KMS traffic, the host
+	// performs the KMS Decrypt itself using its own instance-role credentials and
+	// the enclave's attestation document; KMS returns the plaintext encrypted to
+	// the enclave's attestation public key, so the host never sees the plaintext
+	// CA key. Bounded so a hung KMS call cannot wedge startup; 60s comfortably
+	// covers attestation + KMS round trip + key parse.
 	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
-	kmsEndpoint := fmt.Sprintf("kms.%s.amazonaws.com:443", region)
-	vsockProxy := proxy.New(constants.InstanceListeningPort, kmsEndpoint)
-
-	ctx := context.Background()
-	err = vsockProxy.Start(ctx)
-	if err != nil {
-		log.Fatalf("Failed to start VSOCK proxy: %v", err)
-	}
-	logging.Debug("Started VSOCK proxy on port %d forwarding to %s", constants.InstanceListeningPort, kmsEndpoint)
-
-	// Initialize the enclave with AWS credentials. Use a bounded context so a
-	// hung KMS Decrypt during startup doesn't block the service indefinitely;
-	// 60s comfortably covers attestation + KMS round-trip + key parse.
-	logging.Debug("Initializing enclave with AWS credentials...")
+	logging.Debug("Loading CA key into enclave (host-mediated attested KMS decrypt)...")
 	loadCtx, loadCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	err = LoadKeySigner(loadCtx)
-	loadCancel()
+	kmsDecrypter, err := keyload.NewAWSDecrypter(loadCtx, region)
 	if err != nil {
-		log.Fatalf("Failed to initialize enclave: %v", err)
+		loadCancel()
+		log.Fatalf("Failed to initialize KMS client: %v", err)
 	}
-	logging.Debug("Enclave initialized successfully")
-
-	// The KMS proxy exists only so the enclave can decrypt the CA key on
-	// startup. Once LoadKeySigner returns, the plaintext key lives in the
-	// enclave's memory and KMS is never needed again — tearing the proxy
-	// down removes the host→AWS network path. If you add code that
-	// requires the enclave to call AWS at runtime, leave the proxy running.
-	vsockProxy.Stop()
+	if err := keyload.Run(loadCtx, enclaveClient, kmsDecrypter); err != nil {
+		loadCancel()
+		log.Fatalf("Failed to load CA key into enclave: %v", err)
+	}
+	loadCancel()
+	logging.Debug("Enclave CA key loaded successfully")
 
 	// --- 4. Initialize LDAP backends (optional) ---
 	// One Client per configured backend. Refuse to start if any initial
@@ -275,65 +259,3 @@ func main() {
 	}
 }
 
-// LoadKeySigner sends a load-key-signer request to the enclave. The supplied
-// ctx bounds the entire fetch-credentials + VSOCK round trip; on cancellation
-// the VSOCK client tears its connection down promptly.
-func LoadKeySigner(ctx context.Context) error {
-	logging.DebugContext(ctx, "Fetching AWS credentials from metadata service...")
-	credentials, err := fetchAWSCredentials(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to fetch AWS credentials: %w", err)
-	}
-	logging.DebugContext(ctx, "Successfully fetched AWS credentials")
-
-	// Create the LoadKeySigner request. The encrypted key itself is read by
-	// the enclave from CA_KEY_FILE_PATH; it does not travel over the wire.
-	request := messages.Request{
-		LoadKeySigner: &messages.LoadKeySignerRequest{
-			Credentials: *credentials,
-		},
-	}
-
-	var response messages.Response
-	if err := enclave.Call(ctx, constants.EnclaveCID, request, &response); err != nil {
-		return fmt.Errorf("error communicating with enclave: %w", err)
-	}
-
-	if response.Error != nil {
-		return fmt.Errorf("enclave error: %s", *response.Error)
-	}
-
-	logging.DebugContext(ctx, "Successfully loaded key signer in enclave")
-	return nil
-}
-
-// fetchAWSCredentials retrieves AWS credentials from the EC2 instance metadata
-// service. It defers the IMDSv2 token dance, role discovery, and JSON decoding
-// to the SDK's ec2rolecreds provider rather than hand-rolling the IMDS calls.
-// Caps the call at 10s within the caller's broader budget so a hung metadata
-// service can't eat the parent LoadKeySigner budget.
-func fetchAWSCredentials(ctx context.Context) (*messages.Credentials, error) {
-	imdsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cfg, err := awsconfig.LoadDefaultConfig(imdsCtx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	imdsClient := imds.NewFromConfig(cfg)
-	provider := ec2rolecreds.New(func(o *ec2rolecreds.Options) {
-		o.Client = imdsClient
-	})
-
-	creds, err := provider.Retrieve(imdsCtx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve EC2 role credentials: %w", err)
-	}
-
-	return &messages.Credentials{
-		AccessKeyId:     creds.AccessKeyID,
-		SecretAccessKey: creds.SecretAccessKey,
-		Token:           creds.SessionToken,
-	}, nil
-}
