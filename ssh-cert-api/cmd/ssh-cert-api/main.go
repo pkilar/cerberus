@@ -79,6 +79,12 @@ func main() {
 	// the enclave's attestation public key, so the host never sees the plaintext
 	// CA key. Bounded so a hung KMS call cannot wedge startup; 60s comfortably
 	// covers attestation + KMS round trip + key parse.
+	//
+	// Operator reminder: the host holds both the ciphertext and kms:Decrypt, so the
+	// CMK policy MUST grant Decrypt only under a kms:RecipientAttestation (PCR0)
+	// condition and MUST NOT grant an unconditioned Decrypt. See docs/kms-attestation-policy.md.
+	slog.Info("startup.kms_policy_reminder",
+		"detail", "KMS key policy must deny non-attested Decrypt (kms:RecipientAttestation:PCR0 condition, no unconditioned Decrypt); see docs/kms-attestation-policy.md")
 	region := cmp.Or(os.Getenv("AWS_REGION"), "us-east-1")
 	logging.Debug("Loading CA key into enclave (host-mediated attested KMS decrypt)...")
 	loadCtx, loadCancel := context.WithTimeout(context.Background(), 60*time.Second)

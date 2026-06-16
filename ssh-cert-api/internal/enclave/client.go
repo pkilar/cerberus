@@ -106,11 +106,13 @@ func roundTrip(ctx context.Context, conn net.Conn, request messages.Request, res
 	if err != nil {
 		return fmt.Errorf("failed to read response from enclave: %w", err)
 	}
-	logging.DebugContext(ctx, "Received response from enclave: %s", string(responseBytes))
-
 	if err := json.Unmarshal(responseBytes, response); err != nil {
+		// Don't log the raw bytes: a BeginKeyLoad response carries the (encrypted)
+		// CA key, which must never reach logs even on a parse error.
+		logging.DebugContext(ctx, "Received unparseable response from enclave (%d bytes): %v", len(responseBytes), err)
 		return fmt.Errorf("failed to unmarshal response: %w", err)
 	}
+	logging.DebugContext(ctx, "Received response from enclave: %s", messages.RedactedResponseJSON(*response))
 	return nil
 }
 

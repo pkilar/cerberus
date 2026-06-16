@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -311,6 +312,30 @@ func BenchmarkSshSigningRequest_Unmarshal(b *testing.B) {
 		err = json.Unmarshal(data, &decoded)
 		if err != nil {
 			b.Fatalf("unmarshal failed: %v", err)
+		}
+	}
+}
+
+func TestRedactedJSON_ElidesCompleteKeyLoadEnvelope(t *testing.T) {
+	t.Parallel()
+	secret := []byte("super-secret-cms-envelope-bytes")
+	out := RedactedJSON(Request{CompleteKeyLoad: &CompleteKeyLoadRequest{CiphertextForRecipient: secret}})
+	if strings.Contains(out, base64.StdEncoding.EncodeToString(secret)) {
+		t.Errorf("RedactedJSON leaked CiphertextForRecipient: %s", out)
+	}
+	if !strings.Contains(out, `"ciphertextForRecipient":null`) {
+		t.Errorf("expected redacted (null) CiphertextForRecipient, got: %s", out)
+	}
+}
+
+func TestRedactedResponseJSON_ElidesBeginKeyLoadBlobs(t *testing.T) {
+	t.Parallel()
+	doc := []byte("attestation-document-bytes")
+	blob := []byte("kms-encrypted-ca-key-bytes")
+	out := RedactedResponseJSON(Response{BeginKeyLoad: &BeginKeyLoadResponse{AttestationDocument: doc, CiphertextBlob: blob}})
+	for _, b := range [][]byte{doc, blob} {
+		if strings.Contains(out, base64.StdEncoding.EncodeToString(b)) {
+			t.Errorf("RedactedResponseJSON leaked a CA-key-derived blob in: %s", out)
 		}
 	}
 }

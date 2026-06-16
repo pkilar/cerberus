@@ -97,7 +97,8 @@ func CompleteKeyLoad(ctx context.Context, attestProvider *attestation.Provider, 
 	}
 	// Best-effort zero of the plaintext once parsing has copied it out.
 	defer clear(plaintextKey)
-	signer, err := parseCASigner(ctx, plaintextKey)
+	// Attested path is production: require the CA public-key pin (requirePin=true).
+	signer, err := parseCASigner(ctx, plaintextKey, true)
 	if err != nil {
 		return nil, err
 	}
@@ -133,34 +134,44 @@ func decryptDirect(ctx context.Context, encryptedKeyBytes []byte) (ssh.Signer, e
 		return nil, fmt.Errorf("failed to decrypt key with KMS: %w", err)
 	}
 	defer clear(out.Plaintext)
-	return parseCASigner(ctx, out.Plaintext)
+	// Dev path: the pin is optional (requirePin=false) — warn if unset.
+	return parseCASigner(ctx, out.Plaintext, false)
 }
 
-// parseCASigner parses the decrypted PEM private key into an ssh.Signer and, if
-// CA_PUBLIC_KEY_PATH is set, verifies the resulting public key matches the
-// pinned CA public key baked into the (PCR0-measured) enclave image. This closes
-// the only integrity gap introduced by host-mediated decryption: a compromised
-// host could otherwise feed the enclave a CiphertextForRecipient derived from a
+// parseCASigner parses the decrypted PEM private key into an ssh.Signer and
+// verifies the resulting public key against the pinned CA public key
+// (CA_PUBLIC_KEY_PATH) baked into the (PCR0-measured) enclave image. This closes
+// the integrity gap introduced by host-mediated decryption: a compromised host
+// could otherwise feed the enclave a CiphertextForRecipient derived from a
 // substituted ciphertext, causing it to load an attacker-chosen CA. With the
-// pin, such a key fails to match and is refused.
-func parseCASigner(ctx context.Context, plaintextKey []byte) (ssh.Signer, error) {
+// pin, such a key fails to match and is refused. requirePin makes an unset pin a
+// hard refusal on the attested (production) path; see verifyPinnedCAPublicKey.
+func parseCASigner(ctx context.Context, plaintextKey []byte, requirePin bool) (ssh.Signer, error) {
 	logging.DebugContext(ctx, "Parsing decrypted CA private key (%d bytes)", len(plaintextKey))
 	signer, err := ssh.ParsePrivateKey(plaintextKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse decrypted private key: %w", err)
 	}
-	if err := verifyPinnedCAPublicKey(ctx, signer); err != nil {
+	if err := verifyPinnedCAPublicKey(ctx, signer, requirePin); err != nil {
 		return nil, err
 	}
 	return signer, nil
 }
 
-// verifyPinnedCAPublicKey enforces CA_PUBLIC_KEY_PATH when set. The pinned key is
+// verifyPinnedCAPublicKey enforces CA_PUBLIC_KEY_PATH. The pinned key is
 // non-secret and is expected to be baked into the enclave image (and thus covered
-// by PCR0), so a host cannot tamper with it.
-func verifyPinnedCAPublicKey(ctx context.Context, signer ssh.Signer) error {
+// by PCR0), so a host cannot tamper with it. When requirePin is true (the
+// attested / production path), an unset CA_PUBLIC_KEY_PATH is a hard refusal:
+// host-mediated decryption means a compromised host could substitute the
+// ciphertext sent to KMS and make the enclave load an attacker-chosen CA, and the
+// pin is the defense — so production must not run without it. In dev (requirePin
+// false) an unset pin only warns.
+func verifyPinnedCAPublicKey(ctx context.Context, signer ssh.Signer, requirePin bool) error {
 	path := os.Getenv("CA_PUBLIC_KEY_PATH")
 	if path == "" {
+		if requirePin {
+			return errors.New("CA_PUBLIC_KEY_PATH is required when attestation is enabled; refusing to load the CA key without a pinned public key (bake the CA public key into the enclave image and set CA_PUBLIC_KEY_PATH)")
+		}
 		slog.WarnContext(ctx, "loadkey.ca_pubkey.unpinned",
 			"detail", "CA_PUBLIC_KEY_PATH not set; loaded CA key is not verified against a pinned public key")
 		return nil

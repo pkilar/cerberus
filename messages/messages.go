@@ -156,14 +156,38 @@ type EnclaveSigningRequest struct {
 	CriticalOptions  map[string]string `json:"critical_options,omitempty"`
 }
 
-// RedactedJSON marshals a Request for safe debug logging.
+// RedactedJSON marshals a Request for safe debug logging, eliding byte blobs
+// that carry CA-key-derived material. Credentials no longer cross the wire, but
+// CompleteKeyLoad carries the KMS CiphertextForRecipient (the CA key encrypted to
+// the enclave's attestation key) — defense in depth: never persist even
+// encrypted CA-key material in logs.
 //
-// MAINTAINER NOTE: No Request variant currently carries secret material —
-// credentials are no longer sent over the wire (the host performs the KMS
-// Decrypt and only enclave-decryptable ciphertext crosses VSOCK). If a future
-// variant carries a secret, redact it here BEFORE marshalling, or debug logging
-// of that request will leak it.
+// MAINTAINER NOTE: if a future Request variant carries a secret or a
+// CA-key-derived blob, redact it here BEFORE marshalling, or debug logging of
+// that request will expose it.
 func RedactedJSON(r Request) string {
+	if r.CompleteKeyLoad != nil && len(r.CompleteKeyLoad.CiphertextForRecipient) > 0 {
+		red := *r.CompleteKeyLoad
+		red.CiphertextForRecipient = nil
+		r.CompleteKeyLoad = &red
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
+}
+
+// RedactedResponseJSON marshals a Response for safe debug logging, eliding the
+// CA-key-derived byte blobs in a BeginKeyLoad response (the KMS-encrypted CA key
+// and the attestation document). Same defense-in-depth rationale as RedactedJSON.
+func RedactedResponseJSON(r Response) string {
+	if r.BeginKeyLoad != nil && (len(r.BeginKeyLoad.AttestationDocument) > 0 || len(r.BeginKeyLoad.CiphertextBlob) > 0) {
+		red := *r.BeginKeyLoad
+		red.AttestationDocument = nil
+		red.CiphertextBlob = nil
+		r.BeginKeyLoad = &red
+	}
 	b, err := json.Marshal(r)
 	if err != nil {
 		return fmt.Sprintf("<marshal error: %v>", err)
