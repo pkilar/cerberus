@@ -148,7 +148,7 @@ func TestParseCASigner_PinMatch(t *testing.T) {
 	pinPath := writeTempFile(t, ssh.MarshalAuthorizedKey(signer.PublicKey()))
 	t.Setenv("CA_PUBLIC_KEY_PATH", pinPath)
 
-	if _, err := parseCASigner(t.Context(), pemBytes, true); err != nil {
+	if _, err := parseCASigner(t.Context(), pemBytes); err != nil {
 		t.Fatalf("expected pin to match, got: %v", err)
 	}
 }
@@ -169,32 +169,20 @@ func TestParseCASigner_PinMismatch(t *testing.T) {
 	pinPath := writeTempFile(t, ssh.MarshalAuthorizedKey(otherSigner.PublicKey()))
 	t.Setenv("CA_PUBLIC_KEY_PATH", pinPath)
 
-	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key), true); err == nil {
+	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key)); err == nil {
 		t.Fatal("expected mismatch error, got nil")
 	}
 }
 
 func TestParseCASigner_Unpinned(t *testing.T) {
-	// Dev path (requirePin=false): an unset pin warns and proceeds.
+	// Unset pin warns and proceeds (the pin is opt-in).
 	t.Setenv("CA_PUBLIC_KEY_PATH", "")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
-	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key), false); err != nil {
-		t.Fatalf("unpinned dev path should warn and proceed, got: %v", err)
-	}
-}
-
-func TestParseCASigner_UnpinnedRequired(t *testing.T) {
-	// Attested path (requirePin=true): an unset pin is a hard refusal.
-	t.Setenv("CA_PUBLIC_KEY_PATH", "")
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("genkey: %v", err)
-	}
-	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key), true); err == nil {
-		t.Fatal("expected hard refusal when pin is required but CA_PUBLIC_KEY_PATH is unset")
+	if _, err := parseCASigner(t.Context(), pemEncodeRSA(t, key)); err != nil {
+		t.Fatalf("unpinned should warn and proceed, got: %v", err)
 	}
 }
 
