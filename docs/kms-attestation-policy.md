@@ -72,9 +72,9 @@ You can also enforce multiple PCR values for stricter validation:
 }
 ```
 
-## Defense in depth: pin the CA public key
+## Required (attested mode): pin the CA public key
 
-Set `CA_PUBLIC_KEY_PATH` in the signer to a file containing the CA's public key (e.g. `ssh-keygen -y` output / the `.pub`), baked into the enclave image so it is covered by PCR0. After decrypting, the enclave compares the loaded key's public half to this pin and **refuses to load on mismatch** (it logs `loadkey.ca_pubkey.unpinned` if the variable is unset). This guards against a compromised host substituting a different ciphertext into the host-mediated `Decrypt`: even a valid attested `Decrypt` of an attacker-chosen ciphertext yields a key whose public half won't match the pin, so the enclave rejects it.
+Set `CA_PUBLIC_KEY_PATH` in the signer to a file containing the CA's public key (e.g. `ssh-keygen -y` output / the `.pub`), baked into the enclave image so it is covered by PCR0. **In attested (production) mode this pin is mandatory:** the enclave refuses to load if `CA_PUBLIC_KEY_PATH` is unset, and refuses on a public-key mismatch. (In development mode — no `/dev/nsm` — an unset pin only logs `loadkey.ca_pubkey.unpinned` at WARN.) This guards against a compromised host substituting a different ciphertext into the host-mediated `Decrypt`: even a valid attested `Decrypt` of an attacker-chosen ciphertext yields a key whose public half won't match the pin, so the enclave rejects it.
 
 ## Development Mode
 
