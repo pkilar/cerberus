@@ -66,5 +66,8 @@ Thumbs.db
 .claude.json.backup
 CLAUDE.md
 
+# Superpowers planning artifacts (local only)
+docs/superpowers/
+
 # FastEmbed model cache
 .fastembed_cache/
