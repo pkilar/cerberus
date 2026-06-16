@@ -54,6 +54,9 @@ func Run(ctx context.Context, signer enclave.Signer, kmsDecrypter KMSDecrypter) 
 	if err != nil {
 		return fmt.Errorf("complete key load: %w", err)
 	}
+	if complete == nil {
+		return errors.New("enclave returned a nil CompleteKeyLoad response")
+	}
 	if !complete.Success {
 		return errors.New("enclave reported CA key load did not succeed")
 	}

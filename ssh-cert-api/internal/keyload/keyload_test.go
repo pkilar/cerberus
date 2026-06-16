@@ -125,3 +125,15 @@ func TestRun_NilBegin(t *testing.T) {
 		t.Fatal("expected error when BeginKeyLoad returns a nil response")
 	}
 }
+
+func TestRun_NilComplete(t *testing.T) {
+	// CompleteKeyLoad returning (nil, nil) on the attested path must not panic.
+	signer := &fakeSigner{
+		begin:    &messages.BeginKeyLoadResponse{AttestationDocument: []byte("doc"), CiphertextBlob: []byte("blob")},
+		complete: nil,
+	}
+	kms := &fakeKMS{out: []byte("cms-envelope")}
+	if err := Run(t.Context(), signer, kms); err == nil {
+		t.Fatal("expected error when CompleteKeyLoad returns a nil response")
+	}
+}
