@@ -25,26 +25,7 @@ for principals the authenticated user is authorized for, for a bounded validity 
 
 ## 2. System overview & data flow
 
-```
-        client (kinit)
-            │  ① HTTPS + SPNEGO (TLS 1.2+)
-            ▼
-┌──────────────────────────── EC2 host (semi-trusted) ─────────────────────────────┐
-│  ssh-cert-api                                                                     │
-│    ② auth (Kerberos/SPNEGO)  →  ③ authz (Casbin [+ LDAP])  →  rate-limit          │
-│                                                     │ ⑤ VSOCK :5000               │
-│    startup only:  ④ kms.Decrypt(Recipient = enclave attestation doc) ─ TCP ─▶ AWS KMS
-│                      ◀── CiphertextForRecipient (enclave-only)                    │
-│    ⑨ /health, /metrics (unauthenticated)                                          │
-└───────────────────────────────────────────┼───────────────────────────────────────┘
-                                            │ ⑤ VSOCK :5000  (host = adversary in this model)
-┌──────────────────────────── Nitro Enclave (trusted) ─────────────────────────────┐
-│  ssh-cert-signer  (no network)                                                    │
-│    BeginKeyLoad → NSM attestation doc + ca_key.enc ; CompleteKeyLoad → CMS open    │
-│    SignSshKey   → ssh.Signer.SignCert(...)                                         │
-│    CA private key lives only here, in process memory.                             │
-└───────────────────────────────────────────────────────────────────────────────────┘
-```
+![Cerberus data flow and trust boundaries — the host is the in-scope adversary; the enclave is the trusted computing base (TCB).](threat-model-dfd.svg)
 
 **Threat-actor model.** The headline assumption is that **the EC2 host (and the `ssh-cert-api` process) is
 semi-trusted** — it may be compromised — while the **enclave is the trusted target**. The host can inject arbitrary
