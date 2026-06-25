@@ -4,12 +4,6 @@
 // requires a coordinated update on both sides.
 package constants
 
-// Context identifier for the parent instance. This is always 3.
-const InstanceCID = 3
-
-// Port the parent instance listens on and forward data to KMS.
-const InstanceListeningPort = 8000
-
 // Context identifier for the enclave. This value must match the value used with `nitro-cli run-enclave`.
 const EnclaveCID = 16
 

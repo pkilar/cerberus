@@ -2,9 +2,11 @@
 
 ## Overview
 
-When the signer service runs inside a Nitro Enclave, it attaches an NSM attestation document to KMS Decrypt calls. This document cryptographically proves the enclave's identity (its image hash, kernel, and application measurements) to AWS KMS. KMS can then enforce conditions on the key policy that restrict decryption to a specific enclave image.
+When the signer service runs inside a Nitro Enclave, the CA key is decrypted via a **host-mediated** attested KMS Decrypt: the enclave generates an NSM attestation document, and the host (`ssh-cert-api`, using its EC2 instance-role credentials) calls `kms.Decrypt` with that document as the `Recipient`. The document cryptographically proves the enclave's identity (its image hash, kernel, and application measurements) to AWS KMS, and KMS returns the plaintext encrypted to the enclave's attestation public key — so only the enclave can read it, regardless of which principal made the call. KMS can then enforce conditions on the key policy that restrict decryption to a specific enclave image.
 
 Without a PCR condition in the key policy, KMS validates the attestation document signature (proving it came from *some* Nitro Enclave) but does not restrict *which* enclave image can decrypt. Adding PCR conditions is what completes the attestation chain.
+
+> **Critical — deny non-attested `Decrypt`.** Because the decrypt is host-mediated, the host process holds both the KMS-encrypted CA-key ciphertext and (via the EC2 instance role) `kms:Decrypt` permission. The *only* thing preventing a compromised host from issuing a plain `Decrypt` (no `Recipient`) and reading the plaintext CA key is the key policy: grant the instance role `Decrypt` **only** under a `kms:RecipientAttestation:ImageSha384` / `PCR0` condition, with **no** other statement granting it an unconditioned `Decrypt`. A request without an attestation document then fails the condition and is denied. The calling principal is the same EC2 instance role as before this change (the host previously forwarded those same credentials into the enclave), so a correctly-scoped policy needs *verification*, not new grants.
 
 ## PCR Values
 
@@ -70,6 +72,10 @@ You can also enforce multiple PCR values for stricter validation:
 }
 ```
 
+## Defense in depth (optional): pin the CA public key
+
+Optionally set `CA_PUBLIC_KEY_PATH` in the signer to a file containing the CA's public key (e.g. `ssh-keygen -y` output / the `.pub`), baked into the enclave image so it is covered by PCR0. When set, the enclave compares the decrypted key's public half to this pin and **refuses to load on mismatch**; when unset it logs `loadkey.ca_pubkey.unpinned` and proceeds. This is optional defense-in-depth against a compromised host substituting a different ciphertext into the host-mediated `Decrypt` — which is only feasible if the CMK grants `kms:Encrypt`. The primary substitution defense is the attestation-conditioned, **Decrypt-only** key policy above: with no `Encrypt` grant the attacker cannot craft a substitute ciphertext, so the pin is belt-and-suspenders rather than required.
+
 ## Development Mode
 
 During development, omit the `Condition` block entirely:
@@ -88,7 +94,7 @@ During development, omit the `Condition` block entirely:
 
 KMS will still validate that the attestation document is properly signed by AWS (proving it came from a real Nitro Enclave), but it will not enforce specific PCR values. This avoids friction when rebuilding the enclave frequently during development, since PCR values change with every build.
 
-**This is NOT suitable for production.** Without PCR conditions, any Nitro Enclave running under the same IAM role can decrypt the CA key.
+**This is NOT suitable for production.** Without PCR conditions, any Nitro Enclave running under the same IAM role can obtain the CA key — and because the decrypt is host-mediated, a compromised host could also issue a plain (non-attested) `Decrypt` and read the plaintext directly. Production policies MUST be attestation-conditioned (see the Critical note above).
 
 ## Updating the Policy After a Build
 
@@ -101,7 +107,7 @@ PCR values change with every build. After deploying a new enclave image to produ
 
 ## Fallback Behavior
 
-If the signer runs outside an enclave (e.g., during integration testing), the NSM device (`/dev/nsm`) is not available. The signer detects this at startup and falls back to standard KMS Decrypt without attestation. This logs a warning:
+If the signer runs outside an enclave (e.g., during local development or integration testing), the NSM device (`/dev/nsm`) is not available. The signer has ordinary network access in this case and performs a direct non-attested `kms.Decrypt` itself (no host mediation, no proxy). This logs a warning:
 
 ```
 NSM device not found — running without attestation (development mode)

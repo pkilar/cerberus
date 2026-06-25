@@ -54,7 +54,7 @@ const (
 )
 
 var (
-	// caSigner is written by handleLoadKeySigner and read by every
+	// caSigner is written by the key-load handlers and read by every
 	// concurrent handleSignSshKey. atomic.Pointer prevents a data race
 	// between a (re-)load and an in-flight sign on the hot path.
 	caSigner atomic.Pointer[ssh.Signer]
@@ -194,7 +194,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 // processRequest handles a single request and returns the response. It
 // recovers from panics so a single buggy handler doesn't drop the connection
 // without a structured log, and redacts the parsed request before debug
-// logging so LoadKeySigner credentials never reach stderr.
+// logging so any future secret material never reaches stderr.
 func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Response) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -217,7 +217,10 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	// first one — a misbehaving host that sets two variants must not be able
 	// to smuggle one operation past host-side checks while another executes.
 	nVariants := 0
-	if req.LoadKeySigner != nil {
+	if req.BeginKeyLoad != nil {
+		nVariants++
+	}
+	if req.CompleteKeyLoad != nil {
 		nVariants++
 	}
 	if req.SignSshKey != nil {
@@ -234,8 +237,10 @@ func processRequest(ctx context.Context, requestBytes []byte) (resp messages.Res
 	}
 
 	switch {
-	case req.LoadKeySigner != nil:
-		return handleLoadKeySigner(ctx, *req.LoadKeySigner)
+	case req.BeginKeyLoad != nil:
+		return handleBeginKeyLoad(ctx)
+	case req.CompleteKeyLoad != nil:
+		return handleCompleteKeyLoad(ctx, *req.CompleteKeyLoad)
 	case req.SignSshKey != nil:
 		return handleSignSshKey(ctx, *req.SignSshKey)
 	case req.Ping != nil:
@@ -270,22 +275,35 @@ func handleGetEnclaveMetrics() messages.Response {
 	}
 }
 
-func handleLoadKeySigner(ctx context.Context, req messages.LoadKeySignerRequest) messages.Response {
-	signer, err := handlers.LoadKeySignerHandler(ctx, req, attestProvider)
+func handleBeginKeyLoad(ctx context.Context) messages.Response {
+	res, err := handlers.BeginKeyLoad(ctx, attestProvider)
+	if err != nil {
+		return createErrorResponse(err)
+	}
+	if res.Signer != nil {
+		// Development path: the enclave decrypted the key itself.
+		caSigner.Store(&res.Signer)
+		return messages.Response{BeginKeyLoad: &messages.BeginKeyLoadResponse{Loaded: true}}
+	}
+	return messages.Response{BeginKeyLoad: &messages.BeginKeyLoadResponse{
+		AttestationDocument: res.AttestationDocument,
+		CiphertextBlob:      res.CiphertextBlob,
+	}}
+}
+
+func handleCompleteKeyLoad(ctx context.Context, req messages.CompleteKeyLoadRequest) messages.Response {
+	signer, err := handlers.CompleteKeyLoad(ctx, attestProvider, req.CiphertextForRecipient)
 	if err != nil {
 		return createErrorResponse(err)
 	}
 	caSigner.Store(&signer)
-
-	return messages.Response{
-		LoadKeySigner: &messages.LoadKeySignerResponse{Success: true},
-	}
+	return messages.Response{CompleteKeyLoad: &messages.CompleteKeyLoadResponse{Success: true}}
 }
 
 func handleSignSshKey(ctx context.Context, req messages.EnclaveSigningRequest) messages.Response {
 	signer := caSigner.Load()
 	if signer == nil {
-		return createErrorResponse(errors.New("CA signer is not initialized; call LoadKeySigner first"))
+		return createErrorResponse(errors.New("CA signer is not initialized; the CA key has not been loaded yet"))
 	}
 
 	signResponse, err := handlers.SignPublicKey(ctx, *signer, req)

@@ -36,7 +36,8 @@ Requires(pre):  shadow-utils
 The HTTPS API service for Cerberus. Runs on the EC2 host and provides
 Kerberos/SPNEGO authenticated endpoints for SSH certificate signing.
 Forwards signing requests to the signer running inside a Nitro Enclave
-over VSOCK and runs a KMS proxy for the enclave's outbound KMS calls.
+over VSOCK and performs the attested KMS Decrypt on the enclave's behalf
+(the enclave has no network).
 
 # ---------------------------------------------------------------------------
 # Subpackage: cerberus-signer

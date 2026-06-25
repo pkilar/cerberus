@@ -46,7 +46,7 @@ func SignPublicKey(ctx context.Context, caSigner ssh.Signer, req messages.Enclav
 	}
 
 	if caSigner == nil {
-		return nil, fmt.Errorf("CA signer is not initialized. Call LoadKeySigner first")
+		return nil, fmt.Errorf("CA signer is not initialized; the CA key has not been loaded yet")
 	}
 
 	publicKey, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(req.SSHKey))

@@ -203,7 +203,7 @@ groups:
 
 #### Responsibilities
 
-1. **Key Management**: Loads and decrypts the CA private key from AWS KMS
+1. **Key Management**: Receives the CA private key via a host-mediated attested KMS Decrypt; the host holds AWS credentials, the enclave holds the key in memory
 2. **Cryptographic Signing**: Generates SSH certificates using the CA key
 3. **Request Processing**: Handles signing requests from the API service via VSOCK
 4. **Response Generation**: Returns signed certificates or error messages
@@ -221,7 +221,7 @@ groups:
 The CA private key protection follows a multi-layer approach:
 
 1. **At Rest**: Key is encrypted with AWS KMS and stored on disk
-2. **In Transit**: Key is decrypted by AWS KMS and sent over encrypted channel
+2. **In Transit**: The host performs an attested KMS Decrypt using the enclave's NSM attestation document; KMS returns the key encrypted to the enclave's attestation public key, so only the enclave can open it
 3. **In Use**: Key exists only in enclave memory, unreachable from host OS
 4. **Lifecycle**: Key never exists in plaintext outside the enclave
 
@@ -269,7 +269,7 @@ Cerberus implements multiple layers of security controls:
 - **Mechanism**: AWS Nitro Enclaves hardware isolation
 - **Protection**: Private key held in enclave memory; unreachable from host **when** KMS key policy includes PCR-based attestation conditions (see `docs/kms-attestation-policy.md`)
 - **Attestation**: Enclave proves its identity and integrity to KMS via PCR values; **production deployments must configure PCR conditions** on the KMS key policy to enforce this boundary
-- **Development Mode**: Without `/dev/nsm` (outside a real Nitro Enclave), the signer falls back to non-attested KMS calls — this mode provides no key-isolation guarantee and must not be used in production
+- **Development Mode**: Without `/dev/nsm` (outside a real Nitro Enclave), the host performs a direct non-attested KMS Decrypt and loads the key in-process — this mode provides no key-isolation guarantee and must not be used in production
 - **Standard**: FIPS 140-2 Level 2 equivalent protection (when PCR-conditioned attestation is enforced)
 
 #### Layer 4: Time-Based Expiration (Limited Exposure)

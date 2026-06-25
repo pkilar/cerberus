@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -121,8 +122,8 @@ func TestRequest_JSON(t *testing.T) {
 	}
 
 	// Verify other fields are nil
-	if decoded.LoadKeySigner != nil {
-		t.Error("expected LoadKeySigner to be nil")
+	if decoded.BeginKeyLoad != nil {
+		t.Error("expected BeginKeyLoad to be nil")
 	}
 }
 
@@ -185,79 +186,82 @@ func TestResponse_WithError(t *testing.T) {
 	}
 }
 
-func TestCredentials_Redacted(t *testing.T) {
+func TestBeginKeyLoad_JSON(t *testing.T) {
 	t.Parallel()
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		Token:           "FwoGZXIvYXdzEKL//////////wEa",
+	req := Request{BeginKeyLoad: &BeginKeyLoadRequest{}}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decodedReq Request
+	if err := json.Unmarshal(data, &decodedReq); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if decodedReq.BeginKeyLoad == nil {
+		t.Fatal("expected BeginKeyLoad to be non-nil")
 	}
 
-	red := creds.Redacted()
-	if red.AccessKeyId != creds.AccessKeyId {
-		t.Errorf("AccessKeyId should be preserved, got %q", red.AccessKeyId)
+	resp := Response{BeginKeyLoad: &BeginKeyLoadResponse{
+		AttestationDocument: []byte("doc-bytes"),
+		CiphertextBlob:      []byte("ciphertext"),
+	}}
+	rdata, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
 	}
-	if red.SecretAccessKey != "***" {
-		t.Errorf("SecretAccessKey not fully redacted: %q", red.SecretAccessKey)
+	var decodedResp Response
+	if err := json.Unmarshal(rdata, &decodedResp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
 	}
-	if red.Token != "***" {
-		t.Errorf("Token not fully redacted: %q", red.Token)
+	if decodedResp.BeginKeyLoad == nil {
+		t.Fatal("expected BeginKeyLoad response to be non-nil")
+	}
+	if string(decodedResp.BeginKeyLoad.AttestationDocument) != "doc-bytes" {
+		t.Errorf("AttestationDocument round-trip mismatch: %q", decodedResp.BeginKeyLoad.AttestationDocument)
+	}
+	if string(decodedResp.BeginKeyLoad.CiphertextBlob) != "ciphertext" {
+		t.Errorf("CiphertextBlob round-trip mismatch: %q", decodedResp.BeginKeyLoad.CiphertextBlob)
+	}
+	if decodedResp.BeginKeyLoad.Loaded {
+		t.Error("Loaded should be false")
 	}
 
-	// Empty secrets stay empty so callers can tell unset apart from set-but-redacted.
-	empty := Credentials{AccessKeyId: "AKIAEXAMPLE"}.Redacted()
-	if empty.SecretAccessKey != "" || empty.Token != "" {
-		t.Errorf("empty secrets should not be redacted: %+v", empty)
+	// Loaded-only (development) shape must omit the byte fields.
+	loaded, err := json.Marshal(Response{BeginKeyLoad: &BeginKeyLoadResponse{Loaded: true}})
+	if err != nil {
+		t.Fatalf("marshal loaded: %v", err)
+	}
+	if strings.Contains(string(loaded), "attestationDocument") || strings.Contains(string(loaded), "ciphertextBlob") {
+		t.Errorf("loaded response should omit empty byte fields, got %s", loaded)
 	}
 }
 
-func TestCredentials_String_NoSecretLeak(t *testing.T) {
+func TestCompleteKeyLoad_JSON(t *testing.T) {
 	t.Parallel()
-	secret := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-	token := "FwoGZXIvYXdzEKL//////////wEa"
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: secret,
-		Token:           token,
-	}
-
-	s := creds.String()
-	for _, frag := range []string{secret, secret[:4], token, token[:4]} {
-		if strings.Contains(s, frag) {
-			t.Errorf("String() leaked secret material %q in %q", frag, s)
-		}
-	}
-}
-
-func TestCredentials_JSON(t *testing.T) {
-	t.Parallel()
-	creds := Credentials{
-		AccessKeyId:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		Token:           "token123",
-	}
-
-	// Test marshaling
-	data, err := json.Marshal(creds)
+	req := Request{CompleteKeyLoad: &CompleteKeyLoadRequest{CiphertextForRecipient: []byte("cms-envelope")}}
+	data, err := json.Marshal(req)
 	if err != nil {
-		t.Fatalf("failed to marshal credentials: %v", err)
+		t.Fatalf("marshal request: %v", err)
+	}
+	var decodedReq Request
+	if err := json.Unmarshal(data, &decodedReq); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if decodedReq.CompleteKeyLoad == nil || string(decodedReq.CompleteKeyLoad.CiphertextForRecipient) != "cms-envelope" {
+		t.Fatalf("CompleteKeyLoad round-trip mismatch: %+v", decodedReq.CompleteKeyLoad)
 	}
 
-	// Test unmarshaling
-	var decoded Credentials
-	err = json.Unmarshal(data, &decoded)
+	resp := Response{CompleteKeyLoad: &CompleteKeyLoadResponse{Success: true}}
+	rdata, err := json.Marshal(resp)
 	if err != nil {
-		t.Fatalf("failed to unmarshal credentials: %v", err)
+		t.Fatalf("marshal response: %v", err)
 	}
-
-	if decoded.AccessKeyId != creds.AccessKeyId {
-		t.Errorf("expected AccessKeyId %s, got %s", creds.AccessKeyId, decoded.AccessKeyId)
+	var decodedResp Response
+	if err := json.Unmarshal(rdata, &decodedResp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
 	}
-	if decoded.SecretAccessKey != creds.SecretAccessKey {
-		t.Errorf("expected SecretAccessKey %s, got %s", creds.SecretAccessKey, decoded.SecretAccessKey)
-	}
-	if decoded.Token != creds.Token {
-		t.Errorf("expected Token %s, got %s", creds.Token, decoded.Token)
+	if decodedResp.CompleteKeyLoad == nil || !decodedResp.CompleteKeyLoad.Success {
+		t.Fatalf("CompleteKeyLoad response round-trip mismatch: %+v", decodedResp.CompleteKeyLoad)
 	}
 }
 
@@ -308,6 +312,30 @@ func BenchmarkSshSigningRequest_Unmarshal(b *testing.B) {
 		err = json.Unmarshal(data, &decoded)
 		if err != nil {
 			b.Fatalf("unmarshal failed: %v", err)
+		}
+	}
+}
+
+func TestRedactedJSON_ElidesCompleteKeyLoadEnvelope(t *testing.T) {
+	t.Parallel()
+	secret := []byte("super-secret-cms-envelope-bytes")
+	out := RedactedJSON(Request{CompleteKeyLoad: &CompleteKeyLoadRequest{CiphertextForRecipient: secret}})
+	if strings.Contains(out, base64.StdEncoding.EncodeToString(secret)) {
+		t.Errorf("RedactedJSON leaked CiphertextForRecipient: %s", out)
+	}
+	if !strings.Contains(out, `"ciphertextForRecipient":null`) {
+		t.Errorf("expected redacted (null) CiphertextForRecipient, got: %s", out)
+	}
+}
+
+func TestRedactedResponseJSON_ElidesBeginKeyLoadBlobs(t *testing.T) {
+	t.Parallel()
+	doc := []byte("attestation-document-bytes")
+	blob := []byte("kms-encrypted-ca-key-bytes")
+	out := RedactedResponseJSON(Response{BeginKeyLoad: &BeginKeyLoadResponse{AttestationDocument: doc, CiphertextBlob: blob}})
+	for _, b := range [][]byte{doc, blob} {
+		if strings.Contains(out, base64.StdEncoding.EncodeToString(b)) {
+			t.Errorf("RedactedResponseJSON leaked a CA-key-derived blob in: %s", out)
 		}
 	}
 }

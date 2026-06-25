@@ -23,12 +23,18 @@ The system is composed of two primary services that work together to provide a s
   <img src="architecture.svg" alt="Cerberus Architecture Diagram" width="920"/>
 </p>
 
+**Startup (key loading)**:
+1. On startup, the API service sends a `BeginKeyLoad` request to the enclave over VSOCK.
+2. The enclave returns an NSM attestation document and the KMS-encrypted CA key ciphertext.
+3. The API service (on the host) calls AWS KMS `Decrypt` with the attestation document as the recipient; KMS returns the CA key encrypted to the enclave's attestation public key (`CiphertextForRecipient`).
+4. The API service sends a `CompleteKeyLoad` request with that envelope over VSOCK; the enclave decrypts and installs the CA signer. AWS credentials and the plaintext CA key never cross the VSOCK boundary.
+
+**Per-request (certificate signing)**:
 1. A user with a valid Kerberos ticket makes an HTTPS request to the ssh-cert-api service with the public key they want signed.
 2. The ssh-cert-api service authenticates the user's Kerberos ticket and authorizes the request using Casbin policy evaluation against the user's group membership defined in config.yaml.
 3. If authorized, the API service forwards a detailed signing request to the ssh-cert-signer service running in the Nitro Enclave via a secure VSOCK.
-4. The ssh-cert-signer service fetches the CA private key from AWS KMS-encrypted storage.
-5. The enclave service signs the certificate and returns it to the API service over the VSOCK.
-6. The ssh-cert-api service sends the signed certificate back to the user.
+4. The enclave service signs the certificate with the in-memory CA key and returns it to the API service over the VSOCK.
+5. The ssh-cert-api service sends the signed certificate back to the user.
 
 ## **Project Structure**
 
@@ -46,14 +52,13 @@ cerberus/
 │   │   ├── auth/                 # Kerberos authentication
 │   │   ├── authz/                # Casbin-based authorization
 │   │   ├── config/               # Configuration management
-│   │   ├── enclave/              # Enclave communication
-│   │   └── proxy/                # VSOCK proxy
+│   │   └── enclave/              # Enclave communication
 │   └── configs/                  # Configuration files
 └── ssh-cert-signer/              # Enclave service
     ├── cmd/ssh-cert-signer/      # Main entry point (VSOCK accept loop, signer)
     └── internal/                 # Private application code
         ├── attestation/          # NSM attestation + CMS envelope decrypt
-        └── handlers/             # LoadKeySigner / SignSshKey request handlers
+        └── handlers/             # BeginKeyLoad / CompleteKeyLoad / SignSshKey request handlers
 ```
 
 ## **Components**
@@ -99,7 +104,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
   - **Environment Variables**:
     - `CA_KEY_FILE_PATH`: Path to the encrypted CA key file (default: `/app/ca_key.enc`)
     - `AWS_REGION`: AWS region for KMS operations (default: `us-east-1`)
-    - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the signer refuses to decrypt the CA key without an NSM attestation document attached to the KMS `Decrypt` call. Set to `false` only for local development without a Nitro device. Accepts `true/1/yes` or `false/0/no` (case-insensitive); leave it **unset** to auto-detect `/dev/nsm`. An unrecognized or empty value is rejected at startup so the setting fails closed.
+    - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the enclave refuses to complete key loading unless the `BeginKeyLoad` handshake includes a valid NSM attestation document, ensuring the host's KMS `Decrypt` call is bound to the enclave's identity. Set to `false` only for local development without a Nitro device. Accepts `true/1/yes` or `false/0/no` (case-insensitive); leave it **unset** to auto-detect `/dev/nsm`. An unrecognized or empty value is rejected at startup so the setting fails closed.
     - `LOG_FORMAT`: `json` for structured slog JSON; anything else (default) emits text
     - `DEBUG`: `true` raises the log level to Debug
 
@@ -235,7 +240,7 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
      --attach-console
    ```
 
-   Note: The enclave will automatically load the encrypted CA key from `/app/ca_key.enc` (or the path specified by `CA_KEY_FILE_PATH`) and decrypt it using KMS.
+   Note: On startup, the API service drives a two-message VSOCK handshake (`BeginKeyLoad` / `CompleteKeyLoad`) to load the CA key into the enclave. The host performs the KMS `Decrypt` call on the enclave's behalf using the enclave's NSM attestation document; the plaintext CA key never leaves the enclave.
 
 2. **Run the API service**:
 
@@ -352,7 +357,7 @@ See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full operations runbook covering:
 - Credential rotation (CA key, TLS, Kerberos keytab)
 - Enclave lifecycle management
 - RPM package management and systemd service control
-- Troubleshooting tables for common issues (signing failures, auth errors, VSOCK/KMS proxy, network)
+- Troubleshooting tables for common issues (signing failures, auth errors, VSOCK, network)
 - Diagnostic commands reference
 
 [ci]: https://github.com/pkilar/cerberus/actions/workflows/go.yml

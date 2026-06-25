@@ -3,7 +3,11 @@
 // Every request/response crossing VSOCK is encoded as one of these types.
 package messages
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // MaxPrincipals is the maximum number of SSH principals accepted in a single
 // signing request. Enforced by the host (before authorization, to bound the
@@ -19,18 +23,20 @@ const MaxValidity = 24 * time.Hour
 // These messages define the API between the ssh-cert-signer and ssh-cert-api.
 // Only one of each field is expected to be set at any given time.
 type Request struct {
-	LoadKeySigner     *LoadKeySignerRequest     `json:"loadKeySigner,omitempty"`
+	BeginKeyLoad      *BeginKeyLoadRequest      `json:"beginKeyLoad,omitempty"`
+	CompleteKeyLoad   *CompleteKeyLoadRequest   `json:"completeKeyLoad,omitempty"`
 	SignSshKey        *EnclaveSigningRequest    `json:"signSshKey,omitempty"`
 	Ping              *PingRequest              `json:"ping,omitempty"`
 	GetEnclaveMetrics *GetEnclaveMetricsRequest `json:"getEnclaveMetrics,omitempty"`
 }
 
 type Response struct {
-	LoadKeySigner  *LoadKeySignerResponse  `json:"loadKeySigner,omitempty"`
-	Error          *string                 `json:"error,omitempty"`
-	SignSshKey     *SigningResponse        `json:"signSshKey,omitempty"`
-	Pong           *PingResponse           `json:"pong,omitempty"`
-	EnclaveMetrics *EnclaveMetricsResponse `json:"enclaveMetrics,omitempty"`
+	BeginKeyLoad    *BeginKeyLoadResponse    `json:"beginKeyLoad,omitempty"`
+	CompleteKeyLoad *CompleteKeyLoadResponse `json:"completeKeyLoad,omitempty"`
+	Error           *string                  `json:"error,omitempty"`
+	SignSshKey      *SigningResponse         `json:"signSshKey,omitempty"`
+	Pong            *PingResponse            `json:"pong,omitempty"`
+	EnclaveMetrics  *EnclaveMetricsResponse  `json:"enclaveMetrics,omitempty"`
 }
 
 // PingRequest is a no-op request used by /health to verify the enclave is
@@ -78,22 +84,47 @@ type EnclaveMemoryStats struct {
 }
 
 // PingResponse is the enclave's reply to a PingRequest. SignerLoaded is
-// false during the brief window between process start and LoadKeySigner
+// false during the brief window between process start and the CA key load
 // completing; load balancers should treat that as unhealthy.
 type PingResponse struct {
 	SignerLoaded bool `json:"signerLoaded"`
 }
 
-// LoadKeySignerRequest carries the AWS credentials the enclave uses to decrypt
-// the CA key via KMS. The encrypted key itself lives on the enclave filesystem
-// (CA_KEY_FILE_PATH); it does not travel over the wire.
-type LoadKeySignerRequest struct {
-	Credentials Credentials `json:"credentials"`
+// BeginKeyLoadRequest asks the enclave to begin loading the CA key. The host
+// sends this once at startup. The enclave's reply (BeginKeyLoadResponse) tells
+// the host whether it must perform a host-mediated attested KMS Decrypt
+// (production) or whether the enclave already loaded the key itself (dev).
+type BeginKeyLoadRequest struct{}
+
+// BeginKeyLoadResponse is the enclave's reply to BeginKeyLoadRequest.
+//
+// Production (attested enclave): AttestationDocument and CiphertextBlob are set
+// and Loaded is false. The host calls KMS Decrypt with the attestation document
+// as the Recipient and the ciphertext blob, then returns the result via
+// CompleteKeyLoadRequest. Neither field is secret to the host — the blob is KMS
+// ciphertext and the attestation document is a signed public artifact.
+//
+// Development (no /dev/nsm): Loaded is true and the other fields are empty — the
+// enclave performed a direct (non-attested) KMS Decrypt over its own network and
+// installed the CA signer. No CompleteKeyLoad follows.
+type BeginKeyLoadResponse struct {
+	AttestationDocument []byte `json:"attestationDocument,omitempty"`
+	CiphertextBlob      []byte `json:"ciphertextBlob,omitempty"`
+	Loaded              bool   `json:"loaded,omitempty"`
 }
 
-type LoadKeySignerResponse struct {
-	Success bool   `json:"success,omitempty"`
-	Error   string `json:"error,omitempty"`
+// CompleteKeyLoadRequest carries the KMS CiphertextForRecipient back to the
+// enclave. It is a CMS envelope encrypting the CA-key plaintext to the enclave's
+// attestation public key (RSAES_OAEP_SHA_256); only the originating enclave can
+// open it, so this value is not secret to the host.
+type CompleteKeyLoadRequest struct {
+	CiphertextForRecipient []byte `json:"ciphertextForRecipient"`
+}
+
+// CompleteKeyLoadResponse reports whether the enclave decrypted the envelope and
+// installed the CA signer.
+type CompleteKeyLoadResponse struct {
+	Success bool `json:"success,omitempty"`
 }
 
 // SigningRequest is the structure for JSON requests coming from the web API.
@@ -123,4 +154,43 @@ type EnclaveSigningRequest struct {
 	Permissions      map[string]string `json:"permissions,omitempty"`
 	CustomAttributes map[string]string `json:"custom_attributes,omitempty"`
 	CriticalOptions  map[string]string `json:"critical_options,omitempty"`
+}
+
+// RedactedJSON marshals a Request for safe debug logging, eliding byte blobs
+// that carry CA-key-derived material. Credentials no longer cross the wire, but
+// CompleteKeyLoad carries the KMS CiphertextForRecipient (the CA key encrypted to
+// the enclave's attestation key) — defense in depth: never persist even
+// encrypted CA-key material in logs.
+//
+// MAINTAINER NOTE: if a future Request variant carries a secret or a
+// CA-key-derived blob, redact it here BEFORE marshalling, or debug logging of
+// that request will expose it.
+func RedactedJSON(r Request) string {
+	if r.CompleteKeyLoad != nil && len(r.CompleteKeyLoad.CiphertextForRecipient) > 0 {
+		red := *r.CompleteKeyLoad
+		red.CiphertextForRecipient = nil
+		r.CompleteKeyLoad = &red
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
+}
+
+// RedactedResponseJSON marshals a Response for safe debug logging, eliding the
+// CA-key-derived byte blobs in a BeginKeyLoad response (the KMS-encrypted CA key
+// and the attestation document). Same defense-in-depth rationale as RedactedJSON.
+func RedactedResponseJSON(r Response) string {
+	if r.BeginKeyLoad != nil && (len(r.BeginKeyLoad.AttestationDocument) > 0 || len(r.BeginKeyLoad.CiphertextBlob) > 0) {
+		red := *r.BeginKeyLoad
+		red.AttestationDocument = nil
+		red.CiphertextBlob = nil
+		r.BeginKeyLoad = &red
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Sprintf("<marshal error: %v>", err)
+	}
+	return string(b)
 }
