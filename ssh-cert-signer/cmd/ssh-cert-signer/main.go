@@ -68,6 +68,13 @@ var (
 	// errUnexpectedCommand is returned when a Request arrives with no
 	// recognized variant set. Named so log parsing can match it.
 	errUnexpectedCommand = errors.New("unexpected command")
+
+	// Gate refusals — package-level sentinels so callers and tests match with
+	// errors.Is instead of substring-matching the message. The wording is also
+	// the string the host sees over VSOCK, so keep it descriptive.
+	errCompleteWithoutBegin   = errors.New("CompleteKeyLoad without a preceding BeginKeyLoad; refusing")
+	errCompleteDifferentKey   = errors.New("CompleteKeyLoad would replace the loaded CA signer with a different key; refusing")
+	errLoadDirectDifferentKey = errors.New("BeginKeyLoad decrypted a different CA key than the one already loaded; refusing")
 )
 
 // keyLoadGate enforces the integrity of the CA-key load handshake: the installed
@@ -115,10 +122,10 @@ func (g *keyLoadGate) arm() {
 func (g *keyLoadGate) loadDirect(signer ssh.Signer) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.armed = false
+	g.armed = false // dev path never arms; reset defensively to keep state unambiguous
 	if cur := caSigner.Load(); cur != nil {
 		if !samePublicKey(*cur, signer) {
-			return errors.New("BeginKeyLoad decrypted a different CA key than the one already loaded; refusing")
+			return errLoadDirectDifferentKey
 		}
 		return nil // same key already installed — idempotent
 	}
@@ -137,7 +144,7 @@ func (g *keyLoadGate) completeLoad(install func() (ssh.Signer, error)) (ssh.Sign
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.armed {
-		return nil, errors.New("CompleteKeyLoad without a preceding BeginKeyLoad; refusing")
+		return nil, errCompleteWithoutBegin
 	}
 	signer, err := install()
 	if err != nil {
@@ -146,7 +153,7 @@ func (g *keyLoadGate) completeLoad(install func() (ssh.Signer, error)) (ssh.Sign
 	g.armed = false
 	if cur := caSigner.Load(); cur != nil {
 		if !samePublicKey(*cur, signer) {
-			return nil, errors.New("CompleteKeyLoad would replace the loaded CA signer with a different key; refusing")
+			return nil, errCompleteDifferentKey
 		}
 		return *cur, nil // same key already installed — idempotent, no swap
 	}
@@ -381,6 +388,7 @@ func handleBeginKeyLoad(ctx context.Context) messages.Response {
 	if res.Signer != nil {
 		// Development path: the enclave decrypted the key itself.
 		if err := gate.loadDirect(res.Signer); err != nil {
+			slog.WarnContext(ctx, "loadkey.begin.refused", "error", err)
 			return createErrorResponse(err)
 		}
 		return messages.Response{BeginKeyLoad: &messages.BeginKeyLoadResponse{Loaded: true}}
@@ -401,6 +409,7 @@ func handleCompleteKeyLoad(ctx context.Context, req messages.CompleteKeyLoadRequ
 	if _, err := gate.completeLoad(func() (ssh.Signer, error) {
 		return handlers.CompleteKeyLoad(ctx, attestProvider, req.CiphertextForRecipient)
 	}); err != nil {
+		slog.WarnContext(ctx, "loadkey.complete.refused", "error", err)
 		return createErrorResponse(err)
 	}
 	return messages.Response{CompleteKeyLoad: &messages.CompleteKeyLoadResponse{Success: true}}
