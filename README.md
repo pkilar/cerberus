@@ -52,7 +52,9 @@ cerberus/
 │   │   ├── auth/                 # Kerberos authentication
 │   │   ├── authz/                # Casbin-based authorization
 │   │   ├── config/               # Configuration management
-│   │   └── enclave/              # Enclave communication
+│   │   ├── enclave/              # Enclave (VSOCK) communication
+│   │   ├── keyload/              # Host-mediated CA-key load (BeginKeyLoad/CompleteKeyLoad + host KMS Decrypt)
+│   │   └── ldap/                 # LDAP-backed group resolution
 │   └── configs/                  # Configuration files
 └── ssh-cert-signer/              # Enclave service
     ├── cmd/ssh-cert-signer/      # Main entry point (VSOCK accept loop, signer)
@@ -81,11 +83,11 @@ This is the user-facing component that runs on the parent EC2 instance.
   - `GET /metrics` — Prometheus scrape target (unauthenticated)
 - **Configuration**:
   - `configs/config.yaml`: Defines user groups and permissions
+  - The Kerberos **keytab path is set in `config.yaml`** via `keytab_path` (not an environment variable). The keytab must be mode `0600` or `0400`; group/world-readable keytabs are refused at startup.
   - **Environment Variables**:
     - `CONFIG_PATH`: Path to config.yaml (default: `configs/config.yaml`)
-    - `KERBEROS_KEYTAB_PATH`: Path to the service's keytab file. Must be mode `0600` or `0400` (group/world-readable keytabs are refused at startup).
-    - `AWS_REGION`: AWS region for KMS operations
-    - `ENCLAVE_VSOCK_PORT`: VSOCK port used to reach the signer (default: `5000`)
+    - `AWS_REGION`: AWS region for the host's attested KMS `Decrypt` during CA-key load (default: `us-east-1`)
+    - `CERBERUS_SIGNER_ENDPOINT`: Override the signer dial target as `scheme://addr` (e.g. `vsock://16:5000`, `tcp://127.0.0.1:5000`, `unix:///run/usbhsm.sock`); unset → the compile-time VSOCK CID `16` / port `5000`
     - `RATE_LIMIT_RPS`: Per-principal rate limit in requests per second (default: `5`)
     - `RATE_LIMIT_BURST`: Per-principal burst allowance (default: `10`)
     - `LOG_FORMAT`: `json` emits structured slog JSON; anything else (default) emits text
@@ -96,14 +98,15 @@ This is the user-facing component that runs on the parent EC2 instance.
 This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 
 - **Responsibilities**:
-  - Loads the CA private key from KMS-encrypted storage
+  - Receives the KMS-encrypted CA key and the host-decrypted CMS envelope over VSOCK, then decrypts and installs the in-memory CA signer
   - Listens for signing requests on a VSOCK port
   - Performs cryptographic signing operations
   - Returns signed certificates or errors
 - **Configuration**:
   - **Environment Variables**:
     - `CA_KEY_FILE_PATH`: Path to the encrypted CA key file (default: `/app/ca_key.enc`)
-    - `AWS_REGION`: AWS region for KMS operations (default: `us-east-1`)
+    - `CA_PUBLIC_KEY_PATH`: Path to the CA public key used to pin the decrypted CA key's identity (default: `/app/ca_key.pub`, baked into the EIF). Active by default in packaged builds; the enclave code treats it as opt-in — if unset, it logs `loadkey.ca_pubkey.unpinned` at WARN and proceeds.
+    - `AWS_REGION`: AWS region for the signer's **dev-mode** direct KMS `Decrypt` — used only when `/dev/nsm` is absent; in production the host performs the attested decrypt and the enclave makes no KMS call (default: `us-east-1`)
     - `REQUIRE_ATTESTATION`: If `true` (default when `/dev/nsm` is present), the enclave refuses to complete key loading unless the `BeginKeyLoad` handshake includes a valid NSM attestation document, ensuring the host's KMS `Decrypt` call is bound to the enclave's identity. Set to `false` only for local development without a Nitro device. Accepts `true/1/yes` or `false/0/no` (case-insensitive); leave it **unset** to auto-detect `/dev/nsm`. An unrecognized or empty value is rejected at startup so the setting fails closed.
     - `LOG_FORMAT`: `json` for structured slog JSON; anything else (default) emits text
     - `DEBUG`: `true` raises the log level to Debug
@@ -245,11 +248,9 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
 2. **Run the API service**:
 
    ```bash
-   # Set environment variables
+   # Set environment variables (the keytab path is configured in config.yaml via keytab_path)
    export CONFIG_PATH="ssh-cert-api/configs/config.yaml"
-   export KERBEROS_KEYTAB_PATH="/path/to/service.keytab"
    export AWS_REGION="us-east-1"
-   export ENCLAVE_VSOCK_PORT=5000
 
    # Run the API service
    ./ssh-cert-api/ssh-cert-api.amd64

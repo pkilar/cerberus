@@ -163,7 +163,7 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `SC-6` | High | 6 | TI | encrypt-ca-key Makefile target pipes plaintext CA key through shell process substitution |
 | `DOS-2` | Medium | 6 | D | Oversized /sign body amplifies host memory consumption before the body cap fires |
 | `DOS-5` | Medium | 5.8 | D | Enclave fd exhaustion or OOM triggers accept-loop backoff storm, stalling all signing |
-| `VSOCK-4` | Medium | 5.8 | ET | Repeated BeginKeyLoad invocations allow host to atomically swap the live CA signer mid-operation |
+| `VSOCK-4` | Medium | 5.8 | ET | Repeated BeginKeyLoad invocations allow host to atomically swap the live CA signer mid-operation (now blocked by the one-shot `keyLoadGate` — see `VSOCK-3b`) |
 | `AUTHZ-5` | Medium | 5.6 | EI | Positive cache poisoning: stale LDAP group membership grants access after directory removal |
 | `DOS-4` | Medium | 5.6 | D | Startup key-load hang blocks the service indefinitely (KMS or VSOCK unresponsive) |
 | `VSOCK-1` | Medium | 5.6 | TE | Oversized request smuggled past bufio.Scanner cap triggers connection drop instead of structured error |
@@ -477,7 +477,7 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 |---|---|---|---|---|---|
 | `DOS-2` | Medium | 6 | D | Oversized /sign body amplifies host memory before the body cap fires | Hard body cap `server.go:34,166` `maxSignRequestBytes=64*1024` via `http.MaxBytesReader`; typed 413 on overflow |
 | `DOS-5` | Medium | 5.8 | D | Enclave fd exhaustion/OOM triggers accept-loop backoff storm | Semaphore cap 32 `main.go:99,129`; capped accept backoff `main.go:50-53,112` |
-| `VSOCK-4` | Medium | 5.8 | ET | Repeated BeginKeyLoad lets host atomically swap the live CA signer | KMS PCR0 policy is the runtime gate; `caSigner` is an `atomic.Pointer` swapped only via the load handlers |
+| `VSOCK-4` | Medium | 5.8 | ET | Repeated BeginKeyLoad lets host atomically swap the live CA signer | Superseded by the one-shot `keyLoadGate` (`VSOCK-3b`): a post-load swap to a *different* key is refused unconditionally and same-key reload is idempotent, so the live CA never changes after first load. KMS PCR0 policy gates only *which image may first decrypt*. |
 | `AUTHZ-5` | Medium | 5.6 | EI | Positive cache poisoning: stale LDAP membership after directory removal | `ldapCacheTTLMax=10m` hard cap `config.go:88-91,393-394`; positive-only, errors never cached |
 | `DOS-4` | Medium | 5.6 | D | Startup key-load hang blocks the service indefinitely | 60s startup timeout `cmd/main.go:90`; fatal on failure `cmd/main.go:97-9x` |
 | `VSOCK-1` | Medium | 5.6 | TE | Oversized request past scanner cap drops connection vs structured error | `scanner.Buffer(...,maxRequestBytes=262144)` `main.go:157`; oversize → structured "request exceeds" error |

@@ -269,7 +269,7 @@ Cerberus implements multiple layers of security controls:
 - **Mechanism**: AWS Nitro Enclaves hardware isolation
 - **Protection**: Private key held in enclave memory; unreachable from host **when** KMS key policy includes PCR-based attestation conditions (see `docs/kms-attestation-policy.md`)
 - **Attestation**: Enclave proves its identity and integrity to KMS via PCR values; **production deployments must configure PCR conditions** on the KMS key policy to enforce this boundary
-- **Development Mode**: Without `/dev/nsm` (outside a real Nitro Enclave), the host performs a direct non-attested KMS Decrypt and loads the key in-process — this mode provides no key-isolation guarantee and must not be used in production
+- **Development Mode**: Without `/dev/nsm` (outside a real Nitro Enclave), the signer process itself — running as an ordinary networked process, not inside an enclave — performs a direct non-attested KMS Decrypt and loads the key in-process — this mode provides no key-isolation guarantee and must not be used in production
 - **Standard**: FIPS 140-2 Level 2 equivalent protection (when PCR-conditioned attestation is enforced)
 
 #### Layer 4: Time-Based Expiration (Limited Exposure)

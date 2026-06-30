@@ -125,13 +125,14 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 | Variable               | Default               | Description                                                                                               |
 | ---------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
 | `CONFIG_PATH`          | `configs/config.yaml` | Path to authorization config file                                                                         |
-| `KERBEROS_KEYTAB_PATH` | —                     | Path to Kerberos keytab file. Must be mode `0600` or `0400`; group/world-readable keytabs refuse startup. |
-| `AWS_REGION`           | `us-east-1`           | AWS region for KMS operations                                                                             |
-| `ENCLAVE_VSOCK_PORT`   | `5000`                | VSOCK port for enclave communication                                                                      |
+| `AWS_REGION`           | `us-east-1`           | AWS region for the host's attested KMS `Decrypt` during CA-key load                                       |
+| `CERBERUS_SIGNER_ENDPOINT` | —                 | Override the signer dial target as `scheme://addr` (e.g. `vsock://16:5000`, `tcp://127.0.0.1:5000`, `unix:///run/usbhsm.sock`). Unset → the compile-time VSOCK CID `16` / port `5000` in `constants/`. |
 | `RATE_LIMIT_RPS`       | `5`                   | Per-principal `/sign` rate limit, requests per second                                                     |
 | `RATE_LIMIT_BURST`     | `10`                  | Per-principal burst allowance                                                                             |
 | `LOG_FORMAT`           | `text`                | `json` emits structured slog JSON for log aggregation; anything else emits human-readable text            |
 | `DEBUG`                | `false`               | Enable debug-level logging                                                                                |
+
+> The Kerberos **keytab path is not an environment variable** — it is set via the `keytab_path` field in `config.yaml`. The keytab must be mode `0600` or `0400`; group/world-readable keytabs refuse startup.
 
 ### ssh-cert-signer Environment Variables
 
@@ -409,7 +410,7 @@ sudo /usr/libexec/cerberus/run-enclave.sh status
 
 Environment variables are managed via sysconfig files rather than inline in the systemd unit.
 
-**`/etc/sysconfig/cerberus-api`**: `CONFIG_PATH`, `KERBEROS_KEYTAB_PATH`, `AWS_REGION`, `ENCLAVE_VSOCK_PORT`, `DEBUG`
+**`/etc/sysconfig/cerberus-api`**: `CONFIG_PATH`, `AWS_REGION`, `CERBERUS_SIGNER_ENDPOINT` (optional), `DEBUG` (the keytab path is set in `config.yaml` via `keytab_path`, not here)
 
 **`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
 
@@ -494,7 +495,6 @@ See [RPM Packaging](#rpm-packaging) above. After installing the RPMs, follow the
 4. Start the API service:
    ```bash
    CONFIG_PATH=/opt/cerberus/config.yaml \
-   KERBEROS_KEYTAB_PATH=/etc/cerberus/krb5.keytab \
    AWS_REGION=us-east-1 \
    /opt/cerberus/ssh-cert-api
    ```

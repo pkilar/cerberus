@@ -49,8 +49,10 @@ Requires:       aws-nitro-enclaves-cli
 
 %description signer
 The SSH certificate signer for Cerberus. Packaged as a Nitro Enclave Image
-File (EIF) that runs inside an AWS Nitro Enclave. Decrypts the CA private
-key via KMS at startup and signs SSH certificates received over VSOCK.
+File (EIF) that runs inside an AWS Nitro Enclave. Receives the host-mediated,
+attested KMS Decrypt result over VSOCK (the enclave has no network of its own),
+decrypts the CMS envelope to install the in-memory CA signer, and signs SSH
+certificates received over VSOCK.
 
 # ---------------------------------------------------------------------------
 # prep / build / install

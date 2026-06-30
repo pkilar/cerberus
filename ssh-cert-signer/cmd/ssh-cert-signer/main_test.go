@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -565,8 +566,8 @@ func TestKeyLoadGate_CompleteWithoutBegin(t *testing.T) {
 		t.Fatal("install must not run when no BeginKeyLoad armed the load")
 		return nil, nil
 	})
-	if err == nil || !strings.Contains(err.Error(), "without a preceding BeginKeyLoad") {
-		t.Fatalf("want 'without a preceding BeginKeyLoad' refusal, got %v", err)
+	if !errors.Is(err, errCompleteWithoutBegin) {
+		t.Fatalf("want errCompleteWithoutBegin refusal, got %v", err)
 	}
 	if caSigner.Load() != nil {
 		t.Error("no signer should be installed after a refused CompleteKeyLoad")
@@ -594,7 +595,7 @@ func TestKeyLoadGate_CompleteRefusesDifferentKeyAfterLoad(t *testing.T) {
 	second := freshTestSigner(t)
 	g.arm()
 	_, err := g.completeLoad(func() (ssh.Signer, error) { return second, nil })
-	if err == nil || !strings.Contains(err.Error(), "different key") {
+	if !errors.Is(err, errCompleteDifferentKey) {
 		t.Fatalf("want different-key swap refusal, got %v", err)
 	}
 	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
@@ -659,7 +660,7 @@ func TestKeyLoadGate_LoadDirect(t *testing.T) {
 
 	// Re-loading a different key is refused; the installed signer is untouched.
 	second := freshTestSigner(t)
-	if err := g.loadDirect(second); err == nil || !strings.Contains(err.Error(), "different CA key") {
+	if err := g.loadDirect(second); !errors.Is(err, errLoadDirectDifferentKey) {
 		t.Fatalf("want different-key refusal, got %v", err)
 	}
 	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
