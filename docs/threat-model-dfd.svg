@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 660" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#059669"/>
+    </marker>
+    <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b45309"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#dc2626"/>
+    </marker>
+    <filter id="s" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="1040" height="660" rx="14" fill="#f8fafc"/>
+  <text x="28" y="36" font-weight="700" font-size="19" fill="#0f172a">Cerberus — Data Flow &amp; Trust Boundaries</text>
+  <text x="28" y="58" font-size="12.5" fill="#64748b">Threat-model view. The host is the in-scope adversary; the enclave is the trusted computing base (TCB).</text>
+
+  <!-- Client -->
+  <rect x="24" y="300" width="156" height="120" rx="12" fill="#fff" stroke="#6366f1" stroke-width="1.5" filter="url(#s)"/>
+  <text x="102" y="345" text-anchor="middle" font-weight="700" font-size="15" fill="#3730a3">Client</text>
+  <text x="102" y="366" text-anchor="middle" font-size="11" fill="#64748b">kinit / SSH user</text>
+  <circle cx="102" cy="396" r="15" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="102" y="401" text-anchor="middle" font-size="15" fill="#6366f1">&#x1f511;</text>
+
+  <!-- EC2 host trust boundary (semi-trusted) -->
+  <rect x="210" y="86" width="600" height="540" rx="14" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="7 4" filter="url(#s)"/>
+  <text x="230" y="112" font-weight="700" font-size="14" fill="#b45309">EC2 host — semi-trusted (in-scope adversary)</text>
+
+  <!-- ssh-cert-api -->
+  <rect x="242" y="250" width="250" height="212" rx="12" fill="#fff" stroke="#2563eb" stroke-width="1.5" filter="url(#s)"/>
+  <text x="367" y="282" text-anchor="middle" font-weight="700" font-size="15" fill="#1e40af">ssh-cert-api</text>
+  <rect x="292" y="294" width="150" height="2" rx="1" fill="#2563eb" opacity="0.3"/>
+  <text x="367" y="320" text-anchor="middle" font-size="12" fill="#475569">TLS termination</text>
+  <text x="367" y="346" text-anchor="middle" font-size="12" fill="#475569">&#9312; Kerberos / SPNEGO auth</text>
+  <text x="367" y="372" text-anchor="middle" font-size="12" fill="#475569">&#9313; Casbin authz (+ LDAP)</text>
+  <text x="367" y="398" text-anchor="middle" font-size="12" fill="#475569">rate-limit (per-principal)</text>
+  <text x="367" y="430" text-anchor="middle" font-size="11" fill="#94a3b8">+ keytab, TLS key, replay cache</text>
+
+  <!-- unauthenticated endpoints -->
+  <rect x="242" y="520" width="250" height="74" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.4" stroke-dasharray="5 3" filter="url(#s)"/>
+  <text x="367" y="550" text-anchor="middle" font-size="12.5" font-weight="600" fill="#b91c1c">&#9319; /health &#183; /metrics</text>
+  <text x="367" y="571" text-anchor="middle" font-size="11" fill="#ef4444">unauthenticated — network ACL required</text>
+  <text x="367" y="586" text-anchor="middle" font-size="10" fill="#f87171">leaks LDAP errors, timings (EDGE-4/5, LOG-3)</text>
+
+  <!-- Nitro Enclave trust boundary (trusted) -->
+  <rect x="540" y="158" width="250" height="416" rx="14" fill="#ecfdf5" stroke="#10b981" stroke-width="1.6" stroke-dasharray="7 4" filter="url(#s)"/>
+  <text x="560" y="184" font-weight="700" font-size="13.5" fill="#047857">Nitro Enclave — trusted (TCB)</text>
+  <text x="560" y="202" font-size="10.5" fill="#34d399">&#x1f512; isolated &amp; attested · no network</text>
+
+  <!-- ssh-cert-signer -->
+  <rect x="560" y="250" width="210" height="212" rx="12" fill="#fff" stroke="#059669" stroke-width="1.5" filter="url(#s)"/>
+  <text x="665" y="282" text-anchor="middle" font-weight="700" font-size="15" fill="#065f46">ssh-cert-signer</text>
+  <rect x="600" y="294" width="130" height="2" rx="1" fill="#059669" opacity="0.3"/>
+  <text x="665" y="320" text-anchor="middle" font-size="11.5" fill="#475569">SignSshKey &#8594; SignCert</text>
+  <text x="665" y="344" text-anchor="middle" font-size="11.5" fill="#475569">BeginKeyLoad /</text>
+  <text x="665" y="360" text-anchor="middle" font-size="11.5" fill="#475569">CompleteKeyLoad &#8594; CMS open</text>
+  <text x="665" y="396" text-anchor="middle" font-size="12" font-weight="600" fill="#065f46">CA private key</text>
+  <text x="665" y="413" text-anchor="middle" font-size="11.5" fill="#475569">in process memory only</text>
+
+  <!-- AWS KMS (external) -->
+  <rect x="864" y="150" width="152" height="112" rx="12" fill="#fff" stroke="#7c3aed" stroke-width="1.5" filter="url(#s)"/>
+  <text x="940" y="186" text-anchor="middle" font-weight="700" font-size="14" fill="#5b21b6">AWS KMS</text>
+  <text x="940" y="208" text-anchor="middle" font-size="10.5" fill="#64748b">attested Decrypt</text>
+  <text x="940" y="224" text-anchor="middle" font-size="10.5" fill="#64748b">&#8594; enclave-only</text>
+  <text x="940" y="240" text-anchor="middle" font-size="10.5" fill="#64748b">ciphertext</text>
+
+  <!-- (1) client -> api -->
+  <line x1="180" y1="328" x2="238" y2="328" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+  <rect x="183" y="306" width="58" height="17" rx="4" fill="#dbeafe"/>
+  <text x="212" y="319" text-anchor="middle" font-size="9.5" font-weight="600" fill="#1d4ed8">HTTPS+SPNEGO</text>
+  <circle cx="190" cy="328" r="9" fill="#2563eb"/><text x="190" y="332" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">1</text>
+
+  <!-- (5) api -> client (cert) -->
+  <line x1="238" y1="392" x2="180" y2="392" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="209" y="385" text-anchor="middle" font-size="9.5" fill="#64748b">signed cert</text>
+  <circle cx="190" cy="392" r="9" fill="#64748b"/><text x="190" y="396" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">5</text>
+
+  <!-- (3) api -> signer VSOCK -->
+  <line x1="492" y1="322" x2="556" y2="322" stroke="#059669" stroke-width="1.6" marker-end="url(#ag)"/>
+  <rect x="496" y="300" width="58" height="17" rx="4" fill="#d1fae5"/>
+  <text x="525" y="313" text-anchor="middle" font-size="9.5" font-weight="600" fill="#047857">VSOCK :5000</text>
+  <circle cx="503" cy="322" r="9" fill="#059669"/><text x="503" y="326" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">3</text>
+
+  <!-- (4) signer -> api (cert) -->
+  <line x1="556" y1="360" x2="492" y2="360" stroke="#475569" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="524" y="376" text-anchor="middle" font-size="9.5" fill="#64748b">signed cert</text>
+  <circle cx="503" cy="360" r="9" fill="#64748b"/><text x="503" y="364" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">4</text>
+
+  <!-- (6) api -> KMS (startup attested decrypt), routed high to avoid the enclave -->
+  <polyline points="432,250 432,132 940,132 940,148" fill="none" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ak)"/>
+  <rect x="470" y="122" width="330" height="18" rx="4" fill="#fef3c7"/>
+  <text x="635" y="135" text-anchor="middle" font-size="10" font-weight="600" fill="#92400e">&#9317; startup: kms.Decrypt(Recipient = attestation doc)</text>
+  <circle cx="432" cy="250" r="9" fill="#b45309"/><text x="432" y="254" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">6</text>
+
+  <!-- (7) KMS -> enclave (CiphertextForRecipient), relayed by host -->
+  <polyline points="864,224 800,224 800,250" fill="none" stroke="#b45309" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ak)"/>
+  <rect x="612" y="214" width="250" height="18" rx="4" fill="#fef3c7"/>
+  <text x="737" y="227" text-anchor="middle" font-size="10" font-weight="600" fill="#92400e">&#9318; CiphertextForRecipient (enclave-only)</text>
+  <circle cx="800" cy="250" r="9" fill="#b45309"/><text x="800" y="254" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">7</text>
+
+  <!-- (8) unauthenticated network -> health/metrics -->
+  <line x1="367" y1="626" x2="367" y2="596" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ar)"/>
+  <text x="383" y="619" font-size="10" fill="#dc2626">unauthenticated network (LB / Prometheus / any client)</text>
+  <circle cx="367" cy="612" r="9" fill="#dc2626"/><text x="367" y="616" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">8</text>
+
+  <!-- Legend -->
+  <rect x="24" y="452" width="156" height="150" rx="10" fill="#fff" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="36" y="472" font-size="11" font-weight="700" fill="#334155">Legend</text>
+  <line x1="36" y1="488" x2="58" y2="488" stroke="#475569" stroke-width="1.6"/><text x="64" y="491" font-size="10" fill="#475569">Request flow</text>
+  <line x1="36" y1="506" x2="58" y2="506" stroke="#059669" stroke-width="1.6"/><text x="64" y="509" font-size="10" fill="#475569">VSOCK (host&#8596;enclave)</text>
+  <line x1="36" y1="524" x2="58" y2="524" stroke="#b45309" stroke-width="1.6" stroke-dasharray="5 3"/><text x="64" y="527" font-size="10" fill="#475569">KMS decrypt (startup)</text>
+  <line x1="36" y1="542" x2="58" y2="542" stroke="#dc2626" stroke-width="1.6" stroke-dasharray="5 3"/><text x="64" y="545" font-size="10" fill="#475569">Unauthenticated</text>
+  <rect x="36" y="555" width="22" height="12" rx="3" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.3" stroke-dasharray="4 2"/><text x="64" y="565" font-size="10" fill="#475569">Semi-trusted</text>
+  <rect x="36" y="573" width="22" height="12" rx="3" fill="#ecfdf5" stroke="#10b981" stroke-width="1.3" stroke-dasharray="4 2"/><text x="64" y="583" font-size="10" fill="#475569">Trusted (TCB)</text>
+</svg>

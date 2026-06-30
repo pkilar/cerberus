@@ -26,6 +26,10 @@ type Signer interface {
 	SignPublicKey(ctx context.Context, req *messages.EnclaveSigningRequest) (string, error)
 	Ping(ctx context.Context) (*messages.PingResponse, error)
 	GetEnclaveMetrics(ctx context.Context) (*messages.EnclaveMetricsResponse, error)
+	// BeginKeyLoad and CompleteKeyLoad drive the host-mediated CA-key load at
+	// startup; see internal/keyload.
+	BeginKeyLoad(ctx context.Context, req *messages.BeginKeyLoadRequest) (*messages.BeginKeyLoadResponse, error)
+	CompleteKeyLoad(ctx context.Context, req *messages.CompleteKeyLoadRequest) (*messages.CompleteKeyLoadResponse, error)
 	Close() error
 }
 
@@ -102,11 +106,13 @@ func roundTrip(ctx context.Context, conn net.Conn, request messages.Request, res
 	if err != nil {
 		return fmt.Errorf("failed to read response from enclave: %w", err)
 	}
-	logging.DebugContext(ctx, "Received response from enclave: %s", string(responseBytes))
-
 	if err := json.Unmarshal(responseBytes, response); err != nil {
+		// Don't log the raw bytes: a BeginKeyLoad response carries the (encrypted)
+		// CA key, which must never reach logs even on a parse error.
+		logging.DebugContext(ctx, "Received unparseable response from enclave (%d bytes): %v", len(responseBytes), err)
 		return fmt.Errorf("failed to unmarshal response: %w", err)
 	}
+	logging.DebugContext(ctx, "Received response from enclave: %s", messages.RedactedResponseJSON(*response))
 	return nil
 }
 
@@ -169,4 +175,38 @@ func (vsockSigner) SignPublicKey(ctx context.Context, req *messages.EnclaveSigni
 	}
 
 	return "", fmt.Errorf("no signed key in response")
+}
+
+// BeginKeyLoad asks the enclave to start loading the CA key. In production the
+// reply carries an attestation document + the KMS-encrypted CA key for the host
+// to decrypt; in development the enclave reports Loaded=true having decrypted
+// the key itself.
+func (vsockSigner) BeginKeyLoad(ctx context.Context, req *messages.BeginKeyLoadRequest) (*messages.BeginKeyLoadResponse, error) {
+	var response messages.Response
+	if err := Call(ctx, constants.EnclaveCID, messages.Request{BeginKeyLoad: req}, &response); err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, fmt.Errorf("enclave error: %s", *response.Error)
+	}
+	if response.BeginKeyLoad == nil {
+		return nil, fmt.Errorf("no beginKeyLoad in response")
+	}
+	return response.BeginKeyLoad, nil
+}
+
+// CompleteKeyLoad returns the KMS CiphertextForRecipient to the enclave, which
+// decrypts it inside and installs the CA signer.
+func (vsockSigner) CompleteKeyLoad(ctx context.Context, req *messages.CompleteKeyLoadRequest) (*messages.CompleteKeyLoadResponse, error) {
+	var response messages.Response
+	if err := Call(ctx, constants.EnclaveCID, messages.Request{CompleteKeyLoad: req}, &response); err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, fmt.Errorf("enclave error: %s", *response.Error)
+	}
+	if response.CompleteKeyLoad == nil {
+		return nil, fmt.Errorf("no completeKeyLoad in response")
+	}
+	return response.CompleteKeyLoad, nil
 }

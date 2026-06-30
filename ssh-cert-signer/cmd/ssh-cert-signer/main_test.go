@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -396,27 +397,27 @@ func TestCASignerAtomicSwapUnderLoad(t *testing.T) {
 
 // TestProcessRequest_RejectsAmbiguousVariants verifies that processRequest
 // refuses a Request payload with more than one variant set (PR #35). The
-// wire-protocol contract says exactly one of LoadKeySigner / SignSshKey /
-// Ping is non-nil; a malicious or buggy host that sets two must not have
-// one operation silently picked while the other is "smuggled".
+// wire-protocol contract says exactly one of BeginKeyLoad / CompleteKeyLoad /
+// SignSshKey / Ping is non-nil; a malicious or buggy host that sets two must
+// not have one operation silently picked while the other is "smuggled".
 func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
 	cases := []messages.Request{
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			SignSshKey:    &messages.EnclaveSigningRequest{},
+			BeginKeyLoad: &messages.BeginKeyLoadRequest{},
+			SignSshKey:   &messages.EnclaveSigningRequest{},
 		},
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			Ping:          &messages.PingRequest{},
+			CompleteKeyLoad: &messages.CompleteKeyLoadRequest{},
+			Ping:            &messages.PingRequest{},
 		},
 		{
 			SignSshKey: &messages.EnclaveSigningRequest{},
 			Ping:       &messages.PingRequest{},
 		},
 		{
-			LoadKeySigner: &messages.LoadKeySignerRequest{},
-			SignSshKey:    &messages.EnclaveSigningRequest{},
-			Ping:          &messages.PingRequest{},
+			BeginKeyLoad: &messages.BeginKeyLoadRequest{},
+			SignSshKey:   &messages.EnclaveSigningRequest{},
+			Ping:         &messages.PingRequest{},
 		},
 	}
 	for i, req := range cases {
@@ -433,16 +434,15 @@ func TestProcessRequest_RejectsAmbiguousVariants(t *testing.T) {
 				t.Errorf("expected 'multiple request variants' in error, got: %s", *resp.Error)
 			}
 			// Belt-and-braces: no variant of the response should be set.
-			if resp.LoadKeySigner != nil || resp.SignSshKey != nil || resp.Pong != nil {
+			if resp.BeginKeyLoad != nil || resp.SignSshKey != nil || resp.Pong != nil {
 				t.Errorf("ambiguous request must not be dispatched; got resp=%+v", resp)
 			}
 		})
 	}
 }
 
-// TestProcessRequest_PingNoSigner verifies that Ping works before any
-// LoadKeySigner has been called — /health depends on this being cheap and
-// non-failing.
+// TestProcessRequest_PingNoSigner verifies that Ping works before the CA key
+// has been loaded — /health depends on this being cheap and non-failing.
 func TestProcessRequest_PingNoSigner(t *testing.T) {
 	// Force caSigner to its zero state.
 	var zero *ssh.Signer
@@ -530,5 +530,290 @@ func TestSignPublicKey_NilSigner(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "CA signer is not initialized") {
 		t.Errorf("expected 'CA signer is not initialized' error, got: %v", err)
+	}
+}
+
+// reset returns the gate to its initial (unarmed) state between tests. Defined
+// here because it's test-only; the gate type and its production methods live in
+// main.go.
+func (g *keyLoadGate) reset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.armed = false
+}
+
+// resetCASigner clears the package caSigner pointer (which the gate's identity
+// check reads) and restores it on cleanup, so gate/handler tests don't leak load
+// state into each other.
+func resetCASigner(t *testing.T) {
+	t.Helper()
+	var zero *ssh.Signer
+	caSigner.Store(zero)
+	t.Cleanup(func() { caSigner.Store(zero) })
+}
+
+// TestKeyLoadGate_CompleteWithoutBegin asserts the core adversarial property:
+// a CompleteKeyLoad with no preceding BeginKeyLoad is refused and the install
+// (the CMS decrypt + signer parse) never runs. This is the host-mediated
+// protocol's load-injection guard — KMS recipient attestation proves the
+// envelope is for this enclave, not that the host followed the handshake.
+func TestKeyLoadGate_CompleteWithoutBegin(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+
+	_, err := g.completeLoad(func() (ssh.Signer, error) {
+		t.Fatal("install must not run when no BeginKeyLoad armed the load")
+		return nil, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "without a preceding BeginKeyLoad") {
+		t.Fatalf("want 'without a preceding BeginKeyLoad' refusal, got %v", err)
+	}
+	if caSigner.Load() != nil {
+		t.Error("no signer should be installed after a refused CompleteKeyLoad")
+	}
+}
+
+// TestKeyLoadGate_CompleteRefusesDifferentKeyAfterLoad is the swap-attack guard:
+// once a signer is installed, a CompleteKeyLoad that decrypts to a DIFFERENT key
+// is refused and the live CA is untouched — even though a BeginKeyLoad re-armed
+// the load (so the host followed the handshake).
+func TestKeyLoadGate_CompleteRefusesDifferentKeyAfterLoad(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+	first := freshTestSigner(t)
+
+	g.arm()
+	if _, err := g.completeLoad(func() (ssh.Signer, error) { return first, nil }); err != nil {
+		t.Fatalf("first completeLoad: %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
+		t.Fatalf("first signer was not installed")
+	}
+
+	// A second handshake that decrypts to a different key is a host-driven swap.
+	second := freshTestSigner(t)
+	g.arm()
+	_, err := g.completeLoad(func() (ssh.Signer, error) { return second, nil })
+	if err == nil || !strings.Contains(err.Error(), "different key") {
+		t.Fatalf("want different-key swap refusal, got %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
+		t.Error("a refused swap must leave the original CA signer installed")
+	}
+}
+
+// TestKeyLoadGate_CompleteIdempotentReloadSameKey is the regression guard for the
+// decoupled host/enclave lifecycle: the host re-drives Begin→Complete on every
+// restart while the enclave keeps the key loaded, so a re-load of the SAME key
+// must succeed (else the API would wedge in a restart loop).
+func TestKeyLoadGate_CompleteIdempotentReloadSameKey(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+	ca := freshTestSigner(t)
+
+	g.arm()
+	if _, err := g.completeLoad(func() (ssh.Signer, error) { return ca, nil }); err != nil {
+		t.Fatalf("first completeLoad: %v", err)
+	}
+
+	// Host restart: re-arm, re-complete with the same key — idempotent success.
+	g.arm()
+	reloadRan := false
+	if _, err := g.completeLoad(func() (ssh.Signer, error) {
+		reloadRan = true
+		return ca, nil
+	}); err != nil {
+		t.Fatalf("idempotent re-completeLoad of the same key should succeed, got %v", err)
+	}
+	if !reloadRan {
+		t.Error("install should run on re-load — the gate compares the decrypted key")
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, ca) {
+		t.Error("idempotent re-load must keep the same CA signer installed")
+	}
+}
+
+// TestKeyLoadGate_LoadDirect covers the development path's loadDirect: first
+// install, idempotent same-key re-load (dev host restart), and different-key
+// refusal. Without this, the loadDirect guard — one of the two production entry
+// points that install caSigner — would be entirely untested.
+func TestKeyLoadGate_LoadDirect(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+	first := freshTestSigner(t)
+
+	if err := g.loadDirect(first); err != nil {
+		t.Fatalf("first loadDirect: %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
+		t.Fatal("loadDirect did not install the signer")
+	}
+
+	// Re-loading the same key is idempotent.
+	if err := g.loadDirect(first); err != nil {
+		t.Errorf("idempotent re-loadDirect of the same key should succeed, got %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
+		t.Error("idempotent loadDirect must keep the installed signer")
+	}
+
+	// Re-loading a different key is refused; the installed signer is untouched.
+	second := freshTestSigner(t)
+	if err := g.loadDirect(second); err == nil || !strings.Contains(err.Error(), "different CA key") {
+		t.Fatalf("want different-key refusal, got %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, first) {
+		t.Error("a refused loadDirect must leave the original signer installed")
+	}
+}
+
+// TestKeyLoadGate_FailedCompleteStaysArmed verifies a transient install failure
+// (e.g. a dropped KMS relay) leaves the load armed so the host can retry
+// CompleteKeyLoad without re-driving BeginKeyLoad.
+func TestKeyLoadGate_FailedCompleteStaysArmed(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+	g.arm()
+	if _, err := g.completeLoad(func() (ssh.Signer, error) {
+		return nil, fmt.Errorf("transient relay failure")
+	}); err == nil {
+		t.Fatal("want install error to propagate")
+	}
+	if caSigner.Load() != nil {
+		t.Fatal("failed install must not install a signer")
+	}
+	// Retry succeeds without a new arm.
+	want := freshTestSigner(t)
+	if _, err := g.completeLoad(func() (ssh.Signer, error) { return want, nil }); err != nil {
+		t.Fatalf("retry completeLoad should succeed while still armed, got %v", err)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, want) {
+		t.Error("retry should install the signer")
+	}
+}
+
+// TestKeyLoadGate_ConcurrentCompleteInstallsOnce hammers completeLoad from many
+// goroutines against a single armed load and asserts exactly one install runs
+// and succeeds. With -race this also guards the gate's serialization.
+func TestKeyLoadGate_ConcurrentCompleteInstallsOnce(t *testing.T) {
+	resetCASigner(t)
+	var g keyLoadGate
+	g.arm()
+
+	const n = 16
+	signers := make([]ssh.Signer, n)
+	for i := range signers {
+		signers[i] = freshTestSigner(t)
+	}
+	var installCount, okCount atomic.Int32
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			if _, err := g.completeLoad(func() (ssh.Signer, error) {
+				installCount.Add(1)
+				return signers[i], nil
+			}); err == nil {
+				okCount.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+
+	if okCount.Load() != 1 {
+		t.Errorf("exactly one completeLoad should succeed, got %d", okCount.Load())
+	}
+	if installCount.Load() != 1 {
+		t.Errorf("install should run exactly once, got %d", installCount.Load())
+	}
+	if caSigner.Load() == nil {
+		t.Error("a signer should be installed after the race")
+	}
+}
+
+// TestProcessRequest_CompleteWithoutBegin wires the gate through the real
+// dispatch path: a CompleteKeyLoad arriving cold (no BeginKeyLoad) is refused by
+// the handshake guard, not dispatched into the attestation/decrypt path.
+func TestProcessRequest_CompleteWithoutBegin(t *testing.T) {
+	resetCASigner(t)
+	gate.reset()
+	t.Cleanup(gate.reset)
+
+	body, err := json.Marshal(messages.Request{CompleteKeyLoad: &messages.CompleteKeyLoadRequest{
+		CiphertextForRecipient: []byte("attacker-supplied-envelope"),
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp := processRequest(t.Context(), body)
+	if resp.Error == nil {
+		t.Fatalf("want error response, got %+v", resp)
+	}
+	if !strings.Contains(*resp.Error, "without a preceding BeginKeyLoad") {
+		t.Errorf("want handshake refusal, got %q", *resp.Error)
+	}
+	if caSigner.Load() != nil {
+		t.Error("no signer should be installed")
+	}
+}
+
+// TestProcessRequest_ColdCompleteDoesNotDisturbLoadedSigner wires a cold
+// CompleteKeyLoad (no preceding BeginKeyLoad) against an already-installed CA
+// through dispatch: it is refused by the handshake guard and the live CA is
+// untouched. (The swap-with-a-valid-key property is proven at the gate level by
+// TestKeyLoadGate_CompleteRefusesDifferentKeyAfterLoad, which uses a real
+// install func — that path needs an attestation provider the dispatch test lacks.)
+func TestProcessRequest_ColdCompleteDoesNotDisturbLoadedSigner(t *testing.T) {
+	resetCASigner(t)
+	gate.reset()
+	t.Cleanup(gate.reset)
+
+	loaded := freshTestSigner(t)
+	caSigner.Store(&loaded)
+
+	body, err := json.Marshal(messages.Request{CompleteKeyLoad: &messages.CompleteKeyLoadRequest{
+		CiphertextForRecipient: []byte("attacker-supplied-envelope"),
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp := processRequest(t.Context(), body)
+	if resp.Error == nil || !strings.Contains(*resp.Error, "without a preceding BeginKeyLoad") {
+		t.Fatalf("want handshake refusal, got %+v", resp)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, loaded) {
+		t.Error("a cold CompleteKeyLoad must not disturb the installed CA signer")
+	}
+}
+
+// TestProcessRequest_BeginAfterLoadReDrivesHandshake is the dispatch-level
+// regression guard for the decoupled host/enclave lifecycle (see workflow
+// finding): with the CA already installed, a BeginKeyLoad must NOT be
+// short-circuited by a gate refusal — that would wedge the host (keyload.Run ->
+// log.Fatalf) in a systemd restart loop on every routine API restart. It must
+// reach the loader; here that fails only because the test env has no key file,
+// proving it was not gate-blocked, and the installed signer is left intact.
+func TestProcessRequest_BeginAfterLoadReDrivesHandshake(t *testing.T) {
+	resetCASigner(t)
+	gate.reset()
+	t.Cleanup(gate.reset)
+	t.Setenv("REQUIRE_ATTESTATION", "false")
+	t.Setenv("CA_KEY_FILE_PATH", "/nonexistent/cerberus-test/ca_key.enc")
+
+	loaded := freshTestSigner(t)
+	caSigner.Store(&loaded)
+
+	body, err := json.Marshal(messages.Request{BeginKeyLoad: &messages.BeginKeyLoadRequest{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp := processRequest(t.Context(), body)
+	if resp.Error == nil {
+		t.Fatalf("want the dev-path file-read error, got %+v", resp)
+	}
+	if !strings.Contains(*resp.Error, "failed to read encrypted key file") {
+		t.Errorf("BeginKeyLoad after load should reach the loader (file error), not a gate refusal; got %q", *resp.Error)
+	}
+	if got := caSigner.Load(); got == nil || !samePublicKey(*got, loaded) {
+		t.Error("BeginKeyLoad after load must not disturb the installed signer")
 	}
 }
