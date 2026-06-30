@@ -4,14 +4,16 @@
 # Path to the authorization config file.
 CONFIG_PATH=/etc/cerberus/config.yaml
 
-# Path to the Kerberos keytab file for SPNEGO authentication.
-KERBEROS_KEYTAB_PATH=/etc/cerberus/krb5.keytab
+# NOTE: the Kerberos keytab path is NOT set here. It is configured via the
+# `keytab_path` field in config.yaml (the binary reads no keytab env var).
 
-# AWS region for KMS operations.
+# AWS region for the host's attested KMS Decrypt during CA-key load.
 AWS_REGION=us-east-1
 
-# VSOCK port for enclave communication (default: 5000).
-# ENCLAVE_VSOCK_PORT=5000
+# Override the signer dial target (default: the compile-time VSOCK CID 16 /
+# port 5000 in constants/). Accepts scheme://addr — e.g. vsock://16:5000,
+# tcp://127.0.0.1:5000, or unix:///run/usbhsm.sock.
+# CERBERUS_SIGNER_ENDPOINT=vsock://16:5000
 
 # Enable debug-level logging (true/false).
 # DEBUG=false
