@@ -72,9 +72,11 @@ You can also enforce multiple PCR values for stricter validation:
 }
 ```
 
-## Defense in depth (optional): pin the CA public key
+## Defense in depth: pin the CA public key
 
-Optionally set `CA_PUBLIC_KEY_PATH` in the signer to a file containing the CA's public key (e.g. `ssh-keygen -y` output / the `.pub`), baked into the enclave image so it is covered by PCR0. When set, the enclave compares the decrypted key's public half to this pin and **refuses to load on mismatch**; when unset it logs `loadkey.ca_pubkey.unpinned` and proceeds. This is optional defense-in-depth against a compromised host substituting a different ciphertext into the host-mediated `Decrypt` — which is only feasible if the CMK grants `kms:Encrypt`. The primary substitution defense is the attestation-conditioned, **Decrypt-only** key policy above: with no `Encrypt` grant the attacker cannot craft a substitute ciphertext, so the pin is belt-and-suspenders rather than required.
+The packaged signer pins the CA public key **by default**: the `Dockerfile` COPYs `ca_key.pub` into the enclave image (so it is covered by PCR0) and sets `CA_PUBLIC_KEY_PATH=/app/ca_key.pub`. On startup the enclave compares the decrypted key's public half to this pin and **refuses to load on mismatch**. The enclave *code* still treats the pin as opt-in — an EIF built without `ca_key.pub` and without the variable logs `loadkey.ca_pubkey.unpinned` and proceeds — so the default is "pinned" without making a missing pin a hard startup failure (which would break already-deployed EIFs on upgrade). To opt out, remove the `ca_key.pub` COPY/ENV from the `Dockerfile`.
+
+The pin defends against a compromised host substituting a *different* ciphertext into the host-mediated **first** `Decrypt` — which is only feasible if the CMK grants `kms:Encrypt` (or via rollback to an old ciphertext that is still decryptable under the CMK). The primary substitution defense is the attestation-conditioned, **Decrypt-only** key policy above: with no `Encrypt` grant the attacker cannot craft a substitute ciphertext, so the pin is belt-and-suspenders rather than required. (Separately, a *post-load* swap — re-driving `CompleteKeyLoad` to replace an already-installed CA — is blocked unconditionally by the enclave's load gate, independent of the pin; see `ssh-cert-signer/cmd/ssh-cert-signer/main.go`.)
 
 ## Development Mode
 

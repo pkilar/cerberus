@@ -70,7 +70,7 @@ pipeline.
 - EC2 instance-role IAM credentials (held by host; used to call `kms.Decrypt`)
 - KMS CMK and its key policy (AWS-side control over who can decrypt the CA key)
 - PCR0/PCR1/PCR2 measurements (commitment to the exact enclave image; pinned by the KMS policy)
-- `CA_PUBLIC_KEY_PATH` pin (opt-in defense against ciphertext substitution; measured into PCR0 when present)
+- `CA_PUBLIC_KEY_PATH` pin (defense against ciphertext substitution; baked into the EIF and measured into PCR0 by default in packaged builds, code-level opt-in)
 - Issued SSH certificates — privilege-bearing artifacts; `ValidPrincipals`, validity window, extensions, critical-options
 - Certificate `KeyId` (Kerberos principal; audit/revocation), serial number, and nonce
 - Kerberos keytab file on disk and in process memory (`ssh-cert-api/internal/auth/kerberos.go:53–81`)
@@ -124,7 +124,8 @@ Recurring **High** themes: (a) the unauthenticated `/health` and `/metrics` endp
 are a DoS surface (`EDGE-4`, `EDGE-5`, `DOS-3`, `LOG-3`) — mitigated only by a network ACL, another deployment
 assumption; (b) availability — slow-loris and enclave 32-connection-slot exhaustion (`EDGE-3`, `DOS-1`, `VSOCK-5`);
 (c) the host-as-adversary VSOCK surface, which is well-contained by the strict CMS parser, request-variant rejection,
-and the opt-in CA-pubkey pin (`VSOCK-2`/`VSOCK-3`, `KMS-2`/`KMS-5`); (d) LDAP transport security (`AUTHZ-7`) and the
+the one-shot load gate that pins the CA identity after first load (`VSOCK-3b`), and the CA-pubkey pin now baked into
+packaged EIFs by default (`VSOCK-2`/`VSOCK-3`, `KMS-2`/`KMS-5`); (d) LDAP transport security (`AUTHZ-7`) and the
 first-alphabetical-group authorization rule (`AUTHZ-1`).
 
 ## 7. Threat register (all 72)
@@ -177,7 +178,7 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `LOG-2` | Medium | 5.4 | I | group_allowed_principals logged at Info level on every successful sign |
 | `SC-3` | Medium | 5.4 | TI | pkilar/nitro-enclaves-sdk-go fork is single-point-of-trust on the attested decrypt path |
 | `SC-8` | Medium | 5.4 | TR | RPM packages are not GPG-signed; no artifact signing pipeline exists |
-| `SC-10` | Medium | 5.4 | TI | CA_PUBLIC_KEY_PATH pin is opt-in and defaults to unpinned with a warn-only log |
+| `SC-10` | Medium | 5.4 | TI | CA_PUBLIC_KEY_PATH pin is baked into packaged EIFs by default but is code-level opt-in; a hand-built or opted-out EIF runs unpinned with a warn-only log |
 | `AUTHZ-3` | Medium | 5.2 | ES | LDAP filter injection via Kerberos principal UID component |
 | `KMS-6` | Medium | 5.2 | I | CA key plaintext retained in memory after parse — insufficient zeroing |
 | `SC-2` | Medium | 5.2 | TE | govulncheck and gosec installed at @latest in CI — build-gating tools can be trojanized |
@@ -328,10 +329,15 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 
 - **Attack:** After receiving a legitimate BeginKeyLoadResponse (which carries the enclave's real attestation document and ciphertext blob), the compromised host calls KMS Decrypt but substitutes the ciphertext blob with one it controls (possible only if the CMK grants kms:Encrypt or if it skips KMS and constructs the CMS envelope directly). It then sends the resulting CiphertextForRecipient — or a wholly crafted byte sequence — to CompleteKeyLoad. The enclave's DecryptCMSEnvelope passes this to the BER parser in the nitro-enclaves-sdk-go cms package, which has a documented panic on adversarial input (off-by-one in the multi-byte-tag loop per attestation.go:119-121).
 - **Existing controls:** Size cap: `if len(data) > maxCMSEnvelopeBytes { return nil, fmt.Errorf(...) }` at attestation.go:112-113 (maxCMSEnvelopeBytes=65536). Panic recovery with structured log at attestation.go:125-132: `defer func() { if r := recover(); r != nil { slog.Error("attestation.cms.parser_panic", ...) } }()`. The recover converts a parser crash to an error, keeping the enclave alive. Fuzz corpus in attestation_test.go:283-300 (FuzzDecryptCMSEnvelope). The primary ciphertext-substitution defense is the KMS key policy denying kms:Encrypt and requiring PCR0 conditions (docs/kms-attestation-policy.md). Secondary defense: CA_PUBLIC_KEY_PATH pin in handlers/load-key-signer.go:178 `bytes.Equal(pinned.Marshal(), signer.PublicKey().Marshal())`.
-- **Residual risk:** If KMS key policy is misconfigured to grant kms:Encrypt (or the host bypasses KMS entirely and crafts raw bytes), the enclave will attempt to parse them. The panic-recover prevents a crash, but a sufficiently malformed envelope causes a controlled decryption failure — the enclave returns an error and the caSigner stays nil (or retains its previous value). If CA_PUBLIC_KEY_PATH is not set (opt-in, only a WARN is logged at handlers/load-key-signer.go:165), a successful substitution would silently load an attacker-controlled CA key. This threat is High when the KMS key policy is misconfigured; Medium in a correctly-deployed system.
+- **Residual risk:** If KMS key policy is misconfigured to grant kms:Encrypt (or the host bypasses KMS entirely and crafts raw bytes), the enclave will attempt to parse them. The panic-recover prevents a crash, but a sufficiently malformed envelope causes a controlled decryption failure — the enclave returns an error and the caSigner stays nil (or retains its previous value). Packaged EIFs now bake the CA_PUBLIC_KEY_PATH pin by default (Dockerfile COPYs ca_key.pub + sets the env), so a substituted-but-valid CA key is caught by the public-key mismatch on a standard build; only a hand-built or deliberately opted-out EIF runs unpinned (a WARN is logged at handlers/load-key-signer.go:165), where a successful substitution would silently load an attacker-controlled CA key. This threat is High when the KMS key policy is misconfigured *and* the EIF is unpinned; Medium in a correctly-deployed, pinned system. (Note: this covers *first-load* substitution; a *post-load* swap is blocked unconditionally by the enclave load gate — see `VSOCK-3b`.)
 - **DREAD:** Damage 10 · Reproducibility 3 · Exploitability 4 · Affected 10 · Discoverability 5
 
-#### `VSOCK-8` — CERBERUS_SIGNER_ENDPOINT env var redirects host signing calls to an attacker-controlled TCP/Unix socket, bypassing the real enclave
+#### `VSOCK-3b` — Host replaces an already-loaded CA via a repeated CompleteKeyLoad (post-load swap), or injects one via a CompleteKeyLoad with no preceding BeginKeyLoad
+**Low (mitigated)** · STRIDE: Tampering, ElevationOfPrivilege
+
+- **Attack:** Independent of first-load substitution (`VSOCK-3`), a compromised host could — under the prior code — send a `CompleteKeyLoad` at any time and have the enclave overwrite the live `caSigner`: either a `CompleteKeyLoad` with no preceding `BeginKeyLoad`, or a repeated `CompleteKeyLoad` carrying a different (e.g. rolled-back) CA key after a good one was installed.
+- **Existing controls:** The enclave load gate (`ssh-cert-signer/cmd/ssh-cert-signer/main.go`) pins the CA identity on first load: a `CompleteKeyLoad` with no armed `BeginKeyLoad` is refused before any decrypt; once a signer is installed, a re-load of the **same** public key is idempotent (so the decoupled host can re-drive the handshake on a routine restart) and a **different** key is refused — the live CA never changes after first load. Both writers run under the gate mutex, so concurrent `CompleteKeyLoad`s install exactly once. Tests: `TestKeyLoadGate_CompleteWithoutBegin`, `TestKeyLoadGate_CompleteRefusesDifferentKeyAfterLoad`, `TestKeyLoadGate_ConcurrentCompleteInstallsOnce`.
+- **Residual risk:** Negligible for the swap/injection vector itself. First-load substitution is out of scope here (covered by `VSOCK-3` + the pin). A compromised host can still deny service by refusing to cooperate or by forcing a different-key refusal (the secure failure), but cannot install or swap to a CA of its choosing post-load.
 **High** · DREAD 6.4 · STRIDE: Spoofing, ElevationOfPrivilege
 
 - **Attack:** If a host-level attacker (or misconfiguration) sets CERBERUS_SIGNER_ENDPOINT=tcp://127.0.0.1:5000, the dialSigner function at endpoint.go:38-71 bypasses vsock.Dial and connects to a local TCP socket. An attacker who can write to the host's environment or systemd unit file can point the API at a fake signer that returns fabricated signed certificates, impersonating the real enclave without needing to break the Nitro isolation boundary. The fake signer can respond to BeginKeyLoad with Loaded:true to skip the KMS handshake entirely, and then sign arbitrary SSH certificates on demand.
@@ -486,7 +492,7 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 | `LOG-2` | Medium | 5.4 | I | group_allowed_principals logged at Info on every successful sign | Intentional audit field `server.go:309` (CLAUDE.md-documented) so operators can audit dynamic group assignment |
 | `SC-3` | Medium | 5.4 | TI | pkilar/nitro-enclaves-sdk-go fork is single-point-of-trust on the decrypt path | Exact-hash pin in `ssh-cert-signer/go.sum` (`v1.1.0 h1:...`); fuzz coverage on the CMS path |
 | `SC-8` | Medium | 5.4 | TR | RPM packages are not GPG-signed; no artifact signing pipeline | Files installed at fixed modes (`cerberus.spec:110-111`); no `%gpg_sign` — relies on a trusted distribution channel |
-| `SC-10` | Medium | 5.4 | TI | CA_PUBLIC_KEY_PATH pin is opt-in, defaults to unpinned warn-only | `loadkey.ca_pubkey.unpinned` WARN `load-key-signer.go:164-166` makes the missing pin visible; documented |
+| `SC-10` | Medium | 5.4 | TI | CA_PUBLIC_KEY_PATH pin baked into packaged EIFs by default, code-level opt-in (a hand-built/opted-out EIF runs unpinned) | Dockerfile COPYs `ca_key.pub` + sets `CA_PUBLIC_KEY_PATH`; `loadkey.ca_pubkey.unpinned` WARN `load-key-signer.go:164-166` makes a missing pin visible; documented |
 | `AUTHZ-3` | Medium | 5.2 | ES | LDAP filter injection via Kerberos principal UID | `ldap.EscapeFilter(shortUID)` (RFC 4515) `filter.go:47`; `ValidFilterTemplate` checks at config load |
 | `KMS-6` | Medium | 5.2 | I | CA key plaintext retained in memory after parse — incomplete zeroing | `defer clear(plaintextKey)` `load-key-signer.go:99`; same in `decryptDirect`; Go strings immutable so SDK copies may linger |
 | `SC-2` | Medium | 5.2 | TE | govulncheck/gosec at @latest in CI — gating tools trojanizable | golangci-lint pinned `golangci/golangci-lint-action@v9` (`version: v2.12.2`); Dependabot tracks updates |
@@ -522,7 +528,8 @@ from what the operator MUST provide; the deployment column is where most residua
 |---|---|---|---|
 | CA-key confidentiality vs. compromised host | Response bound to enclave attestation key (`CiphertextForRecipient`) | **KMS key policy: attestation-conditioned, Decrypt-only, no unconditioned Decrypt, no Encrypt** | KMS-1, KMS-2, SC-4 |
 | Which enclave image may decrypt | Attestation doc carries PCR measurements | **PCR0 pinned in KMS policy; refreshed on every EIF rebuild** | KMS-3, KMS-7, SC-1, SC-5 |
-| Ciphertext substitution | Opt-in CA-pubkey pin (`CA_PUBLIC_KEY_PATH`); refuses on mismatch | Bake `ca_key.pub` into the EIF + set the env var (opt-in); Decrypt-only policy is the primary control | KMS-2, SC-10 |
+| Ciphertext substitution (first load) | CA-pubkey pin (`CA_PUBLIC_KEY_PATH`), baked into packaged EIFs by default; refuses on mismatch | Decrypt-only policy is the primary control; pin is defense-in-depth (code-level opt-out by removing the Dockerfile COPY/ENV) | KMS-2, SC-10 |
+| CA swap after load | One-shot load gate pins the CA identity on first load; idempotent same-key reload, refuses a different key | Unconditional (independent of the pin); see `main.go` keyLoadGate | VSOCK-3b |
 | `/metrics` & `/health` exposure | Unauthenticated by design | **Network ACL restricting to LB/Prometheus** | EDGE-4, EDGE-5, DOS-3, LOG-3 |
 | Replay protection | In-process gokrb5 replay cache | NTP sync within the clock-skew window; minimize restarts | EDGE-1 |
 | Keytab / TLS key secrecy | Startup permission check (0600/0400) | Filesystem perms after startup; rotation requires restart | EDGE-2 |
@@ -565,7 +572,7 @@ load-bearing — see §10.
 - The Nitro Enclave itself is not compromised; the threat actor is the EC2 host OS and the `ssh-cert-api` process.
 - **The KMS key policy enforces `kms:RecipientAttestation` (PCR0) conditions so a non-attested `Decrypt` by the host is denied** — a documented prerequisite (`docs/kms-attestation-policy.md`), an operator responsibility, not code-enforced.
 - The EC2 instance role has `kms:Decrypt` but **not** `kms:Encrypt` on the CA CMK; without `kms:Encrypt` a compromised host cannot craft an alternative ciphertext (bounds `KMS-2`).
-- `CA_PUBLIC_KEY_PATH` is opt-in; absent it, only the KMS key policy prevents ciphertext substitution.
+- `CA_PUBLIC_KEY_PATH` is baked into packaged EIFs by default (code-level opt-out); on a pinned EIF the pin and the KMS key policy independently prevent first-load ciphertext substitution, and the load gate prevents post-load CA swaps regardless of the pin. On a hand-built/opted-out (unpinned) EIF, only the KMS key policy prevents first-load substitution.
 - The enclave binary/deps are compiled into a PCR0-measured EIF; code inside the enclave is trusted; the EIF is rebuilt and PCR values updated in the policy after every deployment.
 - `REQUIRE_ATTESTATION` is set by the (trusted) `run-enclave` command; a host that controls the launch command controls this flag (`KMS-4`).
 - VSOCK (CID 3→16, port 5000) is reachable only from the parent EC2 instance; no external path dials the enclave directly.

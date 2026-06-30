@@ -11,9 +11,12 @@ GOTEST=$(GOCMD) test
 # system's PATH. python3 parses the build-enclave JSON output to emit the
 # PCR manifest used to pin the KMS attestation policy.
 #
-# The eif-* targets also require 'ca_key.enc' to be present in this directory
-# (the docker build context) before invocation, since the Dockerfile COPYs it
-# into the image. Use `make encrypt-ca-key KMS_KEY_ARN=...` to create it.
+# The eif-* targets require both 'ca_key.enc' and 'ca_key.pub' to be present in
+# this directory (the docker build context) before invocation, since the
+# Dockerfile COPYs both into the image: ca_key.enc is the KMS-encrypted CA key,
+# and ca_key.pub is baked in as the CA_PUBLIC_KEY_PATH integrity pin. Both are
+# produced by `make encrypt-ca-key KMS_KEY_ARN=...`. To build an EIF without the
+# pin, remove the ca_key.pub COPY/ENV from the Dockerfile.
 NITRO_CLI=nitro-cli
 
 # Output names for the binary and the final Enclave Image File
@@ -40,7 +43,14 @@ build:
 # The --docker-dir specifies the context for the Docker build.
 eif: eif-amd64 eif-arm64
 
-eif-amd64: build
+# Verify the CA key material the Dockerfile bakes into the EIF is present, with
+# an actionable message, instead of failing deep inside `docker buildx` on a
+# missing COPY source.
+require-ca-files:
+	@test -f ca_key.enc || { echo "ERROR: ca_key.enc not found in $(CURDIR). Run 'make encrypt-ca-key KMS_KEY_ARN=...' first."; exit 1; }
+	@test -f ca_key.pub || { echo "ERROR: ca_key.pub not found in $(CURDIR). It is baked into the EIF as the CA_PUBLIC_KEY_PATH pin; keep the ca_key.pub from 'make encrypt-ca-key', or remove the ca_key.pub COPY/ENV from the Dockerfile to build without the pin."; exit 1; }
+
+eif-amd64: build require-ca-files
 	@echo "Building AMD64 Enclave Image File ($(EIF_NAME_AMD64))..."
 	docker buildx build --platform linux/amd64 --build-arg TARGETARCH=amd64 -t ssh-cert-signer:amd64 .
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:amd64 --output-file $(EIF_NAME_AMD64) | tee /dev/stderr | \
@@ -50,7 +60,7 @@ eif-amd64: build
 	@echo "Successfully created $(EIF_NAME_AMD64)."
 	@if [ -f pcr-manifest-amd64.json ]; then echo "PCR manifest: pcr-manifest-amd64.json"; cat pcr-manifest-amd64.json; fi
 
-eif-arm64: build
+eif-arm64: build require-ca-files
 	@echo "Building ARM64 Enclave Image File ($(EIF_NAME_ARM64))..."
 	docker buildx build --platform linux/arm64 --build-arg TARGETARCH=arm64 -t ssh-cert-signer:arm64 .
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:arm64 --output-file $(EIF_NAME_ARM64) | tee /dev/stderr | \
@@ -92,7 +102,8 @@ encrypt-ca-key:
 	@echo "Removing unencrypted CA private key..."
 	rm -f ca_key
 	@echo "Encrypted CA key saved to ca_key.enc"
-	@echo "Public key saved to ca_key.pub (keep this for SSH certificate validation)"
+	@echo "Public key saved to ca_key.pub — keep this: it is distributed to SSH servers"
+	@echo "  for certificate validation AND baked into the EIF as the CA_PUBLIC_KEY_PATH pin."
 
 # Clean all build artifacts and generated keys
 clean:
@@ -101,5 +112,5 @@ clean:
 	$(GOCLEAN)
 
 # Ensure targets are always run
-.PHONY: all build eif eif-amd64 eif-arm64 test test-coverage clean encrypt-ca-key
+.PHONY: all build eif eif-amd64 eif-arm64 require-ca-files test test-coverage clean encrypt-ca-key
 

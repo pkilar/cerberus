@@ -138,7 +138,7 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 | Variable              | Default                       | Description                                                                                                                                                                                                         |
 | --------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CA_KEY_FILE_PATH`    | `/app/ca_key.enc`             | Path to KMS-encrypted CA private key (non-secret ciphertext baked into the EIF)                                                                                                                                    |
-| `CA_PUBLIC_KEY_PATH`  | —                             | Optional. Path to the CA public key (baked into the EIF alongside the ciphertext). When set, the enclave verifies the decrypted CA key's public half against it and refuses on mismatch — opt-in defense-in-depth on top of the KMS key policy. Unset logs `loadkey.ca_pubkey.unpinned` at WARN and proceeds. |
+| `CA_PUBLIC_KEY_PATH`  | `/app/ca_key.pub` (set in the EIF) | Path to the CA public key, baked into the EIF alongside the ciphertext and covered by PCR0. The packaged `Dockerfile` COPYs `ca_key.pub` and sets this variable, so the pin is **active by default** in packaged builds: the enclave verifies the decrypted CA key's public half against it and refuses on mismatch (defense-in-depth on top of the KMS key policy). The enclave code itself still treats the pin as opt-in — an EIF built without `ca_key.pub` and without this variable logs `loadkey.ca_pubkey.unpinned` at WARN and proceeds. To opt out, remove the `ca_key.pub` COPY/ENV from the `Dockerfile`. |
 | `AWS_REGION`          | `us-east-1`                   | AWS region for KMS operations (used by the **host** when it calls `kms:Decrypt` on behalf of the enclave)                                                                                                          |
 | `REQUIRE_ATTESTATION` | `true` when `/dev/nsm` exists | If `true`, the signer generates an NSM attestation document for the host-mediated KMS Decrypt flow. Set to `false` only for local development without a Nitro device — never in production. Accepts `true/1/yes` or `false/0/no` (case-insensitive); when **unset** it auto-detects `/dev/nsm`. Any other value (a typo, or an explicitly empty string) is rejected at startup so a misconfiguration fails closed instead of silently disabling attestation. |
 | `LOG_FORMAT`          | `text`                        | `json` emits structured slog JSON; anything else emits text                                                                                                                                                         |
@@ -640,7 +640,7 @@ Signing failed: <error details>
 
 ### Rotating the CA Key
 
-Because `ca_key.enc` is baked into the EIF at Docker build time (the signer Dockerfile `COPY`s it into the image), CA-key rotation **always requires rebuilding the EIF**. This in turn changes PCR0, so attestation-based KMS policies must be updated before the new enclave can decrypt.
+Because `ca_key.enc` (and `ca_key.pub`, the integrity pin) are baked into the EIF at Docker build time (the signer Dockerfile `COPY`s both into the image), CA-key rotation **always requires rebuilding the EIF**. This in turn changes PCR0, so attestation-based KMS policies must be updated before the new enclave can decrypt.
 
 1. Generate a new SSH CA key pair:
    ```bash
@@ -657,9 +657,9 @@ Because `ca_key.enc` is baked into the EIF at Docker build time (the signer Dock
    ```bash
    shred -u ca_key
    ```
-4. Place the encrypted key into the build context and rebuild the EIF:
+4. Place the encrypted key **and the public key** into the build context and rebuild the EIF. The Dockerfile bakes `ca_key.pub` in as the `CA_PUBLIC_KEY_PATH` pin, so both files must be present (the `eif-*` targets refuse to build otherwise):
    ```bash
-   cp ca_key.enc ssh-cert-signer/
+   cp ca_key.enc ca_key.pub ssh-cert-signer/
    make eif-amd64       # or eif-arm64
    ```
 5. Update the KMS key policy with the new PCR0 from `ssh-cert-signer/pcr-manifest-<arch>.json` if you are using attestation-based conditions. Apply this **before** deploying the new EIF, or the new enclave will fail KMS Decrypt.
@@ -799,8 +799,8 @@ There is no longer a VSOCK KMS proxy. The host calls `kms:Decrypt` directly over
 | `connection refused` on VSOCK                      | Wrong CID or port                                          | Verify CID=16 and port=5000 match between host and enclave                                                                                         |
 | `Failed to load CA key into enclave` at API start  | Host KMS Decrypt failed                                    | Check outbound HTTPS (443) to `kms.<region>.amazonaws.com`; verify the instance role has `kms:Decrypt` with the PCR0-conditioned attestation policy |
 | `KMS AccessDenied` in API logs                     | Instance role lacks `kms:Decrypt` or PCR mismatch         | Confirm the key policy requires `kms:RecipientAttestation:ImageSha384` matching the running EIF's PCR0 (see `pcr-manifest-<arch>.json`); confirm the instance role is the calling principal in the policy |
-| `CA key does not match pinned public key`          | Decrypted key does not match `CA_PUBLIC_KEY_PATH`          | Verify `CA_PUBLIC_KEY_PATH` in `/etc/sysconfig/cerberus-signer` points to the public key that corresponds to the encrypted `CA_KEY_FILE_PATH`      |
-| `loadkey.ca_pubkey.unpinned` WARN in enclave logs | `CA_PUBLIC_KEY_PATH` not set                               | Informational — the CA-key pin is opt-in. To enable it, set `CA_PUBLIC_KEY_PATH` to the EIF-baked CA public key; otherwise the warning is benign.   |
+| `CA key does not match pinned public key`          | Baked `ca_key.pub` does not match the decrypted `ca_key.enc` | The EIF's `ca_key.pub` and `ca_key.enc` are from different keypairs. Rebuild the EIF with a matched pair from a single `make encrypt-ca-key` run (the `CA_PUBLIC_KEY_PATH` pin is baked into the EIF, not host sysconfig). |
+| `loadkey.ca_pubkey.unpinned` WARN in enclave logs | EIF built without `ca_key.pub` / `CA_PUBLIC_KEY_PATH`     | The packaged `Dockerfile` bakes the pin by default, so this should not appear for a standard build. If it does, the EIF was built without `ca_key.pub` (pin disabled) — rebuild with the public key present to enable the pin, or treat as benign if you intentionally opted out. |
 | Intermittent VSOCK failures                        | Resource exhaustion in enclave                             | Check enclave memory allocation (1024 MB minimum recommended)                                                                                      |
 
 ### Network & Connectivity

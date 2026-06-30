@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,8 @@ var (
 	// concurrent handleSignSshKey. atomic.Pointer prevents a data race
 	// between a (re-)load and an in-flight sign on the hot path.
 	caSigner atomic.Pointer[ssh.Signer]
+	// gate enforces the one-shot CA-key load handshake (see keyLoadGate).
+	gate keyLoadGate
 	// attestProvider is initialized in main before any goroutines spawn,
 	// so the goroutine-spawn happens-before edge makes plain access safe.
 	attestProvider *attestation.Provider
@@ -66,6 +69,97 @@ var (
 	// recognized variant set. Named so log parsing can match it.
 	errUnexpectedCommand = errors.New("unexpected command")
 )
+
+// keyLoadGate enforces the integrity of the CA-key load handshake: the installed
+// CA identity is pinned on first load and never changes for the life of the
+// enclave process. A BeginKeyLoad arms an attested load, the matching
+// CompleteKeyLoad installs the signer, and any later load that would install a
+// DIFFERENT key is refused.
+//
+// Crucially, a re-load of the SAME key is accepted idempotently. The enclave
+// (cerberus-signer) and the host (cerberus-api) are separate, decoupled systemd
+// units, and the host re-drives BeginKeyLoad→CompleteKeyLoad on every host-side
+// restart (a routine op for TLS/keytab/config/LDAP changes — see docs/RUNBOOK.md)
+// while the enclave keeps running with the key already installed. Refusing those
+// re-drives would wedge the API in a restart loop; allowing them to swap the key
+// would reopen the attack. Pinning the identity does both: idempotent re-load
+// for the legitimate same-key restart, hard refusal for a host-driven swap.
+//
+// This closes two attacks the host-mediated protocol would otherwise hand a
+// compromised host: a CompleteKeyLoad with no preceding BeginKeyLoad, and a
+// CompleteKeyLoad that swaps the live CA for a host-selected key after one is
+// installed. (KMS recipient attestation authenticates the enclave recipient, not
+// which ciphertext the host chose to decrypt; the optional CA_PUBLIC_KEY_PATH pin
+// — see handlers.parseCASigner — is the control for FIRST-load ciphertext
+// substitution, a separate concern from this gate.)
+//
+// The gate's mutex is taken only on the load handshake; the sign hot path never
+// touches it — it reads caSigner (an atomic.Pointer) locklessly.
+type keyLoadGate struct {
+	mu    sync.Mutex
+	armed bool // a BeginKeyLoad armed an attested load awaiting CompleteKeyLoad
+}
+
+// arm records that an attested BeginKeyLoad was issued and a CompleteKeyLoad is
+// expected. Always serviceable: the host must be able to (re-)drive the
+// handshake at any time; CompleteKeyLoad is where a key swap is actually blocked.
+func (g *keyLoadGate) arm() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.armed = true
+}
+
+// loadDirect installs a signer the enclave decrypted itself (development path,
+// no host round-trip). Idempotent if the same key is already installed; refused
+// if a different key is installed.
+func (g *keyLoadGate) loadDirect(signer ssh.Signer) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.armed = false
+	if cur := caSigner.Load(); cur != nil {
+		if !samePublicKey(*cur, signer) {
+			return errors.New("BeginKeyLoad decrypted a different CA key than the one already loaded; refusing")
+		}
+		return nil // same key already installed — idempotent
+	}
+	caSigner.Store(&signer)
+	return nil
+}
+
+// completeLoad installs the CA signer produced by install, but only if a
+// BeginKeyLoad armed the load. install (the CMS decrypt + signer parse) runs
+// under the gate so concurrent CompleteKeyLoads serialize. A failed install
+// leaves the load armed so a transient relay failure can be retried without
+// re-driving BeginKeyLoad. If a signer is already installed, a re-load of the
+// SAME key is accepted idempotently (legitimate host restart) and a DIFFERENT
+// key is refused (host-driven swap) — the live CA never changes after first load.
+func (g *keyLoadGate) completeLoad(install func() (ssh.Signer, error)) (ssh.Signer, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.armed {
+		return nil, errors.New("CompleteKeyLoad without a preceding BeginKeyLoad; refusing")
+	}
+	signer, err := install()
+	if err != nil {
+		return nil, err // leave armed: a transient relay failure can be retried
+	}
+	g.armed = false
+	if cur := caSigner.Load(); cur != nil {
+		if !samePublicKey(*cur, signer) {
+			return nil, errors.New("CompleteKeyLoad would replace the loaded CA signer with a different key; refusing")
+		}
+		return *cur, nil // same key already installed — idempotent, no swap
+	}
+	caSigner.Store(&signer)
+	return signer, nil
+}
+
+// samePublicKey reports whether two signers carry the same public key — the
+// stable identity check behind the gate's "the CA never changes after first
+// load" invariant.
+func samePublicKey(a, b ssh.Signer) bool {
+	return bytes.Equal(a.PublicKey().Marshal(), b.PublicKey().Marshal())
+}
 
 func main() {
 	log.Println("Starting Enclave Signing Service...")
@@ -276,15 +370,24 @@ func handleGetEnclaveMetrics() messages.Response {
 }
 
 func handleBeginKeyLoad(ctx context.Context) messages.Response {
+	// A BeginKeyLoad is always serviceable. The host re-drives the handshake on
+	// every host-side restart (the enclave outlives the host process), so this
+	// must keep working after the key is loaded; the gate enforces that a re-load
+	// installs the same key, never a swap.
 	res, err := handlers.BeginKeyLoad(ctx, attestProvider)
 	if err != nil {
 		return createErrorResponse(err)
 	}
 	if res.Signer != nil {
 		// Development path: the enclave decrypted the key itself.
-		caSigner.Store(&res.Signer)
+		if err := gate.loadDirect(res.Signer); err != nil {
+			return createErrorResponse(err)
+		}
 		return messages.Response{BeginKeyLoad: &messages.BeginKeyLoadResponse{Loaded: true}}
 	}
+	// Attested path: arm the load before handing the host the attestation
+	// document + ciphertext it needs to drive the KMS Decrypt.
+	gate.arm()
 	return messages.Response{BeginKeyLoad: &messages.BeginKeyLoadResponse{
 		AttestationDocument: res.AttestationDocument,
 		CiphertextBlob:      res.CiphertextBlob,
@@ -292,11 +395,14 @@ func handleBeginKeyLoad(ctx context.Context) messages.Response {
 }
 
 func handleCompleteKeyLoad(ctx context.Context, req messages.CompleteKeyLoadRequest) messages.Response {
-	signer, err := handlers.CompleteKeyLoad(ctx, attestProvider, req.CiphertextForRecipient)
-	if err != nil {
+	// The gate refuses a CompleteKeyLoad with no preceding BeginKeyLoad, and a
+	// repeated CompleteKeyLoad once a signer is installed, before the CMS
+	// envelope is decrypted.
+	if _, err := gate.completeLoad(func() (ssh.Signer, error) {
+		return handlers.CompleteKeyLoad(ctx, attestProvider, req.CiphertextForRecipient)
+	}); err != nil {
 		return createErrorResponse(err)
 	}
-	caSigner.Store(&signer)
 	return messages.Response{CompleteKeyLoad: &messages.CompleteKeyLoadResponse{Success: true}}
 }
 
