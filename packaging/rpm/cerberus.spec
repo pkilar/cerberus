@@ -183,6 +183,33 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Wed Jul 01 2026 Paul Kilar <pkilar@gmail.com> - 0.4.0-1
+- Host-mediated, attested KMS Decrypt: the enclave no longer has any
+  network of its own and the standalone VSOCK KMS proxy is removed. The
+  API host performs the attested kms:Decrypt on the enclave's behalf via
+  a two-message BeginKeyLoad/CompleteKeyLoad handshake; the CA-key
+  plaintext is never visible to the host and AWS credentials never enter
+  the enclave. ACTION REQUIRED: the KMS key policy must require
+  attestation for Decrypt (deny non-attested Decrypt) and grant the EC2
+  instance role Decrypt; see docs/kms-attestation-policy.md.
+- One-shot CA-key load gate: the CA identity is pinned on first load. A
+  post-load swap to a different key is refused, a same-key reload is
+  idempotent (the host re-drives the handshake on every restart).
+- CA public-key pin baked into the EIF by default (CA_PUBLIC_KEY_PATH):
+  a decrypted CA key whose public half does not match is refused.
+- LDAP-backed RBAC (opt-in): Cerberus groups may resolve membership from
+  LDAP, routed by Kerberos realm, with positive caching and fail-closed
+  semantics for LDAP-backed groups.
+- Configurable signer endpoint via CERBERUS_SIGNER_ENDPOINT
+  (vsock://, tcp://, unix://).
+- Structured slog events for key-load gate refusals; sentinel errors.
+- Kerberos keytab path is now sourced only from keytab_path in
+  config.yaml (the KERBEROS_KEYTAB_PATH env var is no longer read).
+- STRIDE/DREAD threat model added (docs/THREAT-MODEL.md).
+- Module paths renamed to canonical github.com/pkilar/cerberus/*.
+- Go toolchain bumped to 1.26.4; AWS SDK and golang.org/x/crypto
+  dependency refresh.
+
 * Thu May 21 2026 Paul Kilar <pkilar@gmail.com> - 0.3.0-1
 - Expose Nitro Enclave CPU and memory utilization as Prometheus metrics
   (sourced via NSM in-band describe-pcr; no host metrics).
