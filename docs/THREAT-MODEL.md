@@ -58,7 +58,7 @@ pipeline.
 - Enclave error strings → host → HTTP response/log
 - User-controlled input (principal names, SSH key comments, Kerberos error text) → structured log fields
 - Developer workstation → Git → GitHub Actions CI → base-image registry (build-chain trust)
-- EIF build host → KMS (`ca_key.enc` encryption); RPM channel → operator host (package integrity)
+- EIF build host → KMS (`ca_key.enc` encryption); RPM channel → operator host (package integrity, and — for the optional `cerberus-signer-eif` package — confidentiality of the CA key material it carries)
 - EC2 host OS → `nitro-cli` → Nitro hypervisor (enclave launch integrity); EC2 instance role → AWS KMS
 
 ## 4. Assets
@@ -464,10 +464,10 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 #### `SC-6` — encrypt-ca-key Makefile target writes the plaintext CA key to disk before piping it through shell process substitution
 **High** · DREAD 6 · STRIDE: Tampering, InformationDisclosure
 
-- **Attack:** The `make encrypt-ca-key` target (ssh-cert-signer/Makefile:82-95) runs `ssh-keygen -t ed25519 -f ca_key -N ""` which writes the plaintext private key to disk (ca_key file in the working directory), then pipes it to `aws kms encrypt --plaintext fileb://ca_key`, then `rm -f ca_key`. During the window between key generation and deletion, the plaintext key exists as a regular file. If the build host's filesystem is accessible to other processes (shared CI runner, container with mounted volumes, or an attacker with concurrent read access), the plaintext can be stolen. Additionally, `rm -f` is not a secure delete on SSDs or network filesystems; the key material may persist in unallocated blocks. The RUNBOOK.md (rotation section) documents using `shred -u ca_key` as the correct deletion method, but the Makefile uses plain `rm -f`.
-- **Existing controls:** root .gitignore:33 (`ca_key.*`) excludes all ca_key variants from git tracking, preventing accidental commit of the plaintext key. RUNBOOK.md documents the rotation workflow with `shred -u ca_key` (not `rm -f`). The key generation is intended as a one-time operator procedure run on a trusted host, not in CI. The EIF bakes the encrypted ca_key.enc, not the plaintext.
-- **Residual risk:** The Makefile uses `rm -f` not `shred`. On SSDs with wear leveling, deleted file contents may be recoverable from free blocks. The target is intended for operator use on a secure workstation, but the discrepancy between the Makefile (`rm -f`) and RUNBOOK.md (`shred -u`) creates a documentation-vs-implementation gap that an operator following the Makefile path would miss. No tmpfs/ramfs is used for key generation.
-- **DREAD:** Damage 9 · Reproducibility 4 · Exploitability 3 · Affected 9 · Discoverability 5
+- **Attack:** The `make encrypt-ca-key` target (the `encrypt-ca-key` recipe in ssh-cert-signer/Makefile) runs `ssh-keygen -t ed25519 -f ca_key -N ""`, which writes the plaintext private key to disk (the `ca_key` file in the working directory), pipes it to `aws kms encrypt --plaintext fileb://ca_key`, then deletes it. During the window between key generation and deletion, the plaintext key exists as a regular file. If the build host's filesystem is accessible to other processes (shared CI runner, container with mounted volumes, or an attacker with concurrent read access), the plaintext can be stolen. Simple deletion is also not a guaranteed erase on SSDs (wear-leveling), copy-on-write, or journaling filesystems; the key material may persist in unallocated blocks.
+- **Existing controls:** root .gitignore:33 (`ca_key.*`) excludes all ca_key variants from git tracking, preventing accidental commit of the plaintext key. The Makefile now deletes the plaintext with `shred -u ca_key 2>/dev/null || rm -f ca_key`, matching the RUNBOOK.md rotation workflow — the earlier Makefile-vs-docs discrepancy (`rm -f` vs `shred -u`) is closed. The target also **refuses to run when any CA key material already exists**, so it cannot silently clobber a live CA (and `make clean` no longer deletes key material). The key generation is intended as a one-time operator procedure run on a trusted host, not in CI. The EIF bakes the encrypted ca_key.enc, not the plaintext.
+- **Residual risk:** `shred` cannot guarantee erasure on log-structured / copy-on-write filesystems or SSDs with wear-leveling, and no tmpfs/ramfs is used for key generation, so the plaintext still briefly touches durable storage. The target is intended for operator use on a secure workstation; the primary mitigation is procedural (run on a trusted, single-tenant host). The documentation-vs-implementation gap that previously existed is resolved.
+- **DREAD:** Damage 9 · Reproducibility 4 · Exploitability 3 · Affected 9 · Discoverability 5 *(score unchanged: the `rm -f`→`shred` and accidental-clobber gaps are now closed, but the plaintext still briefly touches disk and secure-erase is not guaranteed on SSD/CoW, so the residual rating holds)*
 
 
 
@@ -582,7 +582,7 @@ load-bearing — see §10.
 - No mutual TLS; client auth is solely Kerberos SPNEGO. The TLS server cert is issued by a CA clients trust. NTP keeps the KDC, clients, and API host within the 5-minute clock-skew window.
 - The keytab path is operator-supplied; no world-readable default. The host has network access to configured LDAP servers and KMS.
 - `/metrics` is network-protected at the LB/host-firewall layer (CLAUDE.md invariant). `DEBUG=true` is not set in production; `LOG_FORMAT=json` is used. The log aggregator is a trusted internal system.
-- The EIF build runs on a trusted operator workstation (not CI; CI lacks `nitro-cli` and `ca_key.enc`). The `hf/nsm` and `pkilar/nitro-enclaves-sdk-go` dependencies are pinned by `go.sum` hash. GitHub Actions runners are ephemeral and not cross-tenant. RPM distribution is over an operator-controlled channel. `cerberus-signer.service` runs as root because nitro-cli requires it.
+- The EIF build runs on a trusted operator workstation (not CI; CI lacks `nitro-cli` and `ca_key.enc`). The `hf/nsm` and `pkilar/nitro-enclaves-sdk-go` dependencies are pinned by `go.sum` hash. GitHub Actions runners are ephemeral and not cross-tenant. RPM distribution is over an operator-controlled channel — this becomes load-bearing for the optional `cerberus-signer-eif` package, which bundles a per-deployment EIF carrying the KMS-encrypted CA key and PCR0-pinned public key; it must never be published to a shared or public repository. `cerberus-signer.service` runs as root because nitro-cli requires it.
 
 ---
 

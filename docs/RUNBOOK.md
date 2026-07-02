@@ -102,7 +102,7 @@ The EC2 instance role must have permission to call `kms:Decrypt` on the KMS key 
 - Go 1.26+
 - Docker, including the `buildx` plugin (`docker buildx version` to verify)
 - Python 3 (the EIF build pipes `nitro-cli build-enclave` JSON output through `python3` to write the PCR manifest)
-- `nitro-cli` (the AWS Nitro Enclaves CLI)
+- `aws-nitro-enclaves-cli` and `aws-nitro-enclaves-cli-devel` (the AWS Nitro Enclaves CLI)
 - For cross-architecture EIF builds, QEMU `binfmt_misc` (`docker run --privileged --rm tonistiigi/binfmt --install all`)
 - `aws` CLI (for credential verification and `kms encrypt` of the CA key)
 
@@ -297,14 +297,17 @@ make clean
 
 ## RPM Packaging
 
-Cerberus provides RPM packaging for Amazon Linux 2, Amazon Linux 2023, RHEL, and Fedora. The spec produces two subpackages:
+Cerberus provides RPM packaging for Amazon Linux 2, Amazon Linux 2023, RHEL, and Fedora. The spec produces two subpackages by default, plus one optional package:
 
-| Package           | Contents                                                                     |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `cerberus-api`    | API binary, systemd unit, sysconfig, example config, `cerberus` user/group   |
-| `cerberus-signer` | Signer binary, Dockerfile, systemd unit, sysconfig, enclave lifecycle script |
+| Package               | Contents                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `cerberus-api`        | API binary, systemd unit, sysconfig, example config, `cerberus` user/group                                                            |
+| `cerberus-signer`     | Signer binary, Dockerfile, systemd unit, sysconfig, enclave lifecycle script                                                          |
+| `cerberus-signer-eif` | **Optional, opt-in.** A prebuilt Enclave Image File. Built only with `--eif` (see below); carries CA key material — per-deployment, per-arch |
 
-> The `cerberus-signer` RPM intentionally does **not** ship the Enclave Image File. The EIF bakes in the KMS-encrypted CA key (the `Dockerfile` `COPY`s `ca_key.enc` into the image) and pins a deployment-specific PCR0, so it is a per-deployment artifact rather than a redistributable one. Build it with `make eif-<arch>` and drop it into `/usr/share/cerberus/` after installing the RPM (see [Post-Install Setup](#post-install-setup-rpm), step 4).
+> By default the `cerberus-signer` RPM does **not** ship the Enclave Image File. The EIF bakes in the KMS-encrypted CA key (the `Dockerfile` `COPY`s `ca_key.enc` into the image) and pins a deployment-specific PCR0, so it is a per-deployment artifact rather than a redistributable one. The default flow is to build it with `make eif-<arch>` and drop it into `/usr/share/cerberus/` after installing the RPM (see [Post-Install Setup](#post-install-setup-rpm), step 4).
+>
+> If you prefer to ship a deployment as a single artifact, build the **optional** `cerberus-signer-eif` package (`build-rpm.sh --eif <path>`, below). It bundles one prebuilt EIF at `/usr/share/cerberus/ssh-cert-signer.eif`. Because that EIF carries the KMS-encrypted CA private key **and** the PCR0-pinned public key, this package is **per-deployment and per-architecture** — treat it as sensitive and distribute it **only over an operator-controlled channel, never a shared or public repository** (see the [Threat Model](THREAT-MODEL.md) note on the RPM channel).
 
 ### Building RPMs
 
@@ -329,6 +332,15 @@ sudo yum install rpm-build rpmdevtools golang make
 ```bash
 ./packaging/rpm/build-rpm.sh --mock
 ```
+
+**Also bundle the EIF (optional `cerberus-signer-eif` package):**
+
+```bash
+# Build the EIF first (see "Build Enclave Image Files (EIF)"), then:
+./packaging/rpm/build-rpm.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif
+```
+
+`--eif` is incompatible with `--mock` (the per-deployment EIF must be built on a trusted host, not a clean chroot), and the EIF's architecture must match the RPM build architecture. The resulting `cerberus-signer-eif` RPM carries CA key material — see the note under [RPM Packaging](#rpm-packaging).
 
 Output RPMs are placed in `rpmbuild/RPMS/<arch>/`.
 
@@ -359,7 +371,7 @@ When installed via RPM, files are placed at standard FHS paths:
 | Example config        | `/etc/cerberus/config.yaml.example`               | Copy to `config.yaml`                                    |
 | Enclave wrapper       | `/usr/libexec/cerberus/run-enclave.sh`            | Used by systemd                                          |
 | Dockerfile            | `/usr/share/cerberus/Dockerfile`                  | For building EIFs                                        |
-| EIF (operator-placed) | `/usr/share/cerberus/ssh-cert-signer.eif`         | Operator copies post-install (RPM does not ship the EIF) |
+| EIF                   | `/usr/share/cerberus/ssh-cert-signer.eif`         | Operator copies post-install, **or** shipped by the optional `cerberus-signer-eif` package |
 | Log directory         | `/var/log/cerberus/`                              | Owned by `cerberus` user                                 |
 
 ### Post-Install Setup (RPM)
@@ -376,14 +388,14 @@ When installed via RPM, files are placed at standard FHS paths:
    sudo chmod 640 /etc/cerberus/krb5.keytab
    ```
 3. Place TLS certificate and key (update paths in `config.yaml`).
-4. Build (or copy) the EIF into `/usr/share/cerberus/`, **renaming on copy** to `ssh-cert-signer.eif`. The RPM is per-architecture, so only one EIF arch is ever valid for a given host — the sysconfig points at a single arch-less path:
+4. **Place the EIF** at `/usr/share/cerberus/ssh-cert-signer.eif`. *Skip this step if you installed the optional `cerberus-signer-eif` package — it already put the EIF there.* Otherwise build (or copy) the EIF, **renaming on copy** to `ssh-cert-signer.eif`. The RPM is per-architecture, so only one EIF arch is ever valid for a given host — the sysconfig points at a single arch-less path:
    ```bash
    # x86_64 host
    sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif
    # aarch64 host
    sudo cp ssh-cert-signer-arm64.eif /usr/share/cerberus/ssh-cert-signer.eif
    ```
-   The EIF is not bundled because it carries the KMS-encrypted CA key — see the note under [RPM Packaging](#rpm-packaging).
+   By default the EIF is not bundled because it carries the KMS-encrypted CA key — see the note under [RPM Packaging](#rpm-packaging).
 5. Start the services:
    ```bash
    sudo systemctl enable --now cerberus-signer
@@ -642,6 +654,8 @@ Signing failed: <error details>
 
 Because `ca_key.enc` (and `ca_key.pub`, the integrity pin) are baked into the EIF at Docker build time (the signer Dockerfile `COPY`s both into the image), CA-key rotation **always requires rebuilding the EIF**. This in turn changes PCR0, so attestation-based KMS policies must be updated before the new enclave can decrypt.
 
+> **Before you begin — the CA key material is protected against accidental loss.** `make encrypt-ca-key` **refuses to run** if `ca_key`, `ca_key.pub`, or `ca_key.enc` already exist, and `make clean` never deletes them. Rotation is therefore a deliberate act: first remove the old material with `make -C ssh-cert-signer clean-ca-key` (or `rm -f ca_key ca_key.pub ca_key.enc`). Do this only when you truly intend to rotate — the new CA will not be trusted by any SSH server until you re-distribute the new `ca_key.pub` (step 7). The manual `ssh-keygen` in step 1 will also prompt before overwriting an existing `ca_key`; never overwrite a key you have not deliberately rotated.
+
 1. Generate a new SSH CA key pair:
    ```bash
    ssh-keygen -t ed25519 -f ca_key -N ""
@@ -818,7 +832,8 @@ There is no longer a VSOCK KMS proxy. The host calls `kms:Decrypt` directly over
 | `cerberus` user doesn't exist after install | `%pre` scriptlet failed                                                                                                   | Run `sudo useradd -r -g cerberus -d /etc/cerberus -s /sbin/nologin cerberus`                                         |
 | Config overwritten on upgrade               | Config not marked `noreplace`                                                                                             | Reinstall; configs use `%config(noreplace)` so this should not happen                                                |
 | Service won't start after RPM install       | Missing config.yaml                                                                                                       | Copy `/etc/cerberus/config.yaml.example` to `/etc/cerberus/config.yaml` and edit it                                  |
-| `run-enclave.sh: EIF file not found`        | EIF not placed at `/usr/share/cerberus/ssh-cert-signer.eif` (the RPM does not ship it — it bakes in the encrypted CA key) | Copy and rename the matching arch's EIF: `sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif` |
+| `run-enclave.sh: EIF file not found`        | EIF not placed at `/usr/share/cerberus/ssh-cert-signer.eif` (the default RPM does not ship it — it bakes in the encrypted CA key) | Copy and rename the matching arch's EIF: `sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif` — or install the optional `cerberus-signer-eif` package |
+| `refusing to generate a new CA key … already exists` | `make encrypt-ca-key` guards against clobbering existing CA key material (`ca_key`/`ca_key.pub`/`ca_key.enc`) | Intended for a deliberate rotation only. Remove the old material first: `make -C ssh-cert-signer clean-ca-key`, then re-run |
 | Permission denied on keytab                 | Wrong ownership                                                                                                           | `sudo chown root:cerberus /etc/cerberus/krb5.keytab && sudo chmod 640 /etc/cerberus/krb5.keytab`                     |
 
 ### Diagnostic Commands
@@ -862,6 +877,8 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - The plaintext key **never leaves the enclave** — it exists only in enclave memory.
 - Use **attestation-based KMS policies** (PCR conditions) so only the specific enclave image can decrypt the key.
 - **CRITICAL — KMS key policy requirement:** Because the host now holds `ca_key.enc` and calls `kms:Decrypt` itself, the KMS key policy **must** require a `kms:RecipientAttestation:ImageSha384` condition (PCR0) on every `Decrypt` action for the instance role. The policy must **not** grant the instance role any unconditioned `kms:Decrypt` — a compromised host that can call a plaintext Decrypt would read the CA private key. The calling principal (the instance IAM role) is unchanged from the previous design. See `docs/kms-attestation-policy.md` for the recommended policy template.
+- **Protected against accidental loss/regeneration.** The public CA key must be trusted by every `sshd` (`TrustedUserCAKeys`), so regenerating the CA is expensive — do it only on suspected private-key compromise. The signer `Makefile` enforces this: `make encrypt-ca-key` **refuses** to overwrite an existing `ca_key`/`ca_key.pub`/`ca_key.enc`, and `make clean` never deletes them. Deliberate rotation requires an explicit `make -C ssh-cert-signer clean-ca-key` first (see [Rotating the CA Key](#rotating-the-ca-key)).
+- **The optional `cerberus-signer-eif` RPM carries CA key material.** If you build it (`build-rpm.sh --eif`), that package embeds the KMS-encrypted CA key and the PCR0-pinned public key. It is per-deployment and per-architecture — distribute it only over an operator-controlled channel, never a shared or public repository.
 
 ### Network Security
 

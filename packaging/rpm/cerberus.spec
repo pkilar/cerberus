@@ -55,6 +55,37 @@ decrypts the CMS envelope to install the in-memory CA signer, and signs SSH
 certificates received over VSOCK.
 
 # ---------------------------------------------------------------------------
+# Subpackage: cerberus-signer-eif  (OPTIONAL, opt-in)
+#
+# Bundles a prebuilt Enclave Image File so a deployment can ship as a single
+# artifact. Produced ONLY when the build is invoked with
+#   --define "eif_file /abs/path/to/ssh-cert-signer-<arch>.eif"
+# (the build-rpm.sh --eif flag). It is NOT part of a default build.
+#
+# SECURITY: the EIF bakes in the KMS-encrypted CA private key (ca_key.enc) and
+# the PCR0-pinned CA public key (ca_key.pub), so this package carries
+# per-deployment CA key material through the RPM channel and pins a
+# deployment-specific PCR0. It is per-deployment and per-architecture — NOT a
+# redistributable artifact. Publish it only to an operator-controlled channel,
+# never to a shared or public repository.
+# ---------------------------------------------------------------------------
+%if %{defined eif_file}
+%package signer-eif
+Summary:        Cerberus signer Enclave Image File (per-deployment; carries CA key material)
+Requires:       cerberus-signer = %{version}-%{release}
+
+%description signer-eif
+Prebuilt Nitro Enclave Image File for the Cerberus signer, installed at
+%{_datadir}/cerberus/ssh-cert-signer.eif. OPT-IN and per-deployment: the EIF
+bakes in the KMS-encrypted CA private key and the PCR0-pinned CA public key, so
+this package carries CA key material and pins a deployment-specific PCR0. It is
+per-architecture and must be distributed only over an operator-controlled
+channel, never a shared or public repository. Built only when the RPM build is
+invoked with --define "eif_file <path>" (note the space, not '='), normally via
+build-rpm.sh --eif.
+%endif
+
+# ---------------------------------------------------------------------------
 # prep / build / install
 # ---------------------------------------------------------------------------
 %prep
@@ -115,12 +146,19 @@ install -D -m 0755 packaging/rpm/run-enclave.sh \
 install -D -m 0644 ssh-cert-signer/Dockerfile \
     %{buildroot}%{_datadir}/cerberus/Dockerfile
 
-# Stage the EIF directory but leave it empty. The Enclave Image File
-# bakes in the KMS-encrypted CA key (Dockerfile COPYs ca_key.enc), so the
-# EIF is per-deployment and must NOT be shipped inside the generic RPM.
-# Operators build the EIF separately and drop it into this directory
-# (see docs/RUNBOOK.md, Post-Install Setup).
+# Stage the EIF directory. By default it is left EMPTY: the Enclave Image File
+# bakes in the KMS-encrypted CA key (Dockerfile COPYs ca_key.enc) + PCR0 pin, so
+# it is per-deployment and is NOT shipped in the default cerberus-signer RPM.
+# Operators normally build the EIF separately and drop it here post-install
+# (see docs/RUNBOOK.md, Post-Install Setup). The OPTIONAL cerberus-signer-eif
+# subpackage (built only with --define "eif_file <path>") bundles a prebuilt EIF
+# into this directory for single-artifact, per-deployment installs.
 install -d -m 0755 %{buildroot}%{_datadir}/cerberus
+
+%if %{defined eif_file}
+install -D -m 0644 %{eif_file} \
+    %{buildroot}%{_datadir}/cerberus/ssh-cert-signer.eif
+%endif
 
 # ---------------------------------------------------------------------------
 # cerberus-api scriptlets
@@ -179,10 +217,35 @@ exit 0
 %dir %{_datadir}/cerberus
 %{_datadir}/cerberus/Dockerfile
 
+%if %{defined eif_file}
+%files signer-eif
+%{_datadir}/cerberus/ssh-cert-signer.eif
+%endif
+
 # ---------------------------------------------------------------------------
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 02 2026 Paul Kilar <pkilar@gmail.com> - 0.5.0-1
+- Optional, opt-in cerberus-signer-eif subpackage: bundles a prebuilt
+  Enclave Image File at /usr/share/cerberus/ssh-cert-signer.eif so a
+  deployment can ship as a single artifact. Built ONLY when the RPM
+  build is invoked with --define "eif_file <path>" (build-rpm.sh --eif);
+  a default build is unchanged and still produces only cerberus-api and
+  cerberus-signer. SECURITY: the EIF bakes in the KMS-encrypted CA key
+  and the PCR0-pinned public key, so this package carries per-deployment
+  CA key material and is per-architecture — distribute it only over an
+  operator-controlled channel, never a shared or public repository.
+- CA-key protection guardrails in ssh-cert-signer/Makefile: make
+  encrypt-ca-key now REFUSES to overwrite existing ca_key/ca_key.pub/
+  ca_key.enc (regenerating mints a different CA and would force
+  re-distributing the public key to every SSH server); make clean no
+  longer deletes CA key material; a new make clean-ca-key removes it
+  explicitly for a deliberate rotation.
+- Hardened encrypt-ca-key: a failed KMS encrypt no longer leaves a
+  0-byte ca_key.enc and shreds the plaintext — the plaintext CA key is
+  preserved on failure. Plaintext is securely deleted with shred (falling
+  back to rm), and require-ca-files rejects an empty ca_key.enc.
 * Wed Jul 01 2026 Paul Kilar <pkilar@gmail.com> - 0.4.0-1
 - Host-mediated, attested KMS Decrypt: the enclave no longer has any
   network of its own and the standalone VSOCK KMS proxy is removed. The

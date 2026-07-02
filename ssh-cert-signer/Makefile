@@ -7,9 +7,9 @@ GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 
 # Nitro Enclave CLI tool
-# This Makefile assumes 'nitro-cli' and 'python3' are installed and in the
-# system's PATH. python3 parses the build-enclave JSON output to emit the
-# PCR manifest used to pin the KMS attestation policy.
+# This Makefile assumes 'nitro-cli', 'nitro-cli-devel', and 'python3' are
+# installed and in the system's PATH. python3 parses the build-enclave JSON
+# output to emit the PCR manifest used to pin the KMS attestation policy.
 #
 # The eif-* targets require both 'ca_key.enc' and 'ca_key.pub' to be present in
 # this directory (the docker build context) before invocation, since the
@@ -47,7 +47,7 @@ eif: eif-amd64 eif-arm64
 # an actionable message, instead of failing deep inside `docker buildx` on a
 # missing COPY source.
 require-ca-files:
-	@test -f ca_key.enc || { echo "ERROR: ca_key.enc not found in $(CURDIR). Run 'make encrypt-ca-key KMS_KEY_ARN=...' first."; exit 1; }
+	@test -s ca_key.enc || { echo "ERROR: ca_key.enc not found or empty in $(CURDIR). Run 'make encrypt-ca-key KMS_KEY_ARN=...' first."; exit 1; }
 	@test -f ca_key.pub || { echo "ERROR: ca_key.pub not found in $(CURDIR). It is baked into the EIF as the CA_PUBLIC_KEY_PATH pin; keep the ca_key.pub from 'make encrypt-ca-key', or remove the ca_key.pub COPY/ENV from the Dockerfile to build without the pin."; exit 1; }
 
 eif-amd64: build require-ca-files
@@ -82,35 +82,81 @@ test-coverage:
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
-# Create and encrypt SSH CA key with KMS
+# Create and encrypt the SSH CA key with KMS.
 # Usage: make encrypt-ca-key KMS_KEY_ARN=arn:aws:kms:region:account:key/key-id
 # This will:
-# 1. Generate a new SSH CA private key
-# 2. Encrypt it with the specified KMS key
-# 3. Save the encrypted key to ca_key.enc
-# 4. Remove the original unencrypted key
+# 1. REFUSE to run if any CA key material (ca_key, ca_key.pub, ca_key.enc) is
+#    already present. Regenerating would mint a DIFFERENT CA and force a
+#    re-distribution of ca_key.pub to every SSH server that trusts it. Rotation
+#    is deliberate: remove the old material first with `make clean-ca-key`.
+# 2. Generate a new ed25519 SSH CA private key.
+# 3. Encrypt it with the specified KMS key -> ca_key.enc.
+# 4. Securely delete the plaintext private key (shred, falling back to rm).
+# The public half (ca_key.pub) is kept: it is distributed to SSH servers for
+# certificate validation AND baked into the EIF as the CA_PUBLIC_KEY_PATH pin.
 encrypt-ca-key:
 	@if [ -z "$(KMS_KEY_ARN)" ]; then \
 		echo "Error: KMS_KEY_ARN parameter is required"; \
 		echo "Usage: make encrypt-ca-key KMS_KEY_ARN=arn:aws:kms:region:account:key/key-id"; \
 		exit 1; \
 	fi
+	@for f in ca_key ca_key.pub ca_key.enc; do \
+		if [ -e "$$f" ]; then \
+			echo "ERROR: refusing to generate a new CA key — $(CURDIR)/$$f already exists."; \
+			echo "  Overwriting it would create a DIFFERENT CA. Every SSH server that trusts the"; \
+			echo "  current CA would reject certificates until you re-distribute the new ca_key.pub."; \
+			echo "  If you really intend to rotate the CA, remove the existing key material first:"; \
+			echo "      make clean-ca-key        # or: rm -f ca_key ca_key.pub ca_key.enc"; \
+			echo "  then re-run 'make encrypt-ca-key KMS_KEY_ARN=...'."; \
+			exit 1; \
+		fi; \
+	done
 	@echo "Generating SSH CA private key..."
 	ssh-keygen -t ed25519 -f ca_key -N "" -C "SSH CA Key for Nitro Enclave"
 	@echo "Encrypting CA private key with KMS..."
-	aws kms encrypt --key-id $(KMS_KEY_ARN) --plaintext fileb://ca_key --output text --query CiphertextBlob | base64 -d > ca_key.enc
-	@echo "Removing unencrypted CA private key..."
-	rm -f ca_key
+	@# Capture the ciphertext separately so a KMS failure (bad creds, wrong region,
+	@# missing kms:Encrypt) is caught by aws's own exit status — a pipe would mask it
+	@# behind base64's exit and leave a 0-byte ca_key.enc. Do NOT delete the plaintext
+	@# until a valid, non-empty ca_key.enc exists.
+	@b64=$$(aws kms encrypt --key-id $(KMS_KEY_ARN) --plaintext fileb://ca_key --output text --query CiphertextBlob) || { \
+		echo "ERROR: KMS encrypt failed — the plaintext ca_key is PRESERVED. Fix credentials/region/kms:Encrypt and re-run."; \
+		exit 1; \
+	}; \
+	printf '%s' "$$b64" | base64 -d > ca_key.enc
+	@if [ ! -s ca_key.enc ]; then \
+		echo "ERROR: ca_key.enc is empty after KMS encrypt — the plaintext ca_key is PRESERVED. Investigate and re-run."; \
+		rm -f ca_key.enc; \
+		exit 1; \
+	fi
+	@echo "Securely deleting the unencrypted CA private key..."
+	@shred -u ca_key 2>/dev/null || rm -f ca_key
 	@echo "Encrypted CA key saved to ca_key.enc"
 	@echo "Public key saved to ca_key.pub — keep this: it is distributed to SSH servers"
 	@echo "  for certificate validation AND baked into the EIF as the CA_PUBLIC_KEY_PATH pin."
 
-# Clean all build artifacts and generated keys
+# Clean build artifacts. CA key material (ca_key, ca_key.pub, ca_key.enc) is
+# deliberately PRESERVED — losing it would force re-distributing a new public CA
+# key to every SSH server. Use `make clean-ca-key` to remove it explicitly.
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -f $(BINARY_NAME).amd64 $(BINARY_NAME).arm64 $(EIF_NAME_AMD64) $(EIF_NAME_ARM64) coverage.out coverage.html ca_key ca_key.pub ca_key.enc pcr-manifest-amd64.json pcr-manifest-arm64.json
+	rm -f $(BINARY_NAME).amd64 $(BINARY_NAME).arm64 $(EIF_NAME_AMD64) $(EIF_NAME_ARM64) coverage.out coverage.html pcr-manifest-amd64.json pcr-manifest-arm64.json
+	@if [ -e ca_key ] || [ -e ca_key.pub ] || [ -e ca_key.enc ]; then \
+		echo "Note: preserving CA key material (ca_key / ca_key.pub / ca_key.enc)."; \
+		echo "      'make clean' never deletes these. Run 'make clean-ca-key' to remove"; \
+		echo "      them for a deliberate CA rotation (this invalidates the current CA)."; \
+	fi
 	$(GOCLEAN)
 
+# Deliberately and DESTRUCTIVELY remove CA key material. A CA generated after
+# this will not be trusted by any SSH server until you re-distribute the new
+# ca_key.pub. `make clean` never removes these files — removal must be explicit.
+clean-ca-key:
+	@echo "WARNING: removing CA key material (ca_key ca_key.pub ca_key.enc)."
+	@echo "         A newly generated CA will require re-distributing ca_key.pub to all SSH servers."
+	@shred -u ca_key 2>/dev/null || rm -f ca_key
+	rm -f ca_key.pub ca_key.enc
+	@echo "CA key material removed. You may now run 'make encrypt-ca-key KMS_KEY_ARN=...'."
+
 # Ensure targets are always run
-.PHONY: all build eif eif-amd64 eif-arm64 require-ca-files test test-coverage clean encrypt-ca-key
+.PHONY: all build eif eif-amd64 eif-arm64 require-ca-files test test-coverage clean clean-ca-key encrypt-ca-key
 
