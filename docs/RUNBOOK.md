@@ -644,7 +644,7 @@ Because `ca_key.enc` (and `ca_key.pub`, the integrity pin) are baked into the EI
 
 1. Generate a new SSH CA key pair:
    ```bash
-   ssh-keygen -t rsa -b 4096 -f ca_key -N ""
+   ssh-keygen -t ed25519 -f ca_key -N ""
    ```
 2. Encrypt the private key with KMS:
    ```bash

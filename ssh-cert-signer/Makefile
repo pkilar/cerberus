@@ -96,7 +96,7 @@ encrypt-ca-key:
 		exit 1; \
 	fi
 	@echo "Generating SSH CA private key..."
-	ssh-keygen -t rsa -b 4096 -f ca_key -N "" -C "SSH CA Key for Nitro Enclave"
+	ssh-keygen -t ed25519 -f ca_key -N "" -C "SSH CA Key for Nitro Enclave"
 	@echo "Encrypting CA private key with KMS..."
 	aws kms encrypt --key-id $(KMS_KEY_ARN) --plaintext fileb://ca_key --output text --query CiphertextBlob | base64 -d > ca_key.enc
 	@echo "Removing unencrypted CA private key..."

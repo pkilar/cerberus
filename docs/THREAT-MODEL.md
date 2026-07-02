@@ -63,7 +63,7 @@ pipeline.
 
 ## 4. Assets
 
-- CA RSA private key — lives only in enclave memory as an `ssh.Signer` after load
+- CA Ed25519 private key — lives only in enclave memory as an `ssh.Signer` after load
 - KMS-encrypted CA key ciphertext (`ca_key.enc`, baked into the EIF, read on startup)
 - NSM attestation RSA-2048 ephemeral keypair (per-boot; decrypts the CMS envelope)
 - `CiphertextForRecipient` (CMS envelope relayed over VSOCK; only the enclave's attestation key opens it)
@@ -461,10 +461,10 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 - **Residual risk:** No digest pin in the Dockerfile means every EIF rebuild may silently pick up a different rootfs. The PCR0 change is detectable only if the operator compares manifests before updating the KMS policy — there is no automated gate that flags a PCR0 change caused by an upstream image update vs. intentional code changes. A build system with no image provenance verification (no cosign/sigstore check in the Makefile or CI) cannot distinguish legitimate from compromised base images.
 - **DREAD:** Damage 9 · Reproducibility 5 · Exploitability 4 · Affected 9 · Discoverability 4
 
-#### `SC-6` — encrypt-ca-key Makefile target generates RSA-4096 key and pipes plaintext through shell process substitution
+#### `SC-6` — encrypt-ca-key Makefile target writes the plaintext CA key to disk before piping it through shell process substitution
 **High** · DREAD 6 · STRIDE: Tampering, InformationDisclosure
 
-- **Attack:** The `make encrypt-ca-key` target (ssh-cert-signer/Makefile:82-95) runs `ssh-keygen -t rsa -b 4096 -f ca_key -N ""` which writes the plaintext private key to disk (ca_key file in the working directory), then pipes it to `aws kms encrypt --plaintext fileb://ca_key`, then `rm -f ca_key`. During the window between key generation and deletion, the plaintext key exists as a regular file. If the build host's filesystem is accessible to other processes (shared CI runner, container with mounted volumes, or an attacker with concurrent read access), the plaintext can be stolen. Additionally, `rm -f` is not a secure delete on SSDs or network filesystems; the key material may persist in unallocated blocks. The RUNBOOK.md (rotation section) documents using `shred -u ca_key` as the correct deletion method, but the Makefile uses plain `rm -f`.
+- **Attack:** The `make encrypt-ca-key` target (ssh-cert-signer/Makefile:82-95) runs `ssh-keygen -t ed25519 -f ca_key -N ""` which writes the plaintext private key to disk (ca_key file in the working directory), then pipes it to `aws kms encrypt --plaintext fileb://ca_key`, then `rm -f ca_key`. During the window between key generation and deletion, the plaintext key exists as a regular file. If the build host's filesystem is accessible to other processes (shared CI runner, container with mounted volumes, or an attacker with concurrent read access), the plaintext can be stolen. Additionally, `rm -f` is not a secure delete on SSDs or network filesystems; the key material may persist in unallocated blocks. The RUNBOOK.md (rotation section) documents using `shred -u ca_key` as the correct deletion method, but the Makefile uses plain `rm -f`.
 - **Existing controls:** root .gitignore:33 (`ca_key.*`) excludes all ca_key variants from git tracking, preventing accidental commit of the plaintext key. RUNBOOK.md documents the rotation workflow with `shred -u ca_key` (not `rm -f`). The key generation is intended as a one-time operator procedure run on a trusted host, not in CI. The EIF bakes the encrypted ca_key.enc, not the plaintext.
 - **Residual risk:** The Makefile uses `rm -f` not `shred`. On SSDs with wear leveling, deleted file contents may be recoverable from free blocks. The target is intended for operator use on a secure workstation, but the discrepancy between the Makefile (`rm -f`) and RUNBOOK.md (`shred -u`) creates a documentation-vs-implementation gap that an operator following the Makefile path would miss. No tmpfs/ramfs is used for key generation.
 - **DREAD:** Damage 9 · Reproducibility 4 · Exploitability 3 · Affected 9 · Discoverability 5

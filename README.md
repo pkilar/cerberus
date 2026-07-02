@@ -166,7 +166,7 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
 1. **Generate an SSH key pair** to serve as your Certificate Authority:
 
    ```bash
-   ssh-keygen -t rsa -b 4096 -f ca_key -C "Cerberus SSH CA"
+   ssh-keygen -t ed25519 -f ca_key -C "Cerberus SSH CA"
    ```
 
 2. **Encrypt the private key with KMS**:
