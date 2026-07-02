@@ -290,7 +290,7 @@ exit 0
 - Fix ARM64 install failure: drop the hardcoded ARCH=amd64 variable from
   /etc/sysconfig/cerberus-signer.
 
-* Sat Mar 22 2026 Paul Kilar <pkilar@gmail.com> - 0.1.0-1
+* Sun Mar 22 2026 Paul Kilar <pkilar@gmail.com> - 0.1.0-1
 - Initial RPM packaging
 - Separate subpackages for API and signer services
 - Systemd integration with security hardening
