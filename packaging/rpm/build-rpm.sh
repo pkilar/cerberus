@@ -2,13 +2,56 @@
 # Build Cerberus RPM packages.
 #
 # Usage:
-#   ./packaging/rpm/build-rpm.sh              # build from current tree
-#   ./packaging/rpm/build-rpm.sh --mock       # build inside mock (clean chroot)
+#   ./packaging/rpm/build-rpm.sh                      # build from current tree
+#   ./packaging/rpm/build-rpm.sh --mock               # build inside mock (clean chroot)
+#   ./packaging/rpm/build-rpm.sh --eif <path-to-eif>  # ALSO build the OPT-IN
+#                                                     # cerberus-signer-eif package
+#
+# --eif bundles a prebuilt, per-deployment EIF into an optional
+# cerberus-signer-eif RPM. That RPM carries the KMS-encrypted CA key and the
+# PCR0-pinned CA public key, so it is per-deployment and per-architecture — ship
+# it only over an operator-controlled channel, never a public repo. --eif needs
+# a local build; it is incompatible with --mock's clean chroot.
 #
 # Prerequisites:
 #   dnf install rpm-build rpmdevtools golang make    # Fedora / RHEL / Amazon Linux 2023
 #   yum install rpm-build rpmdevtools golang make    # Amazon Linux 2 / RHEL 7
 set -euo pipefail
+
+# --- Parse arguments -------------------------------------------------------
+MOCK=0
+EIF_FILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mock)  MOCK=1; shift ;;
+        --eif)
+            [[ $# -ge 2 ]] || { echo "ERROR: --eif requires a path argument" >&2; exit 2; }
+            EIF_FILE="$2"; shift 2 ;;
+        --eif=*) EIF_FILE="${1#--eif=}"; shift ;;
+        -h|--help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$0"; exit 0 ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--mock] [--eif <path-to-eif>]" >&2
+            exit 2 ;;
+    esac
+done
+
+EXTRA_DEFINES=()
+if [[ -n "${EIF_FILE}" ]]; then
+    if [[ "${MOCK}" -eq 1 ]]; then
+        echo "ERROR: --eif is incompatible with --mock." >&2
+        echo "  The EIF is a per-deployment artifact built on a trusted host; bundling it" >&2
+        echo "  requires a local (non-chroot) rpmbuild. Re-run without --mock." >&2
+        exit 2
+    fi
+    if [[ ! -f "${EIF_FILE}" ]]; then
+        echo "ERROR: EIF file not found: ${EIF_FILE}" >&2
+        exit 2
+    fi
+    # Absolutize: %install reads this path directly from the build host.
+    EIF_FILE="$(cd "$(dirname "${EIF_FILE}")" && pwd)/$(basename "${EIF_FILE}")"
+    EXTRA_DEFINES+=(--define "eif_file ${EIF_FILE}")
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -47,7 +90,7 @@ tar -czf "${RPMBUILD_DIR}/SOURCES/${TARBALL}.tar.gz" \
 cp "${SCRIPT_DIR}/cerberus.spec" "${RPMBUILD_DIR}/SPECS/"
 
 # Build the RPM.
-if [[ "${1:-}" == "--mock" ]]; then
+if [[ "${MOCK}" -eq 1 ]]; then
     echo "==> Building SRPM for mock..."
     rpmbuild \
         --define "_topdir ${RPMBUILD_DIR}" \
@@ -58,10 +101,16 @@ if [[ "${1:-}" == "--mock" ]]; then
     echo "==> Building in mock chroot..."
     mock --rebuild "${SRPM}"
 else
+    if [[ -n "${EIF_FILE}" ]]; then
+        echo "==> Bundling EIF into the opt-in cerberus-signer-eif package: ${EIF_FILE}"
+        echo "    WARNING: this RPM carries the KMS-encrypted CA key + PCR0-pinned public key."
+        echo "             It is per-deployment; publish only to an operator-controlled channel."
+    fi
     echo "==> Building RPM locally..."
     rpmbuild \
         --define "_topdir ${RPMBUILD_DIR}" \
         --define "rpm_version ${VERSION}" \
+        "${EXTRA_DEFINES[@]+"${EXTRA_DEFINES[@]}"}" \
         -ba "${RPMBUILD_DIR}/SPECS/cerberus.spec"
 fi
 

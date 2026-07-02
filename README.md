@@ -118,7 +118,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 - Go 1.26+
 - Docker, including the `buildx` plugin (used for multi-platform builds)
 - Python 3 (the EIF Makefile parses the `nitro-cli build-enclave` JSON output to emit the PCR manifest)
-- [AWS Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli.html) (`nitro-cli`)
+- [AWS Nitro Enclaves CLI](https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli.html) (`nitro-cli`). Both `aws-nitro-enclaves-cli` and `aws-nitro-enclaves-cli-devel` are required.
 - AWS CLI
 - For cross-architecture EIF builds (e.g. building `eif-arm64` on an x86 host), QEMU `binfmt_misc` must be registered. On most distros: `docker run --privileged --rm tonistiigi/binfmt --install all`.
 
@@ -177,9 +177,11 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
      --output text \
      --query CiphertextBlob | base64 -d > ca_key.enc
 
-   # Remove the unencrypted private key
-   rm ca_key
+   # Securely delete the unencrypted private key
+   shred -u ca_key 2>/dev/null || rm -f ca_key
    ```
+
+   > **Tip:** `make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=...` does the generate + encrypt + secure-delete in one step. It **refuses to overwrite** an existing `ca_key`/`ca_key.pub`/`ca_key.enc` — regenerating creates a *different* CA, which every SSH server would reject until you re-distribute the new `ca_key.pub`. To rotate deliberately, run `make -C ssh-cert-signer clean-ca-key` first.
 
 3. **Copy the encrypted key to the enclave directory**:
    ```bash
