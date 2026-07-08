@@ -140,8 +140,8 @@ type SigningRequest struct {
 	// enumerated into a certificate. See docs/cssh.md and docs/RUNBOOK.md.
 	AllPrincipals bool `json:"all_principals,omitempty"`
 	// SelfPrincipal requests a certificate for the caller's own identity — the
-	// short uid of the authenticated Kerberos principal (pkilar@FOO.COM ->
-	// "pkilar") — without needing to be enumerated in any group. It is gated by
+	// short uid of the authenticated Kerberos principal (jsmith@FOO.COM ->
+	// "jsmith") — without needing to be enumerated in any group. It is gated by
 	// the server's self_principal config (opt-in, a realm allowlist, and a
 	// denylist that always includes "root"). Mutually exclusive with Principals
 	// and AllPrincipals. See docs/cssh.md and docs/RUNBOOK.md.

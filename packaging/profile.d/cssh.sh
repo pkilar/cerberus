@@ -66,11 +66,13 @@
 #                         allowed_principals). Requires --sign-only and is
 #                         mutually exclusive with --principals. Refused server-
 #                         side if that group grants "*" (unbounded).
-#   --self                request a cert for your OWN identity (the server issues
-#                         for the short uid of your Kerberos principal). Requires
-#                         the server's self_principal to be enabled for your
-#                         realm. Mutually exclusive with --principals and
-#                         --all-principals.
+#   --self                fetch a cert for your OWN identity (the server issues
+#                         for the short uid of your Kerberos principal) and exit.
+#                         Requires --sign-only, and the server's self_principal
+#                         to be enabled for your realm. Mutually exclusive with
+#                         --principals and --all-principals. To just connect as
+#                         yourself, run cssh normally — the server accepts a
+#                         request for your own uid without any flag.
 #   --verbose             print the cert path to stdout in --sign-only mode
 #                         (otherwise --sign-only is silent).
 #   --                    end of cssh flags; remaining args go to ssh verbatim
@@ -90,8 +92,8 @@ Flags:
                       silent unless --verbose (HOST optional, used for principal)
   --all-principals    cert for every principal in your first group; requires
                       --sign-only, mutually exclusive with --principals
-  --self              cert for your own identity (server issues for your uid);
-                      mutually exclusive with --principals and --all-principals
+  --self              fetch a cert for your own identity (server issues for your
+                      uid); requires --sign-only, excl. --principals/--all-principals
   --verbose           print the cert path in --sign-only mode
   --                  end of cssh flags; remainder passed to ssh
 
@@ -198,12 +200,18 @@ EOF
         principals=   # the server expands the whole group; send no principals
     fi
 
-    # --self requests a cert for your own identity (the server derives the uid
-    # from your Kerberos principal). Unlike --all-principals it is fine for a
-    # normal connect (you're logging in as yourself), so it is NOT gated to
-    # --sign-only. Mutually exclusive with --all-principals and --principals; a
-    # CSSH_PRINCIPALS default is ignored.
+    # --self explicitly requests a cert for your own identity (the server derives
+    # the uid from your Kerberos principal). Require --sign-only: it means "hand
+    # me my own cert", not "connect". To simply connect as yourself, run cssh
+    # normally (cssh you@host / cssh host) — the server accepts a request for your
+    # own uid via self_principal without any flag. Mutually exclusive with
+    # --all-principals and --principals; a CSSH_PRINCIPALS default is ignored.
     if [ "$self_req" -ne 0 ]; then
+        if [ "$sign_only" -eq 0 ]; then
+            printf 'cssh: --self requires --sign-only (to connect as yourself, run cssh normally)\n' >&2
+            unset -f _cssh_check_krb
+            return 2
+        fi
         if [ "$all_principals" -ne 0 ]; then
             printf 'cssh: --self and --all-principals are mutually exclusive\n' >&2
             unset -f _cssh_check_krb

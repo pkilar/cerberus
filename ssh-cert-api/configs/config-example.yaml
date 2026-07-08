@@ -81,12 +81,12 @@ tls_key: ""
 # Self-service certificates (optional)
 # ──────────────────────────────────────────────────────────────────────
 # Let an authenticated user obtain a certificate for their OWN identity — the
-# short uid of their Kerberos principal (pkilar@FOO.COM -> "pkilar") — without
+# short uid of their Kerberos principal (jsmith@FOO.COM -> "jsmith") — without
 # being enumerated in any group. Disabled unless `enabled: true`.
 #
 #   - `realms` is an allowlist: only callers whose realm is listed may self-issue.
-#     This blocks the cross-realm collision where pkilar@FOO.COM and
-#     pkilar@BAR.COM would both map onto local account "pkilar". Single-realm
+#     This blocks the cross-realm collision where jsmith@FOO.COM and
+#     jsmith@BAR.COM would both map onto local account "jsmith". Single-realm
 #     shops list their one realm.
 #   - `deny` lists short uids that may never be self-issued. "root" is ALWAYS
 #     denied (a hard floor you can't remove); add your shared/role accounts.

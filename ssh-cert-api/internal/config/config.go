@@ -50,12 +50,12 @@ type Config struct {
 }
 
 // SelfPrincipalConfig controls the self-service issuance path: an authenticated
-// user may obtain a certificate for their own short uid (pkilar@FOO.COM ->
-// "pkilar") without being enumerated in any group. It is opt-in and constrained
+// user may obtain a certificate for their own short uid (jsmith@FOO.COM ->
+// "jsmith") without being enumerated in any group. It is opt-in and constrained
 // so it stays safe:
 //   - Realms is an allowlist: only callers whose Kerberos realm is listed may
-//     self-issue. This blocks the cross-realm collision where pkilar@FOO.COM and
-//     pkilar@BAR.COM would both collapse onto local account "pkilar".
+//     self-issue. This blocks the cross-realm collision where jsmith@FOO.COM and
+//     jsmith@BAR.COM would both collapse onto local account "jsmith".
 //   - Deny lists short uids that may never be self-issued. The effective set
 //     always includes "root" (a hard floor the authorizer adds), so root can
 //     never be obtained via this path regardless of config.

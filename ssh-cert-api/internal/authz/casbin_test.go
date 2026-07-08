@@ -901,7 +901,7 @@ func TestAuthorizeSelf_Allowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCasbinAuthorizer: %v", err)
 	}
-	res, err := a.AuthorizeSelf(t.Context(), "pkilar@FOO.COM")
+	res, err := a.AuthorizeSelf(t.Context(), "jsmith@FOO.COM")
 	if err != nil {
 		t.Fatalf("AuthorizeSelf: %v", err)
 	}
@@ -922,7 +922,7 @@ func TestAuthorizeSelf_Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCasbinAuthorizer: %v", err)
 	}
-	res, _ := a.AuthorizeSelf(t.Context(), "pkilar@FOO.COM")
+	res, _ := a.AuthorizeSelf(t.Context(), "jsmith@FOO.COM")
 	if res.Allowed {
 		t.Fatal("expected denied when self_principal is disabled")
 	}
@@ -934,7 +934,7 @@ func TestAuthorizeSelf_RealmNotAllowlisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCasbinAuthorizer: %v", err)
 	}
-	res, _ := a.AuthorizeSelf(t.Context(), "pkilar@BAR.COM")
+	res, _ := a.AuthorizeSelf(t.Context(), "jsmith@BAR.COM")
 	if res.Allowed {
 		t.Fatal("expected denied for a realm not in the allowlist")
 	}
