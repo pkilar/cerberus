@@ -139,6 +139,13 @@ type SigningRequest struct {
 	// allowed_principals is the "*" wildcard, since an unbounded set cannot be
 	// enumerated into a certificate. See docs/cssh.md and docs/RUNBOOK.md.
 	AllPrincipals bool `json:"all_principals,omitempty"`
+	// SelfPrincipal requests a certificate for the caller's own identity — the
+	// short uid of the authenticated Kerberos principal (pkilar@FOO.COM ->
+	// "pkilar") — without needing to be enumerated in any group. It is gated by
+	// the server's self_principal config (opt-in, a realm allowlist, and a
+	// denylist that always includes "root"). Mutually exclusive with Principals
+	// and AllPrincipals. See docs/cssh.md and docs/RUNBOOK.md.
+	SelfPrincipal bool `json:"self_principal,omitempty"`
 }
 
 // SigningResponse is the structure for JSON response sent back by the web API and the Nitro Enclave.

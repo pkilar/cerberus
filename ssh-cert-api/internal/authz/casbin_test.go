@@ -877,3 +877,90 @@ func TestAuthorizeAll_LDAPFailsClosed(t *testing.T) {
 		t.Fatal("expected fail-closed denial on LDAP error")
 	}
 }
+
+// selfCfg builds a config with a self_principal block for AuthorizeSelf tests.
+func selfCfg(enabled bool, realms, deny []string) *config.Config {
+	cfg := newTestConfig(map[string]config.Group{
+		"admins": {
+			Members:          []string{"x@X"},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+		},
+	})
+	cfg.SelfPrincipal = config.SelfPrincipalConfig{
+		Enabled:          enabled,
+		Realms:           realms,
+		Deny:             deny,
+		CertificateRules: config.CertificateRules{Validity: "8h", Permissions: map[string]string{"permit-pty": ""}},
+	}
+	return cfg
+}
+
+func TestAuthorizeSelf_Allowed(t *testing.T) {
+	t.Parallel()
+	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, nil), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeSelf(t.Context(), "pkilar@FOO.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeSelf: %v", err)
+	}
+	if !res.Allowed {
+		t.Fatal("expected allowed for realm-allowlisted, non-denied uid")
+	}
+	if res.Source != "self" || res.GroupName != "self" {
+		t.Errorf("got source=%q group=%q, want both 'self'", res.Source, res.GroupName)
+	}
+	if res.CertificateRules == nil || res.CertificateRules.Validity != "8h" {
+		t.Errorf("expected self certificate_rules (validity 8h), got %+v", res.CertificateRules)
+	}
+}
+
+func TestAuthorizeSelf_Disabled(t *testing.T) {
+	t.Parallel()
+	a, err := NewCasbinAuthorizer(selfCfg(false, []string{"FOO.COM"}, nil), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, _ := a.AuthorizeSelf(t.Context(), "pkilar@FOO.COM")
+	if res.Allowed {
+		t.Fatal("expected denied when self_principal is disabled")
+	}
+}
+
+func TestAuthorizeSelf_RealmNotAllowlisted(t *testing.T) {
+	t.Parallel()
+	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, nil), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, _ := a.AuthorizeSelf(t.Context(), "pkilar@BAR.COM")
+	if res.Allowed {
+		t.Fatal("expected denied for a realm not in the allowlist")
+	}
+}
+
+func TestAuthorizeSelf_DenylistedUid(t *testing.T) {
+	t.Parallel()
+	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, []string{"deploy"}), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, _ := a.AuthorizeSelf(t.Context(), "deploy@FOO.COM")
+	if res.Allowed {
+		t.Fatal("expected denied for a uid on the denylist")
+	}
+}
+
+func TestAuthorizeSelf_RootFloorAlwaysDenied(t *testing.T) {
+	t.Parallel()
+	// deny is empty, yet "root" must still be refused by the hard floor.
+	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, nil), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, _ := a.AuthorizeSelf(t.Context(), "root@FOO.COM")
+	if res.Allowed {
+		t.Fatal("expected 'root' to be denied by the hard floor even with an empty deny list")
+	}
+}

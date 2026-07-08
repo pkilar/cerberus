@@ -190,14 +190,57 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	principal := user.Username + "@" + user.Realm
 
-	// Two request shapes, mutually exclusive: an explicit principals list, or
-	// all_principals (mint a cert for every principal in the user's first group).
-	// Both paths end with an authorized result and a concrete grantedPrincipals
-	// set that feeds the enclave request below.
+	// Three request shapes, mutually exclusive: an explicit principals list,
+	// all_principals (every principal in the user's first group), or
+	// self_principal (a cert for the caller's own short uid). Each path ends with
+	// an authorized result and a concrete grantedPrincipals set that feeds the
+	// enclave request below.
 	var result *authz.AuthorizationResult
 	var grantedPrincipals []string
 
-	if req.AllPrincipals {
+	if req.SelfPrincipal {
+		if req.AllPrincipals || len(req.Principals) != 0 {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "self_principal is mutually exclusive with all_principals and principals"})
+			return
+		}
+
+		slog.Info("sign.request", "principal", principal, "self_principal", true, "remote_addr", r.RemoteAddr)
+
+		var authzErr error
+		result, authzErr = s.authorizer.AuthorizeSelf(r.Context(), principal)
+		if authzErr != nil {
+			outcome = outcomeAuthzError
+			slog.Error("authz.error", "principal", principal, "error", authzErr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
+			return
+		}
+		if !result.Allowed {
+			outcome = outcomeDenied
+			slog.Warn("authz.denied", "principal", principal, "self_principal", true)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized (self-principal not permitted for this realm/uid)"})
+			return
+		}
+
+		// Issue for the caller's own short uid. AuthorizeSelf has already
+		// confirmed it is realm-allowlisted and not on the denylist; re-check the
+		// structural invariants (non-empty, not "*") as defense in depth.
+		uid := user.Username
+		if uid == "" || strings.TrimSpace(uid) == "*" {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid self principal"})
+			return
+		}
+		grantedPrincipals = []string{uid}
+	} else if req.AllPrincipals {
 		if len(req.Principals) != 0 {
 			outcome = outcomeInvalidBody
 			w.Header().Set("Content-Type", "application/json")

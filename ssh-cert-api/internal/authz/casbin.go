@@ -48,6 +48,12 @@ type CasbinAuthorizer struct {
 	ldapGroupBindings map[string]map[string]struct{}      // Cerberus group name -> normalized DN set
 	resolver          LDAPResolver                        // nil disables LDAP-backed authorization
 	stripRealms       map[string]struct{}                 // realms whose @REALM suffix is stripped for static members lookup; nil disables
+
+	// Self-service issuance (self_principal). selfEnabled gates the whole path.
+	selfRealms map[string]struct{}      // realms allowed to self-issue
+	selfDeny   map[string]struct{}      // short uids that may never self-issue (always includes "root")
+	selfRules  *config.CertificateRules // cert parameters for self-issued certs
+	selfOn     bool
 }
 
 // NewCasbinAuthorizer creates a CasbinAuthorizer with policies loaded from
@@ -64,6 +70,8 @@ func NewCasbinAuthorizer(cfg *config.Config, resolver LDAPResolver) (*CasbinAuth
 		return nil, fmt.Errorf("failed to create casbin enforcer: %w", err)
 	}
 
+	selfRules := cfg.SelfPrincipal.CertificateRules
+
 	ca := &CasbinAuthorizer{
 		enforcer:          e,
 		groupRules:        make(map[string]*config.CertificateRules),
@@ -71,6 +79,10 @@ func NewCasbinAuthorizer(cfg *config.Config, resolver LDAPResolver) (*CasbinAuth
 		ldapGroupBindings: make(map[string]map[string]struct{}),
 		resolver:          resolver,
 		stripRealms:       realmSet(cfg.StripRealms),
+		selfOn:            cfg.SelfPrincipal.Enabled,
+		selfRealms:        realmSet(cfg.SelfPrincipal.Realms),
+		selfDeny:          selfDenySet(cfg.SelfPrincipal.Deny),
+		selfRules:         &selfRules,
 	}
 
 	if err := ca.loadPolicies(cfg); err != nil {
@@ -251,6 +263,52 @@ func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal stri
 		GroupName:        groupName,
 		CertificateRules: ca.groupRules[groupName],
 		Source:           source,
+	}, nil
+}
+
+// selfDenySet builds the self-issuance denylist. "root" is a hard floor that is
+// always present, so a user can never self-issue a cert for principal "root"
+// regardless of config — obtaining root requires a deliberate group with
+// allowed_principals: ["root"].
+func selfDenySet(deny []string) map[string]struct{} {
+	m := map[string]struct{}{"root": {}}
+	for _, d := range deny {
+		m[d] = struct{}{}
+	}
+	return m
+}
+
+// AuthorizeSelf implements the self-service path: userPrincipal may obtain a
+// certificate for its own short uid. It is independent of group membership.
+// Allowed=true only when self_principal is enabled, the caller's realm is in the
+// allowlist, and the short uid is neither empty, "*", nor on the denylist (which
+// always includes "root"). On success the caller issues a cert for the uid using
+// the returned CertificateRules. ctx is unused (no I/O) but kept for interface
+// symmetry.
+func (ca *CasbinAuthorizer) AuthorizeSelf(_ context.Context, userPrincipal string) (*AuthorizationResult, error) {
+	if !ca.selfOn {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+	at := strings.LastIndex(userPrincipal, "@")
+	if at < 0 {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+	uid := userPrincipal[:at]
+	realm := userPrincipal[at+1:]
+	if uid == "" || realm == "" || uid == "*" {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+	if _, ok := ca.selfRealms[realm]; !ok {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+	if _, denied := ca.selfDeny[uid]; denied {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+	return &AuthorizationResult{
+		Allowed:          true,
+		GroupName:        "self",
+		CertificateRules: ca.selfRules,
+		Source:           "self",
 	}, nil
 }
 

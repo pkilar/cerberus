@@ -291,6 +291,11 @@ exit 0
   and refuses a "*"-granting group (an unbounded set can't be enumerated). The
   cssh client exposes it as `cssh --sign-only --all-principals` (sign-only gated,
   mutually exclusive with --principals).
+- Self-service certificates: an opt-in self_principal config block lets an
+  authenticated user obtain a cert for their own short uid (pkilar@FOO.COM ->
+  "pkilar") without group membership, constrained by a realm allowlist and a
+  denylist that always includes "root". The cssh client exposes it as
+  `cssh --self`. See docs/RUNBOOK.md and the config example.
 - cssh hardened for bash AND native zsh: the optional --cacert is now passed
   via an explicit branch instead of the ${cacert:+...} idiom, which word-splits
   in bash but NOT in native zsh (curl would otherwise get "--cacert <path>" as a

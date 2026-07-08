@@ -66,6 +66,11 @@
 #                         allowed_principals). Requires --sign-only and is
 #                         mutually exclusive with --principals. Refused server-
 #                         side if that group grants "*" (unbounded).
+#   --self                request a cert for your OWN identity (the server issues
+#                         for the short uid of your Kerberos principal). Requires
+#                         the server's self_principal to be enabled for your
+#                         realm. Mutually exclusive with --principals and
+#                         --all-principals.
 #   --verbose             print the cert path to stdout in --sign-only mode
 #                         (otherwise --sign-only is silent).
 #   --                    end of cssh flags; remaining args go to ssh verbatim
@@ -73,7 +78,7 @@
 cssh() {
     _cssh_usage() {
         cat >&2 <<'EOF'
-Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--verbose] [--] HOST [SSH_ARGS...]
+Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--self] [--verbose] [--] HOST [SSH_ARGS...]
 
 Flags:
   --principals u1,u2  request specific cert principals
@@ -85,6 +90,8 @@ Flags:
                       silent unless --verbose (HOST optional, used for principal)
   --all-principals    cert for every principal in your first group; requires
                       --sign-only, mutually exclusive with --principals
+  --self              cert for your own identity (server issues for your uid);
+                      mutually exclusive with --principals and --all-principals
   --verbose           print the cert path in --sign-only mode
   --                  end of cssh flags; remainder passed to ssh
 
@@ -141,6 +148,7 @@ EOF
     local force=0
     local sign_only=0
     local all_principals=0
+    local self_req=0
     local principals_set_by_flag=0
     local verbose=0
 
@@ -162,6 +170,7 @@ EOF
             --force)        force=1; shift ;;
             --sign-only)    sign_only=1; shift ;;
             --all-principals) all_principals=1; shift ;;
+            --self)         self_req=1; shift ;;
             --verbose)      verbose=1; shift ;;
             -h|--help)      _cssh_usage; unset -f _cssh_usage _cssh_check_krb; return 0 ;;
             --)             shift; break ;;
@@ -189,12 +198,31 @@ EOF
         principals=   # the server expands the whole group; send no principals
     fi
 
+    # --self requests a cert for your own identity (the server derives the uid
+    # from your Kerberos principal). Unlike --all-principals it is fine for a
+    # normal connect (you're logging in as yourself), so it is NOT gated to
+    # --sign-only. Mutually exclusive with --all-principals and --principals; a
+    # CSSH_PRINCIPALS default is ignored.
+    if [ "$self_req" -ne 0 ]; then
+        if [ "$all_principals" -ne 0 ]; then
+            printf 'cssh: --self and --all-principals are mutually exclusive\n' >&2
+            unset -f _cssh_check_krb
+            return 2
+        fi
+        if [ "$principals_set_by_flag" -ne 0 ]; then
+            printf 'cssh: --self and --principals are mutually exclusive\n' >&2
+            unset -f _cssh_check_krb
+            return 2
+        fi
+        principals=   # the server issues for the caller's own uid
+    fi
+
     # If the caller didn't pin principals, ask ssh itself who the target login
     # user is. This handles user@host, -l USER, and ssh_config User blocks
     # uniformly — re-parsing ssh's arg grammar in shell would be fragile. Fall
     # back to the local login name (USER, or `id -un` if USER is unset). Skipped
-    # for --all-principals, which sends no principals at all.
-    if [ "$all_principals" -eq 0 ] && [ -z "$principals" ]; then
+    # for --all-principals / --self, which send no principals at all.
+    if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ -z "$principals" ]; then
         if [ $# -gt 0 ]; then
             principals=$(ssh -G "$@" 2>/dev/null \
                 | awk '/^user /{print $2; exit}')
@@ -285,11 +313,11 @@ EOF
                     p && /:/ { p=0; next }
                     p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
                 ' | sort -u | tr '\n' ',')
-                # --all-principals has no fixed requested set to compare against
-                # (the server expands the whole group), so its broad cert is
+                # --all-principals / --self have no fixed requested set to compare
+                # against (the server derives the principals), so their certs are
                 # cached on expiry alone; entitlement changes are picked up on the
                 # next re-sign (expiry or --force).
-                if [ "$all_principals" -eq 0 ] && [ "$req_princ" != "$cert_princ" ]; then
+                if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ "$req_princ" != "$cert_princ" ]; then
                     need_sign=1
                 else
                     local valid_to
@@ -329,7 +357,9 @@ EOF
         fi
 
         local req_json
-        if [ "$all_principals" -ne 0 ]; then
+        if [ "$self_req" -ne 0 ]; then
+            req_json=$(jq -nc --rawfile k "$pubkey" '{ssh_key: $k, self_principal: true}')
+        elif [ "$all_principals" -ne 0 ]; then
             req_json=$(jq -nc --rawfile k "$pubkey" '{ssh_key: $k, all_principals: true}')
         else
             local principals_json

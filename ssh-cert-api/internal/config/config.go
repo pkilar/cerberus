@@ -42,6 +42,34 @@ type Config struct {
 	// LDAP-backed groups is unaffected — the resolver always sees the full
 	// user@REALM string.
 	StripRealms []string `yaml:"strip_realms"`
+
+	// SelfPrincipal enables self-service certificates for a user's own identity
+	// (the short uid of the authenticated Kerberos principal). Disabled unless
+	// Enabled is true. See SelfPrincipalConfig.
+	SelfPrincipal SelfPrincipalConfig `yaml:"self_principal"`
+}
+
+// SelfPrincipalConfig controls the self-service issuance path: an authenticated
+// user may obtain a certificate for their own short uid (pkilar@FOO.COM ->
+// "pkilar") without being enumerated in any group. It is opt-in and constrained
+// so it stays safe:
+//   - Realms is an allowlist: only callers whose Kerberos realm is listed may
+//     self-issue. This blocks the cross-realm collision where pkilar@FOO.COM and
+//     pkilar@BAR.COM would both collapse onto local account "pkilar".
+//   - Deny lists short uids that may never be self-issued. The effective set
+//     always includes "root" (a hard floor the authorizer adds), so root can
+//     never be obtained via this path regardless of config.
+//   - CertificateRules supplies the validity/permissions/extensions for the
+//     issued cert; its AllowedPrincipals is ignored (the principal is the uid).
+//
+// The issued cert only opens accounts sshd authorizes for that principal
+// (default: the account named after the uid, or an AuthorizedPrincipalsFile
+// mapping), so the server remains the final gate.
+type SelfPrincipalConfig struct {
+	Enabled          bool             `yaml:"enabled"`
+	Realms           []string         `yaml:"realms"`
+	Deny             []string         `yaml:"deny"`
+	CertificateRules CertificateRules `yaml:"certificate_rules"`
 }
 
 // Group defines a set of members and the certificate rules that apply to them.
@@ -248,6 +276,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateSelfPrincipal(); err != nil {
+		return err
+	}
+
 	for name, group := range c.Groups {
 		hasStatic := len(group.Members) > 0
 		hasLDAP := len(group.LDAPGroups) > 0
@@ -440,6 +472,53 @@ func validateFlagExtensions(group, field string, m map[string]string) error {
 	return nil
 }
 
+// validateSelfPrincipal checks the self-service issuance block. A disabled block
+// is not validated (a stale/incomplete config must not break startup). When
+// enabled it requires a non-empty realm allowlist and a usable validity, and
+// applies the same flag-extension rules as groups. AllowedPrincipals under
+// self_principal.certificate_rules is intentionally ignored (the principal is
+// the caller's uid), so it is not validated here.
+func (c *Config) validateSelfPrincipal() error {
+	sp := &c.SelfPrincipal
+	if !sp.Enabled {
+		return nil
+	}
+	if len(sp.Realms) == 0 {
+		return fmt.Errorf("self_principal is enabled but has no realms; list the Kerberos realms allowed to self-issue")
+	}
+	for i, r := range sp.Realms {
+		if strings.TrimSpace(r) == "" {
+			return fmt.Errorf("self_principal.realms[%d] must not be empty or whitespace", i)
+		}
+	}
+	for i, d := range sp.Deny {
+		if strings.TrimSpace(d) == "" {
+			return fmt.Errorf("self_principal.deny[%d] must not be empty or whitespace", i)
+		}
+	}
+	rules := sp.CertificateRules
+	if rules.Validity == "" {
+		return fmt.Errorf("self_principal.certificate_rules has no validity period defined")
+	}
+	d, err := time.ParseDuration(rules.Validity)
+	if err != nil {
+		return fmt.Errorf("invalid self_principal validity duration: %w", err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("self_principal validity %v must be positive", d)
+	}
+	if d > messages.MaxValidity {
+		return fmt.Errorf("self_principal validity %v exceeds maximum allowed %v", d, messages.MaxValidity)
+	}
+	if err := validateFlagExtensions("self_principal", "permissions", rules.Permissions); err != nil {
+		return err
+	}
+	if err := validateFlagExtensions("self_principal", "critical_options", rules.CriticalOptions); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Warning kinds. The string value is used directly as the slog event name at
 // startup so log aggregators can key on it; the prefix follows the
 // <area>.<event>[.<sub>] convention shared with the rest of the service.
@@ -451,6 +530,7 @@ const (
 	WarnLDAPCacheTTLLong             = "config.ldap.cache_ttl_long"
 	WarnLDAPRealmLowercase           = "config.ldap.realm_lowercase"
 	WarnStripRealmLowercase          = "config.strip_realm.lowercase"
+	WarnSelfPrincipalRealmLowercase  = "config.self_principal.realm_lowercase"
 )
 
 // Warning is one non-fatal configuration issue surfaced at startup. Kind is
@@ -542,6 +622,19 @@ func (c *Config) Warnings() []Warning {
 				Key:    r,
 				Detail: "Kerberos realms are conventionally uppercase; strip_realms matching is case-sensitive",
 			})
+		}
+	}
+	// self_principal.realms matching is likewise case-sensitive; a lowercase
+	// entry allowlists nothing.
+	if c.SelfPrincipal.Enabled {
+		for _, r := range c.SelfPrincipal.Realms {
+			if r != strings.ToUpper(r) {
+				warns = append(warns, Warning{
+					Kind:   WarnSelfPrincipalRealmLowercase,
+					Key:    r,
+					Detail: "Kerberos realms are conventionally uppercase; self_principal.realms matching is case-sensitive",
+				})
+			}
 		}
 	}
 	slices.SortFunc(warns, func(a, b Warning) int {
