@@ -465,7 +465,7 @@ func TestHandleSignRequest_AllPrincipalsDenied(t *testing.T) {
 // a cert for exactly the caller's short uid (the authenticated Username).
 func TestHandleSignRequest_SelfPrincipalIssuesUID(t *testing.T) {
 	rules := &config.CertificateRules{Validity: "8h", Permissions: map[string]string{"permit-pty": ""}}
-	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "FOO.COM"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "FOO.COM"}}
 	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: rules, Source: "self"}}
 	signer := &fakeSigner{signed: "ok"}
 	s := newServerForTest(t, authN, authZ, signer)
@@ -481,8 +481,8 @@ func TestHandleSignRequest_SelfPrincipalIssuesUID(t *testing.T) {
 	if signer.got == nil {
 		t.Fatal("signer never invoked")
 	}
-	if !slices.Equal(signer.got.Principals, []string{"pkilar"}) {
-		t.Errorf("cert principals = %v, want exactly [pkilar] (the caller's uid)", signer.got.Principals)
+	if !slices.Equal(signer.got.Principals, []string{"jsmith"}) {
+		t.Errorf("cert principals = %v, want exactly [jsmith] (the caller's uid)", signer.got.Principals)
 	}
 }
 
@@ -490,7 +490,7 @@ func TestHandleSignRequest_SelfPrincipalIssuesUID(t *testing.T) {
 // rejected (400) when combined with an explicit principals list.
 func TestHandleSignRequest_SelfPrincipalMutualExclusion(t *testing.T) {
 	rules := &config.CertificateRules{Validity: "8h"}
-	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "FOO.COM"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "FOO.COM"}}
 	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
 	s := newServerForTest(t, authN, authZ, signer)
@@ -515,7 +515,7 @@ func TestHandleSignRequest_SelfPrincipalMutualExclusion(t *testing.T) {
 // refuses the self-principal request (disabled, realm not allowlisted, or uid
 // denied).
 func TestHandleSignRequest_SelfPrincipalDenied(t *testing.T) {
-	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "BAR.COM"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "BAR.COM"}}
 	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: false}}
 	signer := &fakeSigner{signed: "ok"}
 	s := newServerForTest(t, authN, authZ, signer)
@@ -530,6 +530,64 @@ func TestHandleSignRequest_SelfPrincipalDenied(t *testing.T) {
 	}
 	if signer.got != nil {
 		t.Error("denied self_principal must not reach the signer")
+	}
+}
+
+// TestHandleSignRequest_SelfFallbackOwnIdentity verifies the implicit connect
+// path: an explicit request for exactly the caller's own uid that no group
+// covers is accepted via the self-fallback (AuthorizeSelf), so `cssh you@host`
+// works without group membership. The group path denies; AuthorizeSelf allows.
+func TestHandleSignRequest_SelfFallbackOwnIdentity(t *testing.T) {
+	selfRules := &config.CertificateRules{Validity: "8h", Permissions: map[string]string{"permit-pty": ""}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "FOO.COM"}}
+	authZ := &fakeAuthorizer{
+		result:     &authz.AuthorizationResult{Allowed: false}, // no group covers "jsmith"
+		selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: selfRules, Source: "self"},
+	}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["jsmith"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (self-fallback); body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"jsmith"}) {
+		t.Errorf("cert principals = %v, want exactly [jsmith]", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_SelfFallbackRejectsNonSelf verifies the fallback only
+// applies when the request is EXACTLY the caller's own uid: a request for a
+// different principal (root) by jsmith is NOT self-accepted even though
+// AuthorizeSelf would allow the caller's own uid — it stays a 403. This is the
+// "requested principal must equal the authenticated user" guard.
+func TestHandleSignRequest_SelfFallbackRejectsNonSelf(t *testing.T) {
+	selfRules := &config.CertificateRules{Validity: "8h"}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "FOO.COM"}}
+	authZ := &fakeAuthorizer{
+		result:     &authz.AuthorizationResult{Allowed: false},
+		selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: selfRules, Source: "self"},
+	}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (request is not the caller's own uid); body=%s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("a non-self request must not reach the signer via the self-fallback")
 	}
 }
 

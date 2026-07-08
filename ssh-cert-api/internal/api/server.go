@@ -371,6 +371,23 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !result.Allowed {
+			// Self-fallback: a user may always obtain a cert for their OWN
+			// identity when self_principal is enabled and the request is EXACTLY
+			// their own uid. This is what makes a plain `cssh you@host` / `cssh
+			// host` connect succeed without group membership. The "request set is
+			// exactly [user.Username]" check IS the verification that the requested
+			// principal matches the authenticated user; AuthorizeSelf then applies
+			// the realm allowlist and the (root-floored) denylist.
+			reqDedup := slices.Clone(req.Principals)
+			slices.Sort(reqDedup)
+			reqDedup = slices.Compact(reqDedup)
+			if len(reqDedup) == 1 && reqDedup[0] == user.Username {
+				if selfRes, selfErr := s.authorizer.AuthorizeSelf(r.Context(), principal); selfErr == nil && selfRes.Allowed {
+					result = selfRes
+				}
+			}
+		}
+		if !result.Allowed {
 			outcome = outcomeDenied
 			slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
 			w.Header().Set("Content-Type", "application/json")

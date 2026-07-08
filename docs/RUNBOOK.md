@@ -198,12 +198,17 @@ groups:
 
 **All-principals expansion** (`all_principals: true`): a `/sign` request may set `all_principals: true` (mutually exclusive with `principals`) to mint a cert for **every** principal in the user's **first group** (alphabetically). The API expands that group's finite `allowed_principals`, deduped and capped at 100. If the selected group grants `allowed_principals: ["*"]` (any principal), the request is **refused with a 400** — an unbounded set cannot be enumerated into a certificate; the caller must request explicit principals instead. The `cssh` client exposes this as `cssh --sign-only --all-principals` (see `docs/cssh.md`).
 
-**Self-service certificates** (`self_principal: true`): with the top-level `self_principal:` block enabled, a `/sign` request may set `self_principal: true` (mutually exclusive with `principals`/`all_principals`) to get a cert for the caller's **own short uid** — `pkilar@FOO.COM` → principal `pkilar` — without being enumerated in any group. It is constrained so it stays safe:
+**Self-service certificates**: with the top-level `self_principal:` block enabled, an authenticated user may obtain a cert for their **own short uid** — `jsmith@FOO.COM` → principal `jsmith` — without being enumerated in any group. Granted two ways, both of which issue a cert for *exactly* the authenticated uid:
 
-- **Realm allowlist** (`self_principal.realms`): only callers whose Kerberos realm is listed may self-issue. This blocks the cross-realm collision where `pkilar@FOO.COM` and `pkilar@BAR.COM` would both map onto local account `pkilar`. Single-realm shops list their one realm.
+- **Explicitly** — a `/sign` request with `self_principal: true` (mutually exclusive with `principals`/`all_principals`); the server derives the uid from the authenticated identity. This is what `cssh --self --sign-only` sends.
+- **Implicitly** — a normal request whose `principals` are **exactly** the caller's own uid (e.g. `jsmith` requesting `["jsmith"]`) that no group covers is accepted via the self path. The "requested principal equals the authenticated uid" check *is* the verification. This is what makes a plain `cssh jsmith@host` (or `cssh host` when the login equals your uid) connect succeed without group membership. A request for any *other* principal is unaffected — it still needs a group.
+
+It is constrained so it stays safe:
+
+- **Realm allowlist** (`self_principal.realms`): only callers whose Kerberos realm is listed may self-issue. This blocks the cross-realm collision where `jsmith@FOO.COM` and `jsmith@BAR.COM` would both map onto local account `jsmith`. Single-realm shops list their one realm.
 - **Denylist** (`self_principal.deny`): short uids that may never be self-issued. **`root` is always denied** — a hard floor the code adds that config cannot remove; add your shared/role accounts (`deploy`, `postgres`, …). Obtaining `root` requires a deliberate group with `allowed_principals: ["root"]`.
 - **Cert parameters** come from `self_principal.certificate_rules` (validity, permissions, extensions); its `allowed_principals` is ignored (the principal is the uid).
-- **The server is still the final gate.** A self-issued `pkilar` cert only opens accounts sshd authorizes for principal `pkilar` (by default the local account named `pkilar`, or an [AuthorizedPrincipalsFile](#authorizedprincipalsfile-advanced-1-to-1-mapping) mapping). In a fleet where accounts are provisioned per-human with matching names, the blast radius is exactly the user's own account. Pair it with `AuthorizedPrincipalsFile` for explicit identity→account mapping.
+- **The server is still the final gate.** A self-issued `jsmith` cert only opens accounts sshd authorizes for principal `jsmith` (by default the local account named `jsmith`, or an [AuthorizedPrincipalsFile](#authorizedprincipalsfile-advanced-1-to-1-mapping) mapping). In a fleet where accounts are provisioned per-human with matching names, the blast radius is exactly the user's own account. Pair it with `AuthorizedPrincipalsFile` for explicit identity→account mapping.
 
 Config:
 
@@ -218,7 +223,7 @@ self_principal:
       permit-pty: ""
 ```
 
-The `cssh` client exposes this as `cssh --self` (works in both connect and `--sign-only` modes; see `docs/cssh.md`).
+In the `cssh` client: `cssh --self --sign-only` explicitly fetches your own cert (the flag requires `--sign-only`), and a normal `cssh jsmith@host` / `cssh host` connect is accepted implicitly via the self path. See `docs/cssh.md`.
 
 **Realm stripping** (`strip_realms:`): SPNEGO/GSSAPI authenticates users as `uid@REALM.COM`, so by default every static `members:` entry must be written in that fully-qualified form. Listing a realm under the top-level `strip_realms:` removes the `@REALM` suffix from an authenticated principal **before** the static `members:` match, letting you enumerate members by bare short name (`alice`) instead of `alice@REALM.COM`. It is opt-in and off by default; an empty or omitted list preserves exact `uid@REALM` matching.
 
