@@ -163,6 +163,13 @@ listen: ":8443"
 tls_cert: "/etc/cerberus/cert.pem"
 tls_key: "/etc/cerberus/key.pem"
 
+# Optional: realms whose @REALM suffix is stripped before the static members:
+# match, so members can be listed by bare short name (alice) instead of the
+# full alice@REALM.COM. Omit to keep exact uid@REALM matching. When enabled,
+# write members: for the listed realms as bare names. See "Realm stripping".
+# strip_realms:
+#   - "REALM.COM"
+
 # Authorization groups
 groups:
   backend-engineers:
@@ -188,6 +195,14 @@ groups:
 ```
 
 **Authorization flow**: The API matches the authenticated Kerberos principal against group membership. When a user belongs to multiple groups, the API picks the **first group in alphabetical order by group name** whose `allowed_principals` cover **every** principal in the request. Principals are *not* combined across groups within a single request — pick the right group, or the request is rejected with `403`. Enforcement is in `ssh-cert-api/internal/authz/casbin.go`.
+
+**Realm stripping** (`strip_realms:`): SPNEGO/GSSAPI authenticates users as `uid@REALM.COM`, so by default every static `members:` entry must be written in that fully-qualified form. Listing a realm under the top-level `strip_realms:` removes the `@REALM` suffix from an authenticated principal **before** the static `members:` match, letting you enumerate members by bare short name (`alice`) instead of `alice@REALM.COM`. It is opt-in and off by default; an empty or omitted list preserves exact `uid@REALM` matching.
+
+- **Scoping is per-realm, deliberately.** Only principals whose realm is listed are stripped; identities in unlisted realms keep the full `uid@REALM` form. `alice@EXAMPLE.COM` and `alice@OTHER.COM` therefore never collapse onto the same `members:` entry unless you list **both** realms — do that only if that collision is intended.
+- **When enabled, write `members:` for the listed realms as bare names.** With `strip_realms: ["REALM.COM"]`, the lookup key for `alice@REALM.COM` becomes `alice`, so the group must list `alice`, not `alice@REALM.COM` (the latter would no longer match). Members in *unlisted* realms are still listed in full form.
+- **LDAP-backed groups are unaffected.** `strip_realms` touches only the static `members:` lookup. The LDAP resolver always receives the full `uid@REALM` string, so realm routing for `ldap_groups:` is unchanged.
+- **Matching is case-sensitive.** Kerberos realms are conventionally uppercase; a lowercase entry strips nothing and is surfaced at startup as `slog.Warn("config.strip_realm.lowercase", "key", ...)`. A blank/whitespace entry is a hard startup failure.
+- Audit logs (`auth.success`, `sign.request`) and the per-principal rate limiter always key on the full `uid@REALM`, regardless of this setting.
 
 ### Validation Constraints
 
