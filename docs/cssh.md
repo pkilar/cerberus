@@ -119,10 +119,17 @@ names you'll use across tools.
 
 ## Behavior
 
-- **Cache.** A signed cert is reused until its `Valid: from … to …` window
-  closes within `CSSH_REFRESH_BEFORE` seconds. The validity window is
-  parsed from `ssh-keygen -L`; if parsing fails for any reason the cert is
-  re-signed rather than reused.
+- **Cache.** A signed cert is reused only when it still covers the request:
+  its principal set matches the one being requested **and** its
+  `Valid: from … to …` window doesn't close within `CSSH_REFRESH_BEFORE`
+  seconds. Both are read from `ssh-keygen -L`; if parsing fails for any reason
+  the cert is re-signed rather than reused.
+- **Principal switching.** The signer mints a cert for *exactly* the requested
+  principals, so a cert issued for `principalA` cannot authenticate as
+  `principalB`. `cssh` compares the cached cert's principals (as a set — order
+  and duplicates don't matter) against what it's requesting, and re-signs on any
+  difference. So `cssh alice@host` then `cssh deploy@host` (both in one Cerberus
+  group) transparently re-signs on the switch instead of reusing alice's cert.
 - **Principal selection.** With `CSSH_PRINCIPALS`/`--principals` unset, `cssh`
   asks `ssh -G <args>` for the login user it would use for the destination —
   covering `user@host`, `-l user`, and `ssh_config` `User` directives — and

@@ -182,31 +182,63 @@ EOF
 
     local cert="${privkey}-cert.pub"
 
-    # Refresh decision: parse "Valid: from X to Y" out of ssh-keygen -L. If
-    # parsing fails for any reason we re-sign rather than reuse a cert we
-    # can't reason about.
+    # Refresh decision, from ssh-keygen -L on the cached cert. Re-sign when the
+    # cert is missing/unparseable, when its principal set no longer matches what
+    # we're requesting, or when it is expiring within refresh_before. Any parse
+    # failure re-signs rather than reuse a cert we can't reason about.
+    #
+    # The principal check is what makes a principalA -> principalB switch work:
+    # the signer issues a cert for EXACTLY the requested principals (not the
+    # group's full allowed set), so a cert minted for principalA cannot
+    # authenticate a request for principalB. We compare the two as sorted sets,
+    # so order and duplicates don't matter.
     local need_sign=$force
     if [ "$need_sign" -eq 0 ]; then
         if [ ! -s "$cert" ]; then
             need_sign=1
         else
-            local valid_to
-            valid_to=$(ssh-keygen -L -f "$cert" 2>/dev/null \
-                | awk '/^[[:space:]]+Valid:/ {print $NF; exit}')
-            if [ -z "$valid_to" ]; then
+            local cert_info
+            cert_info=$(ssh-keygen -L -f "$cert" 2>/dev/null)
+            if [ -z "$cert_info" ]; then
                 need_sign=1
-            elif [ "$valid_to" = "forever" ]; then
-                : # never expires; reuse
             else
-                local valid_epoch now
-                # GNU date first (`-d`), then BSD/macOS (`-j -f`); if neither
-                # parses the timestamp we fall back to 0, which forces a re-sign.
-                valid_epoch=$(date -d "$valid_to" +%s 2>/dev/null \
-                    || date -j -f '%Y-%m-%dT%H:%M:%S' "$valid_to" +%s 2>/dev/null \
-                    || printf '0')
-                now=$(date +%s)
-                if [ "$valid_epoch" -le $((now + refresh_before)) ]; then
+                local req_princ cert_princ
+                req_princ=$(printf '%s' "$principals" | tr ',' '\n' | awk 'NF' | sort -u | tr '\n' ',')
+                # Extract the cert's principal list: the lines indented under
+                # "Principals:" up to the next "<Header>:" line (principal names
+                # carry no colon, so a ':' marks the end of the block).
+                cert_princ=$(printf '%s\n' "$cert_info" | awk '
+                    /^[[:space:]]*Principals:/ {
+                        rest=$0; sub(/^[[:space:]]*Principals:[[:space:]]*/,"",rest)
+                        if (rest!="" && rest!="(none)") print rest
+                        p=1; next
+                    }
+                    p && /:/ { p=0; next }
+                    p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
+                ' | sort -u | tr '\n' ',')
+                if [ "$req_princ" != "$cert_princ" ]; then
                     need_sign=1
+                else
+                    local valid_to
+                    valid_to=$(printf '%s\n' "$cert_info" \
+                        | awk '/^[[:space:]]+Valid:/ {print $NF; exit}')
+                    if [ -z "$valid_to" ]; then
+                        need_sign=1
+                    elif [ "$valid_to" = "forever" ]; then
+                        : # never expires; reuse
+                    else
+                        local valid_epoch now
+                        # GNU date first (`-d`), then BSD/macOS (`-j -f`); if
+                        # neither parses the timestamp we fall back to 0, which
+                        # forces a re-sign.
+                        valid_epoch=$(date -d "$valid_to" +%s 2>/dev/null \
+                            || date -j -f '%Y-%m-%dT%H:%M:%S' "$valid_to" +%s 2>/dev/null \
+                            || printf '0')
+                        now=$(date +%s)
+                        if [ "$valid_epoch" -le $((now + refresh_before)) ]; then
+                            need_sign=1
+                        fi
+                    fi
                 fi
             fi
         fi
