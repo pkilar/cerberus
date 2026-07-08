@@ -52,12 +52,16 @@
 #   --url URL             override CERBERUS_URL for this call
 #   --cacert PATH         override CERBERUS_CACERT for this call
 #   --force               re-sign even if the cached cert is still valid
+#   --sign-only           fetch/refresh the cert and exit WITHOUT running ssh
+#                         (pre-authenticate, then use scp/rsync/sftp/git/etc.);
+#                         prints the cert path to stdout. HOST is optional and,
+#                         if given, is used only to resolve the principal.
 #   --                    end of cssh flags; remaining args go to ssh verbatim
 
 cssh() {
     _cssh_usage() {
         cat >&2 <<'EOF'
-Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--] HOST [SSH_ARGS...]
+Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--] HOST [SSH_ARGS...]
 
 Flags:
   --principals u1,u2  request specific cert principals
@@ -65,6 +69,8 @@ Flags:
   --url URL           Cerberus base URL (overrides CERBERUS_URL)
   --cacert PATH       CA bundle for the API's TLS cert (overrides CERBERUS_CACERT)
   --force             re-sign even if the cached cert is still valid
+  --sign-only         fetch/refresh the cert and exit without running ssh;
+                      prints the cert path (HOST optional, used for principal)
   --                  end of cssh flags; remainder passed to ssh
 
 Env: CERBERUS_URL CERBERUS_CACERT CSSH_PUBKEY CSSH_REFRESH_BEFORE CSSH_PRINCIPALS
@@ -118,6 +124,7 @@ EOF
     local refresh_before="${CSSH_REFRESH_BEFORE:-300}"
     local principals="${CSSH_PRINCIPALS:-}"
     local force=0
+    local sign_only=0
 
     # Reject a non-integer CSSH_REFRESH_BEFORE before it reaches arithmetic.
     case "$refresh_before" in
@@ -135,6 +142,7 @@ EOF
             --cacert)       cacert="$2"; shift 2 ;;
             --cacert=*)     cacert="${1#--cacert=}"; shift ;;
             --force)        force=1; shift ;;
+            --sign-only)    sign_only=1; shift ;;
             -h|--help)      _cssh_usage; unset -f _cssh_usage _cssh_check_krb; return 0 ;;
             --)             shift; break ;;
             *)              break ;;
@@ -296,6 +304,15 @@ EOF
     fi
 
     unset -f _cssh_check_krb
+
+    # Pre-authenticate mode: the cert is now on disk at $cert (adjacent to the
+    # private key), so ssh/scp/sftp/rsync -e ssh/git pick it up automatically
+    # when they use $privkey. Print the cert path (for scripting) and do NOT
+    # connect. Any HOST/SSH_ARGS were only used above to resolve the principal.
+    if [ "$sign_only" -ne 0 ]; then
+        printf '%s\n' "$cert"
+        return 0
+    fi
 
     # The Cerberus-signed cert is the only identity cssh uses. IdentitiesOnly=yes
     # prevents ssh from trying agent keys or any IdentityFile entries from
