@@ -283,6 +283,12 @@ exit 0
   the pre-authenticated cert. The cache is principal-aware: cssh compares the
   cached cert's principals against the requested set and re-signs on a switch
   (principalA -> principalB), not only on expiry.
+- All-principals expansion: a /sign request may set all_principals: true to mint
+  a cert for every principal in the user's first (alphabetical) group, instead
+  of enumerating them. The API expands that group's finite allowed_principals
+  and refuses a "*"-granting group (an unbounded set can't be enumerated). The
+  cssh client exposes it as `cssh --sign-only --all-principals` (sign-only gated,
+  mutually exclusive with --principals).
 - cssh hardened for bash AND native zsh: the optional --cacert is now passed
   via an explicit branch instead of the ${cacert:+...} idiom, which word-splits
   in bash but NOT in native zsh (curl would otherwise get "--cacert <path>" as a

@@ -56,12 +56,17 @@
 #                         (pre-authenticate, then use scp/rsync/sftp/git/etc.);
 #                         prints the cert path to stdout. HOST is optional and,
 #                         if given, is used only to resolve the principal.
+#   --all-principals      request a cert for EVERY principal in your first
+#                         Cerberus group (the server expands the group's finite
+#                         allowed_principals). Requires --sign-only and is
+#                         mutually exclusive with --principals. Refused server-
+#                         side if that group grants "*" (unbounded).
 #   --                    end of cssh flags; remaining args go to ssh verbatim
 
 cssh() {
     _cssh_usage() {
         cat >&2 <<'EOF'
-Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--] HOST [SSH_ARGS...]
+Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--] HOST [SSH_ARGS...]
 
 Flags:
   --principals u1,u2  request specific cert principals
@@ -71,6 +76,8 @@ Flags:
   --force             re-sign even if the cached cert is still valid
   --sign-only         fetch/refresh the cert and exit without running ssh;
                       prints the cert path (HOST optional, used for principal)
+  --all-principals    cert for every principal in your first group; requires
+                      --sign-only, mutually exclusive with --principals
   --                  end of cssh flags; remainder passed to ssh
 
 Env: CERBERUS_URL CERBERUS_CACERT CSSH_PUBKEY CSSH_REFRESH_BEFORE CSSH_PRINCIPALS
@@ -125,6 +132,8 @@ EOF
     local principals="${CSSH_PRINCIPALS:-}"
     local force=0
     local sign_only=0
+    local all_principals=0
+    local principals_set_by_flag=0
 
     # Reject a non-integer CSSH_REFRESH_BEFORE before it reaches arithmetic.
     case "$refresh_before" in
@@ -133,8 +142,8 @@ EOF
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --principals)   principals="$2"; shift 2 ;;
-            --principals=*) principals="${1#--principals=}"; shift ;;
+            --principals)   principals="$2"; principals_set_by_flag=1; shift 2 ;;
+            --principals=*) principals="${1#--principals=}"; principals_set_by_flag=1; shift ;;
             --pubkey)       pubkey="$2"; shift 2 ;;
             --pubkey=*)     pubkey="${1#--pubkey=}"; shift ;;
             --url)          cerberus_url="$2"; shift 2 ;;
@@ -143,6 +152,7 @@ EOF
             --cacert=*)     cacert="${1#--cacert=}"; shift ;;
             --force)        force=1; shift ;;
             --sign-only)    sign_only=1; shift ;;
+            --all-principals) all_principals=1; shift ;;
             -h|--help)      _cssh_usage; unset -f _cssh_usage _cssh_check_krb; return 0 ;;
             --)             shift; break ;;
             *)              break ;;
@@ -150,11 +160,31 @@ EOF
     done
     unset -f _cssh_usage
 
+    # --all-principals mints a broad cert (every principal in your first Cerberus
+    # group) for pre-authentication. Require --sign-only (you're staging a cert
+    # for other tools, not opening one interactive session), and forbid pairing
+    # it with an explicit --principals. A CSSH_PRINCIPALS default is simply
+    # ignored (not an error) so this works in a shell that exports one.
+    if [ "$all_principals" -ne 0 ]; then
+        if [ "$sign_only" -eq 0 ]; then
+            printf 'cssh: --all-principals requires --sign-only\n' >&2
+            unset -f _cssh_check_krb
+            return 2
+        fi
+        if [ "$principals_set_by_flag" -ne 0 ]; then
+            printf 'cssh: --all-principals and --principals are mutually exclusive\n' >&2
+            unset -f _cssh_check_krb
+            return 2
+        fi
+        principals=   # the server expands the whole group; send no principals
+    fi
+
     # If the caller didn't pin principals, ask ssh itself who the target login
     # user is. This handles user@host, -l USER, and ssh_config User blocks
     # uniformly — re-parsing ssh's arg grammar in shell would be fragile. Fall
-    # back to the local login name (USER, or `id -un` if USER is unset).
-    if [ -z "$principals" ]; then
+    # back to the local login name (USER, or `id -un` if USER is unset). Skipped
+    # for --all-principals, which sends no principals at all.
+    if [ "$all_principals" -eq 0 ] && [ -z "$principals" ]; then
         if [ $# -gt 0 ]; then
             principals=$(ssh -G "$@" 2>/dev/null \
                 | awk '/^user /{print $2; exit}')
@@ -216,7 +246,11 @@ EOF
                     p && /:/ { p=0; next }
                     p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
                 ' | sort -u | tr '\n' ',')
-                if [ "$req_princ" != "$cert_princ" ]; then
+                # --all-principals has no fixed requested set to compare against
+                # (the server expands the whole group), so its broad cert is
+                # cached on expiry alone; entitlement changes are picked up on the
+                # next re-sign (expiry or --force).
+                if [ "$all_principals" -eq 0 ] && [ "$req_princ" != "$cert_princ" ]; then
                     need_sign=1
                 else
                     local valid_to
@@ -255,15 +289,20 @@ EOF
             return 1
         fi
 
-        local req_json principals_json
-        principals_json=$(printf '%s' "$principals" \
-            | jq -Rc 'split(",") | map(select(length > 0))')
-        if [ "$(printf '%s' "$principals_json" | jq 'length')" -eq 0 ]; then
-            printf 'cssh: principals list is empty (set CSSH_PRINCIPALS or pass --principals)\n' >&2
-            unset -f _cssh_check_krb
-            return 2
+        local req_json
+        if [ "$all_principals" -ne 0 ]; then
+            req_json=$(jq -nc --rawfile k "$pubkey" '{ssh_key: $k, all_principals: true}')
+        else
+            local principals_json
+            principals_json=$(printf '%s' "$principals" \
+                | jq -Rc 'split(",") | map(select(length > 0))')
+            if [ "$(printf '%s' "$principals_json" | jq 'length')" -eq 0 ]; then
+                printf 'cssh: principals list is empty (set CSSH_PRINCIPALS or pass --principals)\n' >&2
+                unset -f _cssh_check_krb
+                return 2
+            fi
+            req_json=$(jq -nc --rawfile k "$pubkey" --argjson p "$principals_json" '{ssh_key: $k, principals: $p}')
         fi
-        req_json=$(jq -nc --rawfile k "$pubkey" --argjson p "$principals_json" '{ssh_key: $k, principals: $p}')
 
         local resp http_code curl_rc
         resp=$(mktemp "${TMPDIR:-/tmp}/cssh.XXXXXX") || { unset -f _cssh_check_krb; return 1; }

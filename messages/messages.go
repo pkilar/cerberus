@@ -132,6 +132,13 @@ type SigningRequest struct {
 	SSHKey     string   `json:"ssh_key"`
 	KeyID      string   `json:"key_id,omitempty"`
 	Principals []string `json:"principals,omitempty"`
+	// AllPrincipals requests a certificate for every principal in the first
+	// group (alphabetically) the user belongs to, instead of an explicit
+	// Principals list. The two are mutually exclusive: Principals must be empty
+	// when this is set. The API refuses expansion when the selected group's
+	// allowed_principals is the "*" wildcard, since an unbounded set cannot be
+	// enumerated into a certificate. See docs/cssh.md and docs/RUNBOOK.md.
+	AllPrincipals bool `json:"all_principals,omitempty"`
 }
 
 // SigningResponse is the structure for JSON response sent back by the web API and the Nitro Enclave.

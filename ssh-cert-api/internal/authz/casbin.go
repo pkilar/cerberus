@@ -156,40 +156,10 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	slices.Sort(reqPrincipals)
 	reqPrincipals = slices.Compact(reqPrincipals)
 
-	staticGroups := ca.userGroups[ca.staticMemberKey(userPrincipal)]
-	candidates := slices.Clone(staticGroups)
-	ldapMatchedGroups := map[string]struct{}{}
-
-	if ca.resolver != nil {
-		dns, ok, err := ca.resolver.GroupsForPrincipal(ctx, userPrincipal)
-		if err != nil {
-			slog.Warn("authz.ldap.error",
-				"principal", userPrincipal,
-				"error", err)
-			return &AuthorizationResult{Allowed: false}, nil
-		}
-		if ok {
-			for groupName, boundDNs := range ca.ldapGroupBindings {
-				for _, dn := range dns {
-					if _, hit := boundDNs[normalizeDN(dn)]; hit {
-						candidates = append(candidates, groupName)
-						ldapMatchedGroups[groupName] = struct{}{}
-						break
-					}
-				}
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
+	candidates, ldapMatchedGroups, ok := ca.candidateGroups(ctx, userPrincipal)
+	if !ok || len(candidates) == 0 {
 		return &AuthorizationResult{Allowed: false}, nil
 	}
-
-	// Deduplicate (a name could appear via both static and LDAP paths if a
-	// future config relaxation allowed it) and sort to preserve the
-	// established first-alphabetical-wins precedence rule.
-	slices.Sort(candidates)
-	candidates = slices.Compact(candidates)
 
 	for _, groupName := range candidates {
 		allAllowed := true
@@ -218,6 +188,70 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	}
 
 	return &AuthorizationResult{Allowed: false}, nil
+}
+
+// candidateGroups returns the user's candidate Cerberus groups (static
+// members plus LDAP-derived, deduplicated and sorted alphabetically) and the
+// subset matched via LDAP. ok is false with no groups when authorization must
+// fail closed — a configured LDAP resolver returned an error for this
+// principal — mirroring Authorize's fail-closed semantics. This is the single
+// source of the candidate-set computation shared by Authorize and AuthorizeAll.
+func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal string) (candidates []string, ldapMatched map[string]struct{}, ok bool) {
+	staticGroups := ca.userGroups[ca.staticMemberKey(userPrincipal)]
+	candidates = slices.Clone(staticGroups)
+	ldapMatched = map[string]struct{}{}
+
+	if ca.resolver != nil {
+		dns, resolved, err := ca.resolver.GroupsForPrincipal(ctx, userPrincipal)
+		if err != nil {
+			slog.Warn("authz.ldap.error",
+				"principal", userPrincipal,
+				"error", err)
+			return nil, nil, false
+		}
+		if resolved {
+			for groupName, boundDNs := range ca.ldapGroupBindings {
+				for _, dn := range dns {
+					if _, hit := boundDNs[normalizeDN(dn)]; hit {
+						candidates = append(candidates, groupName)
+						ldapMatched[groupName] = struct{}{}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Deduplicate (a name could appear via both static and LDAP paths if a
+	// future config relaxation allowed it) and sort to preserve the
+	// established first-alphabetical-wins precedence rule.
+	slices.Sort(candidates)
+	candidates = slices.Compact(candidates)
+	return candidates, ldapMatched, true
+}
+
+// AuthorizeAll implements the all-principals expansion group selection: it
+// returns the first alphabetical group the user belongs to, with that group's
+// CertificateRules. It does not consult requested principals — the caller
+// expands CertificateRules.AllowedPrincipals and must refuse a "*" group. The
+// same fail-closed LDAP semantics as Authorize apply.
+func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal string) (*AuthorizationResult, error) {
+	candidates, ldapMatched, ok := ca.candidateGroups(ctx, userPrincipal)
+	if !ok || len(candidates) == 0 {
+		return &AuthorizationResult{Allowed: false}, nil
+	}
+
+	groupName := candidates[0]
+	source := "static"
+	if _, viaLDAP := ldapMatched[groupName]; viaLDAP {
+		source = "ldap"
+	}
+	return &AuthorizationResult{
+		Allowed:          true,
+		GroupName:        groupName,
+		CertificateRules: ca.groupRules[groupName],
+		Source:           source,
+	}, nil
 }
 
 // realmSet builds a lookup set from a list of Kerberos realms, returning nil
