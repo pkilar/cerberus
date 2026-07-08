@@ -142,14 +142,21 @@ sudo install -m 0644 packaging/profile.d/cssh.sh /etc/profile.d/cssh.sh
   (`emulate sh -c 'source /etc/profile'`). On RHEL / Fedora / Amazon Linux, add
   the same one-liner to `/etc/zshrc` (or `/etc/zsh/zshrc`).
 
-Set the site endpoint once for all users by editing the marked block at the top
-of the installed file, or by exporting it globally (e.g. in the same
-`/etc/profile.d/cssh.sh` or a companion `/etc/profile.d/cerberus-env.sh`):
+Set the site endpoint once for all users in `/etc/profile.d/cerberus-env.sh`
+(shipped alongside `cssh.sh` by the `cerberus-client` package). That file is
+`%config(noreplace)`, so your edits survive package upgrades — whereas `cssh.sh`
+itself is plain code that is replaced on upgrade, so fixes always apply. Don't
+put site config in `cssh.sh`.
 
 ```sh
+# /etc/profile.d/cerberus-env.sh
 export CERBERUS_URL=https://cerberus.example.com:8443
 export CERBERUS_CACERT=/etc/pki/ca-trust/source/anchors/cerberus-ca.pem
 ```
+
+If you install `cssh.sh` by hand (not via the package), export the same
+variables from wherever you manage environment — your own
+`/etc/profile.d/cerberus-env.sh`, `~/.bashrc`/`~/.zshrc`, or config management.
 
 ### Per-user
 

@@ -26,7 +26,11 @@
 #              [ -r /etc/profile.d/cssh.sh ] && . /etc/profile.d/cssh.sh
 #
 # ── Site configuration ───────────────────────────────────────────────────────
-# Set your Cerberus endpoint once, for all users, by uncommenting and editing:
+# This file is plain code and is REPLACED on package upgrade — do NOT edit it for
+# site config. Set your Cerberus endpoint for all users in the companion file
+# /etc/profile.d/cerberus-env.sh (shipped %config(noreplace), so edits survive
+# upgrades), or export the variables from your own environment / config
+# management:
 #   export CERBERUS_URL=https://cerberus.example.com:8443
 #   export CERBERUS_CACERT=/etc/pki/ca-trust/source/anchors/cerberus-ca.pem
 # Users may still override per-shell (export CERBERUS_URL) or per-call (--url).
@@ -151,7 +155,7 @@ EOF
     fi
 
     if [ -z "$cerberus_url" ]; then
-        printf 'cssh: CERBERUS_URL not set (edit /etc/profile.d/cssh.sh, export CERBERUS_URL, or use --url)\n' >&2
+        printf 'cssh: CERBERUS_URL not set (set it in /etc/profile.d/cerberus-env.sh, export CERBERUS_URL, or use --url)\n' >&2
         unset -f _cssh_check_krb
         return 2
     fi

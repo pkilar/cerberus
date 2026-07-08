@@ -188,8 +188,12 @@ install -D -m 0644 %{eif_file} \
 %endif
 
 # --- cerberus-client ---
+# cssh.sh is plain code (replaced on upgrade so fixes always apply); site config
+# lives in the companion cerberus-env.sh, shipped %config(noreplace).
 install -D -m 0644 packaging/profile.d/cssh.sh \
     %{buildroot}%{_sysconfdir}/profile.d/cssh.sh
+install -D -m 0644 packaging/profile.d/cerberus-env.sh \
+    %{buildroot}%{_sysconfdir}/profile.d/cerberus-env.sh
 
 # ---------------------------------------------------------------------------
 # cerberus-api scriptlets
@@ -251,9 +255,11 @@ exit 0
 %files client
 %license LICENSE
 %doc docs/cssh.md
-# noreplace so an operator's site edits (CERBERUS_URL in the config block) survive
-# upgrades; a newer cssh.sh then lands as cssh.sh.rpmnew for the admin to merge.
-%config(noreplace) %{_sysconfdir}/profile.d/cssh.sh
+# cssh.sh is plain code: NOT %config, so security/functionality fixes always
+# apply on upgrade. Site config (CERBERUS_URL) lives in cerberus-env.sh, shipped
+# %config(noreplace) so operator edits survive upgrades.
+%{_sysconfdir}/profile.d/cssh.sh
+%config(noreplace) %{_sysconfdir}/profile.d/cerberus-env.sh
 
 %if %{defined eif_file}
 %files signer-eif
@@ -269,7 +275,9 @@ exit 0
   /etc/profile.d/cssh.sh. cssh fetches a short-lived OpenSSH user certificate
   from the signing API with the caller's Kerberos credentials, caches it, and
   hands off to ssh(1). Requires openssh-clients, curl, jq, krb5-workstation.
-  Shipped %config(noreplace) so site edits (CERBERUS_URL) survive upgrades.
+  cssh.sh is plain code (replaced on upgrade so fixes always apply); site config
+  (CERBERUS_URL/CERBERUS_CACERT) lives in the companion /etc/profile.d/
+  cerberus-env.sh, shipped %config(noreplace) so operator edits survive upgrades.
 - cssh hardened for bash AND native zsh: the optional --cacert is now passed
   via an explicit branch instead of the ${cacert:+...} idiom, which word-splits
   in bash but NOT in native zsh (curl would otherwise get "--cacert <path>" as a
