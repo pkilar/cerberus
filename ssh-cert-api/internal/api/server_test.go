@@ -34,10 +34,12 @@ func (f *fakeAuthenticator) AuthenticateRequest(*http.Request) (*auth.Authentica
 }
 
 type fakeAuthorizer struct {
-	result    *authz.AuthorizationResult
-	err       error
-	allResult *authz.AuthorizationResult // returned by AuthorizeAll; falls back to result/err when nil
-	allErr    error
+	result     *authz.AuthorizationResult
+	err        error
+	allResult  *authz.AuthorizationResult // returned by AuthorizeAll; falls back to result/err when nil
+	allErr     error
+	selfResult *authz.AuthorizationResult // returned by AuthorizeSelf; falls back to result/err when nil
+	selfErr    error
 }
 
 func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.AuthorizationResult, error) {
@@ -47,6 +49,13 @@ func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.Au
 func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
 	if f.allResult != nil || f.allErr != nil {
 		return f.allResult, f.allErr
+	}
+	return f.result, f.err
+}
+
+func (f *fakeAuthorizer) AuthorizeSelf(context.Context, string) (*authz.AuthorizationResult, error) {
+	if f.selfResult != nil || f.selfErr != nil {
+		return f.selfResult, f.selfErr
 	}
 	return f.result, f.err
 }
@@ -449,6 +458,78 @@ func TestHandleSignRequest_AllPrincipalsDenied(t *testing.T) {
 	}
 	if signer.got != nil {
 		t.Error("denied all_principals must not reach the signer")
+	}
+}
+
+// TestHandleSignRequest_SelfPrincipalIssuesUID verifies that self_principal mints
+// a cert for exactly the caller's short uid (the authenticated Username).
+func TestHandleSignRequest_SelfPrincipalIssuesUID(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "8h", Permissions: map[string]string{"permit-pty": ""}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "FOO.COM"}}
+	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: rules, Source: "self"}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","self_principal":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"pkilar"}) {
+		t.Errorf("cert principals = %v, want exactly [pkilar] (the caller's uid)", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_SelfPrincipalMutualExclusion verifies self_principal is
+// rejected (400) when combined with an explicit principals list.
+func TestHandleSignRequest_SelfPrincipalMutualExclusion(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "8h"}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "FOO.COM"}}
+	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: true, GroupName: "self", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","self_principal":true,"principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mutually exclusive") {
+		t.Errorf("body missing mutual-exclusion error: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("contradictory request must be rejected before the signer")
+	}
+}
+
+// TestHandleSignRequest_SelfPrincipalDenied verifies a 403 when the authorizer
+// refuses the self-principal request (disabled, realm not allowlisted, or uid
+// denied).
+func TestHandleSignRequest_SelfPrincipalDenied(t *testing.T) {
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "pkilar", Realm: "BAR.COM"}}
+	authZ := &fakeAuthorizer{selfResult: &authz.AuthorizationResult{Allowed: false}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","self_principal":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("denied self_principal must not reach the signer")
 	}
 }
 

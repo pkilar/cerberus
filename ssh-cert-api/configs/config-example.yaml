@@ -78,6 +78,35 @@ tls_key: ""
 #   - EXAMPLE.COM
 
 # ──────────────────────────────────────────────────────────────────────
+# Self-service certificates (optional)
+# ──────────────────────────────────────────────────────────────────────
+# Let an authenticated user obtain a certificate for their OWN identity — the
+# short uid of their Kerberos principal (pkilar@FOO.COM -> "pkilar") — without
+# being enumerated in any group. Disabled unless `enabled: true`.
+#
+#   - `realms` is an allowlist: only callers whose realm is listed may self-issue.
+#     This blocks the cross-realm collision where pkilar@FOO.COM and
+#     pkilar@BAR.COM would both map onto local account "pkilar". Single-realm
+#     shops list their one realm.
+#   - `deny` lists short uids that may never be self-issued. "root" is ALWAYS
+#     denied (a hard floor you can't remove); add your shared/role accounts.
+#   - `certificate_rules` supplies validity/permissions/etc. for the issued cert;
+#     its `allowed_principals` is ignored (the principal is the caller's uid).
+#   - The issued cert only opens accounts sshd authorizes for that principal
+#     (default: the account named after the uid, or an AuthorizedPrincipalsFile
+#     mapping), so the server stays the final gate. See docs/RUNBOOK.md.
+# self_principal:
+#   enabled: true
+#   realms:
+#     - EXAMPLE.COM
+#   deny:
+#     - deploy          # 'root' is always denied regardless of this list
+#   certificate_rules:
+#     validity: "8h"
+#     permissions:
+#       permit-pty: ""
+
+# ──────────────────────────────────────────────────────────────────────
 # LDAP-backed RBAC (optional)
 # ──────────────────────────────────────────────────────────────────────
 # Each entry under `ldap:` declares one directory backend. Backends are

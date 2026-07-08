@@ -61,6 +61,7 @@ cssh --sign-only                        # refresh the cert silently; don't conne
 cssh --sign-only --verbose              # refresh, then print the cert path
 cssh --sign-only user@host              # refresh a cert for host's login user
 cssh --sign-only --all-principals       # cert for every principal in your group
+cssh --self user@host                   # cert for your own identity, then connect
 cssh -- -L 8080:localhost:80 user@host  # pass-through ssh args after --
 cssh                                    # prints usage
 cssh --help                             # prints usage
@@ -144,6 +145,26 @@ ssh -i ~/.ssh/id_ed25519 root@host2
 - The broad cert is cached on expiry alone (there's no fixed requested set to
   compare); entitlement changes are picked up on the next re-sign (expiry or
   `--force`).
+
+### `--self`
+
+`--self` requests a cert for **your own identity** — the server issues it for the
+short uid of your Kerberos principal (`pkilar@FOO.COM` → `pkilar`) — without you
+being enumerated in any group:
+
+```sh
+cssh --self user@host        # cert for your own identity, then connect
+cssh --self --sign-only      # refresh a self-cert; don't connect
+```
+
+- Requires the **server** to have `self_principal` enabled for your realm (see
+  `docs/RUNBOOK.md`). The server enforces a realm allowlist and a denylist that
+  always includes `root`.
+- Mutually exclusive with `--principals` and `--all-principals`.
+- Unlike `--all-principals`, it is **not** limited to `--sign-only` — a
+  single-principal cert for your own name is fine for a normal connect.
+- The issued cert only lets you into accounts the server maps to your principal
+  (the account named after your uid, or an `AuthorizedPrincipalsFile` entry).
 
 ---
 

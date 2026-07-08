@@ -42,4 +42,12 @@ type Authorizer interface {
 	// a cert). Returns Allowed=false if the user is in no group, or if LDAP is
 	// configured and fails closed for this principal.
 	AuthorizeAll(ctx context.Context, userPrincipal string) (*AuthorizationResult, error)
+
+	// AuthorizeSelf decides the self-service path: whether userPrincipal may
+	// obtain a certificate for its own short uid. It is independent of group
+	// membership and returns Allowed=true only when self_principal is enabled,
+	// the caller's realm is in the allowlist, and the uid is not on the denylist
+	// (which always includes "root"). On success CertificateRules carries the
+	// self_principal cert parameters; the caller issues the cert for the uid.
+	AuthorizeSelf(ctx context.Context, userPrincipal string) (*AuthorizationResult, error)
 }

@@ -457,6 +457,64 @@ func TestValidate(t *testing.T) {
 			expectError: true,
 			errSubstr:   "strip_realms",
 		},
+		{
+			name: "valid self_principal",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				SelfPrincipal: SelfPrincipalConfig{
+					Enabled:          true,
+					Realms:           []string{"FOO.COM"},
+					Deny:             []string{"deploy"},
+					CertificateRules: CertificateRules{Validity: "8h"},
+				},
+				Groups: map[string]Group{
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "self_principal enabled without realms",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				SelfPrincipal: SelfPrincipalConfig{
+					Enabled:          true,
+					CertificateRules: CertificateRules{Validity: "8h"},
+				},
+				Groups: map[string]Group{
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+				},
+			},
+			expectError: true,
+			errSubstr:   "self_principal",
+		},
+		{
+			name: "self_principal enabled without validity",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				SelfPrincipal: SelfPrincipalConfig{
+					Enabled: true,
+					Realms:  []string{"FOO.COM"},
+				},
+				Groups: map[string]Group{
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+				},
+			},
+			expectError: true,
+			errSubstr:   "self_principal",
+		},
+		{
+			name: "self_principal disabled is not validated",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				// Enabled=false with an otherwise-incomplete block must not fail.
+				SelfPrincipal: SelfPrincipalConfig{Enabled: false},
+				Groups: map[string]Group{
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+				},
+			},
+			expectError: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1063,6 +1121,32 @@ func TestWarnings_StripRealm(t *testing.T) {
 			Kind:   WarnStripRealmLowercase,
 			Key:    "lower.example.com",
 			Detail: "Kerberos realms are conventionally uppercase; strip_realms matching is case-sensitive",
+		},
+	}
+	got := cfg.Warnings()
+	if !slices.Equal(got, want) {
+		t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, want)
+	}
+}
+
+func TestWarnings_SelfPrincipalRealm(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		KeytabPath: "/etc/keytab/test.keytab",
+		SelfPrincipal: SelfPrincipalConfig{
+			Enabled:          true,
+			Realms:           []string{"FOO.COM", "lower.foo.com"},
+			CertificateRules: CertificateRules{Validity: "8h"},
+		},
+		Groups: map[string]Group{
+			"admin": {Members: []string{"admin"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+		},
+	}
+	want := []Warning{
+		{
+			Kind:   WarnSelfPrincipalRealmLowercase,
+			Key:    "lower.foo.com",
+			Detail: "Kerberos realms are conventionally uppercase; self_principal.realms matching is case-sensitive",
 		},
 	}
 	got := cfg.Warnings()

@@ -103,14 +103,14 @@ issuance · **LOG** = logging/secrets · **SC** = supply chain/deploy.
 
 ## 6. Executive summary
 
-72 threats were identified across 8 trust-boundary domains:
+73 threats were identified across 8 trust-boundary domains:
 
 | Severity | Count |
 |---|---|
 | Critical | 1 |
 | High | 28 |
 | Medium | 36 |
-| Low | 7 |
+| Low | 8 |
 
 **The single Critical (`KMS-1`) and its siblings `KMS-2`/`SC-4` are not code defects — they are the load-bearing
 *deployment* control.** Because the change is host-mediated, the host holds the KMS-encrypted CA key *and*
@@ -128,7 +128,7 @@ the one-shot load gate that pins the CA identity after first load (`VSOCK-3b`), 
 packaged EIFs by default (`VSOCK-2`/`VSOCK-3`, `KMS-2`/`KMS-5`); (d) LDAP transport security (`AUTHZ-7`) and the
 first-alphabetical-group authorization rule (`AUTHZ-1`).
 
-## 7. Threat register (all 72)
+## 7. Threat register (all 73)
 
 | ID | Sev | DREAD | STRIDE | Title |
 |---|---|---|---|---|
@@ -201,6 +201,7 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `AUTHZ-4` | Low | 3.6 | ES | LDAP fail-open gap: malformed principal reaches static-group check when resolver is nil |
 | `AUTHZ-9` | Low | 3.4 | E | Members-static-or-LDAP exclusivity violation allows cross-source union if config validation bypassed |
 | `LOG-4` | Low | 3.4 | TR | Log injection via user-controlled principal strings in text log format |
+| `AUTHZ-13` | Low | 3.2 | E | Self-service issuance (`self_principal`) grants a cert for the caller's own short uid without group membership |
 | `VSOCK-6` | Low | 3 | I | Unbounded bufio.NewReader on host response path allows enclave error response to consume host memory |
 | `LOG-8` | Low | 2.8 | I | CiphertextForRecipient redaction depends on a nil-check that misses a future zero-length blob |
 | `SIGN-10` | Low | 2.4 | TR | Serial number collision — non-unique serials reduce revocation precision |
@@ -515,6 +516,7 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 | `AUTHZ-4` | Low | 3.6 | ES | Malformed principal reaches static-group check when resolver is nil | `errMalformedPrincipal` fail-closed when resolver≠nil `ldap_resolver.go:42-47`; static path explicit |
 | `AUTHZ-9` | Low | 3.4 | E | Static-or-LDAP exclusivity violation allows cross-source union | Hard error at `LoadConfig` if both set `config.go:230-234` |
 | `LOG-4` | Low | 3.4 | TR | Log injection via user-controlled principal strings (text format) | `LOG_FORMAT=json` (recommended) escapes control chars; stdlib slog handlers quote attribute values |
+| `AUTHZ-13` | Low | 3.2 | E | Self-service issuance (`self_principal`) grants a cert for the caller's own short uid without group membership | Opt-in, off by default; realm allowlist blocks the cross-realm uid collision; denylist with a hard `root` floor (`selfDenySet` in `casbin.go`) config cannot remove; cert scoped to exactly the uid; sshd is still the final gate (the account must be named/mapped to the principal — pair with `AuthorizedPrincipalsFile`). `config.Validate()` requires realms+validity when enabled; `AuthorizeSelf` unit-tested (realm allowlist, denylist, root floor) |
 | `VSOCK-6` | Low | 3 | I | Unbounded host response reader can consume host memory | 30s wall-clock `conn.SetDeadline` `client.go:90` bounds the read window |
 | `LOG-8` | Low | 2.8 | I | Redaction nil-check could miss a future zero-length blob | Explicit redaction before marshalling `messages.go:159-196`; current types always populate the blob when present |
 | `SIGN-10` | Low | 2.4 | TR | Serial collision reduces revocation precision | Serial from `crypto/rand` over 2^64 `sign-public-key.go:91`; collision probability negligible |
