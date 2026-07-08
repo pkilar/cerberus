@@ -1077,6 +1077,53 @@ Then place the CA public key at `/etc/ssh/cerberus-ca.pub` and reload sshd:
 sudo systemctl reload sshd
 ```
 
+#### AuthorizedPrincipalsFile (advanced 1-to-1 mapping)
+
+By default, a Cerberus cert authenticates when the **local login name** you SSH to appears in the certificate's principals list — `ssh ec2-user@host` succeeds when the cert carries `ec2-user`. That keeps identity and account names in lock-step.
+
+`AuthorizedPrincipalsFile` decouples them: for each local account (`%u`), sshd reads a file listing which **certificate principals** may assume that account. This lets you map a human identity principal (e.g. `alice`, or the realm-qualified `alice@EXAMPLE.COM` Cerberus signs) onto one or more local/role accounts (`deploy`, `ec2-user`) with an auditable, server-side allowlist — without the certificate having to carry the account name.
+
+> When `AuthorizedPrincipalsFile` is set for an account, the implicit "login name must be a cert principal" rule **no longer applies** to that account: sshd accepts the login only if one of the cert's principals is listed in the file. List every allowed principal explicitly — including the account's own name, if you still want the default behavior for it.
+
+**1. Point sshd at a per-account file** (`%u` expands to the target account name):
+
+```
+# /etc/ssh/sshd_config
+TrustedUserCAKeys        /etc/ssh/cerberus-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+```
+
+**2. Create the mapping files.** The directory and files must be owned by root and not group/world-writable, or sshd's `StrictModes` ignores them:
+
+```bash
+sudo mkdir -p /etc/ssh/auth_principals
+# Cert principals allowed to log in AS the local 'deploy' account:
+printf '%s\n' alice bob carol@EXAMPLE.COM | sudo tee /etc/ssh/auth_principals/deploy
+# ...and AS 'ec2-user':
+printf '%s\n' alice | sudo tee /etc/ssh/auth_principals/ec2-user
+sudo chmod 0755 /etc/ssh/auth_principals
+sudo chmod 0644 /etc/ssh/auth_principals/*
+sudo systemctl reload sshd
+```
+
+**3. Issue an identity-scoped cert and connect.** The cert carries the *human's* principal; the server decides which accounts it maps to:
+
+```bash
+cssh --principals alice --sign-only   # cert with principal "alice"
+ssh deploy@server.example.com         # allowed: "alice" is listed in .../deploy
+ssh ec2-user@server.example.com       # allowed: "alice" is listed in .../ec2-user
+ssh root@server.example.com           # denied: no /etc/ssh/auth_principals/root
+```
+
+**Scope it to specific accounts.** Setting `AuthorizedPrincipalsFile` globally changes the rule for *every* account. To remap only some accounts and keep the default (principal == login name) everywhere else, put it in a `Match` block:
+
+```
+Match User deploy,ec2-user
+    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+```
+
+**Static file vs. dynamic command.** `AuthorizedPrincipalsFile` is the static form. For decisions that depend on certificate *contents* — a custom `team` / `access-level` extension, time of day, an external lookup — use `AuthorizedPrincipalsCommand` instead (see [Acting on custom extensions server-side](#acting-on-custom-extensions-server-side)). Either way the mapping is an **additional** gate: the certificate must still be signed by the trusted CA, unexpired, and satisfy any `source-address` / critical options.
+
 ### Client Usage
 
 ```bash
