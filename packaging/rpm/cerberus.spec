@@ -55,6 +55,33 @@ decrypts the CMS envelope to install the in-memory CA signer, and signs SSH
 certificates received over VSOCK.
 
 # ---------------------------------------------------------------------------
+# Subpackage: cerberus-client
+#
+# End-user workstation helper: the `cssh` shell function (bash + zsh) installed
+# to /etc/profile.d/. Pure shell, so it is noarch and independent of the API and
+# signer services. Carries no key material and no server config.
+# ---------------------------------------------------------------------------
+%package client
+Summary:        Cerberus SSH client helper (cssh) for bash and zsh
+BuildArch:      noarch
+Requires:       openssh-clients
+Requires:       curl
+Requires:       jq
+Requires:       krb5-workstation
+
+%description client
+The `cssh` shell wrapper for end-user workstations. Using the caller's Kerberos
+credentials (SPNEGO), it fetches a short-lived OpenSSH user certificate from the
+Cerberus signing API, caches it next to the matching private key as
+<key>-cert.pub, and hands off to ssh(1), re-signing only when the cached cert is
+missing or about to expire.
+
+Installed as /etc/profile.d/cssh.sh; it defines the `cssh` function for login
+shells (bash directly; zsh where the system sources /etc/profile). Set the site
+endpoint with CERBERUS_URL (and CERBERUS_CACERT for a private CA). See the cssh
+howto in %{_docdir}/%{name}-client/cssh.md.
+
+# ---------------------------------------------------------------------------
 # Subpackage: cerberus-signer-eif  (OPTIONAL, opt-in)
 #
 # Bundles a prebuilt Enclave Image File so a deployment can ship as a single
@@ -160,6 +187,10 @@ install -D -m 0644 %{eif_file} \
     %{buildroot}%{_datadir}/cerberus/ssh-cert-signer.eif
 %endif
 
+# --- cerberus-client ---
+install -D -m 0644 packaging/profile.d/cssh.sh \
+    %{buildroot}%{_sysconfdir}/profile.d/cssh.sh
+
 # ---------------------------------------------------------------------------
 # cerberus-api scriptlets
 # ---------------------------------------------------------------------------
@@ -217,6 +248,13 @@ exit 0
 %dir %{_datadir}/cerberus
 %{_datadir}/cerberus/Dockerfile
 
+%files client
+%license LICENSE
+%doc docs/cssh.md
+# noreplace so an operator's site edits (CERBERUS_URL in the config block) survive
+# upgrades; a newer cssh.sh then lands as cssh.sh.rpmnew for the admin to merge.
+%config(noreplace) %{_sysconfdir}/profile.d/cssh.sh
+
 %if %{defined eif_file}
 %files signer-eif
 %{_datadir}/cerberus/ssh-cert-signer.eif
@@ -226,6 +264,26 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Wed Jul 08 2026 Paul Kilar <pkilar@gmail.com> - 0.6.0-1
+- New cerberus-client subpackage (noarch): installs the cssh SSH wrapper to
+  /etc/profile.d/cssh.sh. cssh fetches a short-lived OpenSSH user certificate
+  from the signing API with the caller's Kerberos credentials, caches it, and
+  hands off to ssh(1). Requires openssh-clients, curl, jq, krb5-workstation.
+  Shipped %config(noreplace) so site edits (CERBERUS_URL) survive upgrades.
+- cssh hardened for bash AND native zsh: the optional --cacert is now passed
+  via an explicit branch instead of the ${cacert:+...} idiom, which word-splits
+  in bash but NOT in native zsh (curl would otherwise get "--cacert <path>" as a
+  single mangled argument, breaking TLS to a private-CA API). Re-adds
+  CERBERUS_CACERT support (dropped in an earlier revision), adds a --cacert
+  per-call flag, a BSD/macOS `date -j` fallback for cert-expiry parsing, and an
+  `id -un` fallback when $USER is unset.
+- CA key generation moved to a RAM-backed tmpfs working dir (make encrypt-ca-key
+  uses /dev/shm) so the plaintext CA key never touches durable storage on the
+  default Linux path; falls back to the working dir + shred where /dev/shm is
+  unavailable (docs/THREAT-MODEL.md SC-6).
+- Realm stripping for static members: optional strip_realms config lets a listed
+  realm's @REALM suffix be dropped before the members: match, so members can be
+  enumerated by bare short name. Per-realm scoped; LDAP routing unaffected.
 * Thu Jul 02 2026 Paul Kilar <pkilar@gmail.com> - 0.5.0-1
 - Optional, opt-in cerberus-signer-eif subpackage: bundles a prebuilt
   Enclave Image File at /usr/share/cerberus/ssh-cert-signer.eif so a
