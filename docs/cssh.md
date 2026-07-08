@@ -54,6 +54,8 @@ cssh --principals root user@host        # request a specific principal set
 cssh --force user@host                  # re-sign even if cached cert is valid
 cssh --pubkey ~/.ssh/id_rsa.pub host    # sign a non-default key
 cssh --cacert /path/to/ca.pem user@host # trust a private CA for the API's TLS
+cssh --sign-only                        # just refresh the cert; don't connect
+cssh --sign-only user@host              # refresh a cert for host's login user
 cssh -- -L 8080:localhost:80 user@host  # pass-through ssh args after --
 cssh                                    # prints usage
 cssh --help                             # prints usage
@@ -66,6 +68,52 @@ with:
 ```sh
 ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
 ```
+
+---
+
+## Pre-authenticating (scp, rsync, sftp, git…)
+
+`cssh --sign-only` fetches or refreshes the certificate and **exits without
+connecting**, printing the cert path to stdout. Use it to authenticate once and
+then run other OpenSSH-based tools:
+
+```sh
+cssh --sign-only                 # refresh ~/.ssh/id_ed25519-cert.pub
+scp bigfile user@host:/tmp/      # picks up the adjacent cert automatically
+rsync -avz dir/ user@host:/dest/ # rsync runs ssh, which loads the cert
+sftp user@host
+git clone ssh://git@host/repo.git
+```
+
+Because the cert is written next to the private key as `<privkey>-cert.pub`,
+OpenSSH loads it automatically **when the tool uses that key as a default
+identity** — i.e. the default `~/.ssh/id_ed25519` (or another default name such
+as `id_rsa`, `id_ecdsa`). The common case needs no extra flags.
+
+If you signed a **non-default** key (via `CSSH_PUBKEY`/`--pubkey`), or your
+`~/.ssh/config` pins a different identity, point the tool at the key explicitly —
+OpenSSH then loads the adjacent `<key>-cert.pub`:
+
+```sh
+cssh --sign-only --pubkey ~/.ssh/work_key.pub
+scp -i ~/.ssh/work_key file user@host:
+rsync -e 'ssh -i ~/.ssh/work_key' dir/ user@host:/dest/
+```
+
+To force the Cerberus cert and nothing else (mirroring how `cssh` itself
+connects — no agent keys, no other identities), pass the same options `cssh`
+uses:
+
+```sh
+scp -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 \
+    -o CertificateFile=~/.ssh/id_ed25519-cert.pub file user@host:
+```
+
+`--sign-only` still honors caching: it re-signs only when the cert is missing or
+within `CSSH_REFRESH_BEFORE` of expiry, so calling it before each command is
+cheap. `HOST` is optional in this mode — supply one only to resolve the login
+principal from `ssh -G`, or pass `--principals` to mint a cert for the login
+names you'll use across tools.
 
 ---
 

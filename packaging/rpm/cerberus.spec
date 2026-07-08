@@ -278,6 +278,9 @@ exit 0
   cssh.sh is plain code (replaced on upgrade so fixes always apply); site config
   (CERBERUS_URL/CERBERUS_CACERT) lives in the companion /etc/profile.d/
   cerberus-env.sh, shipped %config(noreplace) so operator edits survive upgrades.
+  cssh also supports --sign-only: fetch/refresh the certificate without opening
+  an ssh connection (prints the cert path), so scp, rsync, sftp, and git reuse
+  the pre-authenticated cert.
 - cssh hardened for bash AND native zsh: the optional --cacert is now passed
   via an explicit branch instead of the ${cacert:+...} idiom, which word-splits
   in bash but NOT in native zsh (curl would otherwise get "--cacert <path>" as a
