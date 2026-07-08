@@ -57,20 +57,23 @@
 #   --cacert PATH         override CERBERUS_CACERT for this call
 #   --force               re-sign even if the cached cert is still valid
 #   --sign-only           fetch/refresh the cert and exit WITHOUT running ssh
-#                         (pre-authenticate, then use scp/rsync/sftp/git/etc.);
-#                         prints the cert path to stdout. HOST is optional and,
-#                         if given, is used only to resolve the principal.
+#                         (pre-authenticate, then use scp/rsync/sftp/git/etc.).
+#                         Silent by default; add --verbose to print the cert
+#                         path. HOST is optional and, if given, is used only to
+#                         resolve the principal.
 #   --all-principals      request a cert for EVERY principal in your first
 #                         Cerberus group (the server expands the group's finite
 #                         allowed_principals). Requires --sign-only and is
 #                         mutually exclusive with --principals. Refused server-
 #                         side if that group grants "*" (unbounded).
+#   --verbose             print the cert path to stdout in --sign-only mode
+#                         (otherwise --sign-only is silent).
 #   --                    end of cssh flags; remaining args go to ssh verbatim
 
 cssh() {
     _cssh_usage() {
         cat >&2 <<'EOF'
-Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--] HOST [SSH_ARGS...]
+Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--verbose] [--] HOST [SSH_ARGS...]
 
 Flags:
   --principals u1,u2  request specific cert principals
@@ -79,9 +82,10 @@ Flags:
   --cacert PATH       CA bundle for the API's TLS cert (overrides CERBERUS_CACERT)
   --force             re-sign even if the cached cert is still valid
   --sign-only         fetch/refresh the cert and exit without running ssh;
-                      prints the cert path (HOST optional, used for principal)
+                      silent unless --verbose (HOST optional, used for principal)
   --all-principals    cert for every principal in your first group; requires
                       --sign-only, mutually exclusive with --principals
+  --verbose           print the cert path in --sign-only mode
   --                  end of cssh flags; remainder passed to ssh
 
 Env: CERBERUS_URL CERBERUS_CACERT CSSH_PUBKEY CSSH_REFRESH_BEFORE CSSH_PRINCIPALS
@@ -138,6 +142,7 @@ EOF
     local sign_only=0
     local all_principals=0
     local principals_set_by_flag=0
+    local verbose=0
 
     # Reject a non-integer CSSH_REFRESH_BEFORE before it reaches arithmetic.
     case "$refresh_before" in
@@ -157,6 +162,7 @@ EOF
             --force)        force=1; shift ;;
             --sign-only)    sign_only=1; shift ;;
             --all-principals) all_principals=1; shift ;;
+            --verbose)      verbose=1; shift ;;
             -h|--help)      _cssh_usage; unset -f _cssh_usage _cssh_check_krb; return 0 ;;
             --)             shift; break ;;
             *)              break ;;
@@ -411,10 +417,13 @@ EOF
 
     # Pre-authenticate mode: the cert is now on disk at $cert (adjacent to the
     # private key), so ssh/scp/sftp/rsync -e ssh/git pick it up automatically
-    # when they use $privkey. Print the cert path (for scripting) and do NOT
-    # connect. Any HOST/SSH_ARGS were only used above to resolve the principal.
+    # when they use $privkey. Do NOT connect. Any HOST/SSH_ARGS were only used
+    # above to resolve the principal. Stay silent by default; print the cert path
+    # only with --verbose (so `cert=$(cssh --sign-only --verbose)` still works).
     if [ "$sign_only" -ne 0 ]; then
-        printf '%s\n' "$cert"
+        if [ "$verbose" -ne 0 ]; then
+            printf '%s\n' "$cert"
+        fi
         return 0
     fi
 

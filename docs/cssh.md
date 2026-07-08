@@ -57,7 +57,8 @@ cssh --principals root user@host        # request a specific principal set
 cssh --force user@host                  # re-sign even if cached cert is valid
 cssh --pubkey ~/.ssh/id_rsa.pub host    # sign a non-default key
 cssh --cacert /path/to/ca.pem user@host # trust a private CA for the API's TLS
-cssh --sign-only                        # just refresh the cert; don't connect
+cssh --sign-only                        # refresh the cert silently; don't connect
+cssh --sign-only --verbose              # refresh, then print the cert path
 cssh --sign-only user@host              # refresh a cert for host's login user
 cssh --sign-only --all-principals       # cert for every principal in your group
 cssh -- -L 8080:localhost:80 user@host  # pass-through ssh args after --
@@ -78,7 +79,8 @@ ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
 ## Pre-authenticating (scp, rsync, sftp, git…)
 
 `cssh --sign-only` fetches or refreshes the certificate and **exits without
-connecting**, printing the cert path to stdout. Use it to authenticate once and
+connecting**. It is silent by default; add `--verbose` to print the cert path
+(e.g. `cert=$(cssh --sign-only --verbose)`). Use it to authenticate once and
 then run other OpenSSH-based tools:
 
 ```sh

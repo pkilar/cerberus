@@ -279,8 +279,8 @@ exit 0
   (CERBERUS_URL/CERBERUS_CACERT) lives in the companion /etc/profile.d/
   cerberus-env.sh, shipped %config(noreplace) so operator edits survive upgrades.
   cssh also supports --sign-only: fetch/refresh the certificate without opening
-  an ssh connection (prints the cert path), so scp, rsync, sftp, and git reuse
-  the pre-authenticated cert. The cache is principal-aware: cssh compares the
+  an ssh connection (silent by default; --verbose prints the cert path), so scp,
+  rsync, sftp, and git reuse the pre-authenticated cert. The cache is principal-aware: cssh compares the
   cached cert's principals against the requested set and re-signs on a switch
   (principalA -> principalB), not only on expiry. First-time users need no
   setup: cssh generates a passphraseless ed25519 keypair when the key is missing
