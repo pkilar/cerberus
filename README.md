@@ -163,25 +163,30 @@ The RPM creates a `cerberus` system user, installs systemd units with security h
 
 #### **Step 1: Prepare the CA Private Key**
 
+Do this on a trusted, single-tenant host. Generate into a **RAM-backed** directory (`/dev/shm` is tmpfs on Linux) so the plaintext CA key never touches durable storage — `shred` is not a guaranteed erase on SSD/CoW/journaled filesystems, so keeping the plaintext off disk entirely is the stronger control.
+
 1. **Generate an SSH key pair** to serve as your Certificate Authority:
 
    ```bash
-   ssh-keygen -t ed25519 -f ca_key -C "Cerberus SSH CA"
+   work=$(mktemp -d -p /dev/shm cerberus-ca.XXXXXX)   # RAM-backed working dir
+   ssh-keygen -t ed25519 -f "$work/ca_key" -N "" -C "Cerberus SSH CA"
    ```
 
-2. **Encrypt the private key with KMS**:
+2. **Encrypt the private key with KMS**, then move only the two safe artifacts
+   (encrypted `ca_key.enc`, public `ca_key.pub`) into your working directory and
+   wipe the RAM-backed plaintext:
    ```bash
    aws kms encrypt \
      --key-id "arn:aws:kms:region:account:key/key-id" \
-     --plaintext fileb://ca_key \
+     --plaintext "fileb://$work/ca_key" \
      --output text \
      --query CiphertextBlob | base64 -d > ca_key.enc
 
-   # Securely delete the unencrypted private key
-   shred -u ca_key 2>/dev/null || rm -f ca_key
+   cp "$work/ca_key.pub" ./ca_key.pub
+   shred -u "$work/ca_key" 2>/dev/null; rm -rf "$work"   # wipe the plaintext + tmpfs dir
    ```
 
-   > **Tip:** `make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=...` does the generate + encrypt + secure-delete in one step. It **refuses to overwrite** an existing `ca_key`/`ca_key.pub`/`ca_key.enc` — regenerating creates a *different* CA, which every SSH server would reject until you re-distribute the new `ca_key.pub`. To rotate deliberately, run `make -C ssh-cert-signer clean-ca-key` first.
+   > **Tip:** `make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=...` does exactly this — RAM-backed generate + encrypt + wipe — in one step (with a `/dev/shm` fallback where tmpfs is unavailable). It **refuses to overwrite** an existing `ca_key`/`ca_key.pub`/`ca_key.enc` — regenerating creates a *different* CA, which every SSH server would reject until you re-distribute the new `ca_key.pub`. To rotate deliberately, run `make -C ssh-cert-signer clean-ca-key` first.
 
 3. **Copy the encrypted key to the enclave directory**:
    ```bash

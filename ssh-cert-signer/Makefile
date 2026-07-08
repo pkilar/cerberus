@@ -111,28 +111,59 @@ encrypt-ca-key:
 			exit 1; \
 		fi; \
 	done
-	@echo "Generating SSH CA private key..."
-	ssh-keygen -t ed25519 -f ca_key -N "" -C "SSH CA Key for Nitro Enclave"
-	@echo "Encrypting CA private key with KMS..."
-	@# Capture the ciphertext separately so a KMS failure (bad creds, wrong region,
-	@# missing kms:Encrypt) is caught by aws's own exit status — a pipe would mask it
-	@# behind base64's exit and leave a 0-byte ca_key.enc. Do NOT delete the plaintext
-	@# until a valid, non-empty ca_key.enc exists.
-	@b64=$$(aws kms encrypt --key-id $(KMS_KEY_ARN) --plaintext fileb://ca_key --output text --query CiphertextBlob) || { \
-		echo "ERROR: KMS encrypt failed — the plaintext ca_key is PRESERVED. Fix credentials/region/kms:Encrypt and re-run."; \
+	@# Generate and encrypt inside a RAM-backed working directory when one is
+	@# available (/dev/shm is tmpfs on Linux) so the plaintext CA key never touches
+	@# durable storage — closing the SC-6 residual where shred(1) cannot guarantee
+	@# erasure on copy-on-write filesystems, journaled filesystems, or SSDs with
+	@# wear-leveling. Only the two safe artifacts (KMS-encrypted ca_key.enc and the
+	@# public ca_key.pub) are moved into the working tree.
+	@#
+	@# Everything runs in a SINGLE shell so the temp dir and its cleanup trap share
+	@# one process; the trap shreds+removes the plaintext on ANY exit path (success,
+	@# KMS failure, or Ctrl-C). The ciphertext is captured into a variable rather
+	@# than piped so a KMS error (bad creds, wrong region, missing kms:Encrypt) is
+	@# caught by aws's own exit status instead of being masked behind base64. Falls
+	@# back to the working directory + shred where /dev/shm is absent (e.g. macOS),
+	@# preserving the previous behavior with a warning.
+	@set -e; \
+	if [ -d /dev/shm ] && [ -w /dev/shm ]; then \
+		work=$$(mktemp -d -p /dev/shm cerberus-ca.XXXXXX); \
+		trap 'shred -u "$$work"/ca_key 2>/dev/null || rm -f "$$work"/ca_key 2>/dev/null || true; rm -rf "$$work"' EXIT INT TERM; \
+		ram=1; \
+		echo "Generating SSH CA private key in RAM-backed $$work ..."; \
+	else \
+		work=.; ram=0; \
+		echo "WARNING: /dev/shm is unavailable; generating in $(CURDIR)."; \
+		echo "         The plaintext CA key will briefly touch durable storage and rely on shred,"; \
+		echo "         which is not a guaranteed erase on SSD/CoW/journaled filesystems. Prefer a"; \
+		echo "         Linux host with /dev/shm (tmpfs) for CA key generation."; \
+		echo "Generating SSH CA private key..."; \
+	fi; \
+	ssh-keygen -t ed25519 -f "$$work/ca_key" -N "" -C "SSH CA Key for Nitro Enclave"; \
+	echo "Encrypting CA private key with KMS..."; \
+	b64=$$(aws kms encrypt --key-id $(KMS_KEY_ARN) --plaintext "fileb://$$work/ca_key" --output text --query CiphertextBlob) || { \
+		echo "ERROR: KMS encrypt failed. Fix credentials/region/kms:Encrypt and re-run."; \
+		if [ "$$ram" != 1 ]; then shred -u "$$work/ca_key" 2>/dev/null || rm -f "$$work/ca_key"; fi; \
+		echo "       The unencrypted CA key was removed; a fresh key is generated on re-run."; \
 		exit 1; \
 	}; \
-	printf '%s' "$$b64" | base64 -d > ca_key.enc
-	@if [ ! -s ca_key.enc ]; then \
-		echo "ERROR: ca_key.enc is empty after KMS encrypt — the plaintext ca_key is PRESERVED. Investigate and re-run."; \
-		rm -f ca_key.enc; \
+	printf '%s' "$$b64" | base64 -d > "$$work/ca_key.enc"; \
+	if [ ! -s "$$work/ca_key.enc" ]; then \
+		echo "ERROR: ca_key.enc is empty after KMS encrypt — investigate and re-run."; \
+		rm -f "$$work/ca_key.enc"; \
+		if [ "$$ram" != 1 ]; then shred -u "$$work/ca_key" 2>/dev/null || rm -f "$$work/ca_key"; fi; \
 		exit 1; \
-	fi
-	@echo "Securely deleting the unencrypted CA private key..."
-	@shred -u ca_key 2>/dev/null || rm -f ca_key
-	@echo "Encrypted CA key saved to ca_key.enc"
-	@echo "Public key saved to ca_key.pub — keep this: it is distributed to SSH servers"
-	@echo "  for certificate validation AND baked into the EIF as the CA_PUBLIC_KEY_PATH pin."
+	fi; \
+	if [ "$$ram" = 1 ]; then \
+		mv "$$work/ca_key.enc" ./ca_key.enc; \
+		mv "$$work/ca_key.pub" ./ca_key.pub; \
+	else \
+		echo "Securely deleting the unencrypted CA private key..."; \
+		shred -u "$$work/ca_key" 2>/dev/null || rm -f "$$work/ca_key"; \
+	fi; \
+	echo "Encrypted CA key saved to ca_key.enc"; \
+	echo "Public key saved to ca_key.pub — keep this: it is distributed to SSH servers"; \
+	echo "  for certificate validation AND baked into the EIF as the CA_PUBLIC_KEY_PATH pin."
 
 # Clean build artifacts. CA key material (ca_key, ca_key.pub, ca_key.enc) is
 # deliberately PRESERVED — losing it would force re-distributing a new public CA

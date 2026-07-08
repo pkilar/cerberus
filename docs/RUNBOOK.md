@@ -671,20 +671,24 @@ Because `ca_key.enc` (and `ca_key.pub`, the integrity pin) are baked into the EI
 
 > **Before you begin — the CA key material is protected against accidental loss.** `make encrypt-ca-key` **refuses to run** if `ca_key`, `ca_key.pub`, or `ca_key.enc` already exist, and `make clean` never deletes them. Rotation is therefore a deliberate act: first remove the old material with `make -C ssh-cert-signer clean-ca-key` (or `rm -f ca_key ca_key.pub ca_key.enc`). Do this only when you truly intend to rotate — the new CA will not be trusted by any SSH server until you re-distribute the new `ca_key.pub` (step 7). The manual `ssh-keygen` in step 1 will also prompt before overwriting an existing `ca_key`; never overwrite a key you have not deliberately rotated.
 
-1. Generate a new SSH CA key pair:
+> **Do the generate + encrypt on a trusted, single-tenant host, in a RAM-backed directory.** `/dev/shm` is tmpfs on Linux, so the plaintext CA key never touches durable storage — `shred` is not a guaranteed erase on SSD, copy-on-write, or journaled filesystems, so keeping the plaintext off disk entirely is the stronger control. `make -C ssh-cert-signer encrypt-ca-key KMS_KEY_ARN=...` does steps 1–3 below in one RAM-backed step (with a fallback where `/dev/shm` is unavailable).
+
+1. Generate a new SSH CA key pair into a RAM-backed working directory:
    ```bash
-   ssh-keygen -t ed25519 -f ca_key -N ""
+   work=$(mktemp -d -p /dev/shm cerberus-ca.XXXXXX)
+   ssh-keygen -t ed25519 -f "$work/ca_key" -N ""
    ```
-2. Encrypt the private key with KMS:
+2. Encrypt the private key with KMS, then move only the two safe artifacts (encrypted `ca_key.enc`, public `ca_key.pub`) into the current directory:
    ```bash
    aws kms encrypt \
      --key-id alias/cerberus-ca-key \
-     --plaintext fileb://ca_key \
+     --plaintext "fileb://$work/ca_key" \
      --output text --query CiphertextBlob | base64 -d > ca_key.enc
+   cp "$work/ca_key.pub" ./ca_key.pub
    ```
-3. Securely delete the plaintext key:
+3. Wipe the RAM-backed plaintext and working directory:
    ```bash
-   shred -u ca_key
+   shred -u "$work/ca_key" 2>/dev/null; rm -rf "$work"
    ```
 4. Place the encrypted key **and the public key** into the build context and rebuild the EIF. The Dockerfile bakes `ca_key.pub` in as the `CA_PUBLIC_KEY_PATH` pin, so both files must be present (the `eif-*` targets refuse to build otherwise):
    ```bash
