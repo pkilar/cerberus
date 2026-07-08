@@ -59,6 +59,25 @@ tls_cert: ""
 tls_key: ""
 
 # ──────────────────────────────────────────────────────────────────────
+# Realm stripping for static members (optional)
+# ──────────────────────────────────────────────────────────────────────
+# SPNEGO/GSSAPI authenticates users as "uid@REALM.COM". By default `members:`
+# entries must be written in that full form. List a realm here and its @REALM
+# suffix is removed before the static `members:` match, so you can enumerate
+# members by bare short name (alice) instead of alice@REALM.COM.
+#
+#   - Only principals whose realm is listed are stripped. Identities in other
+#     realms keep the full uid@REALM form, so alice@EXAMPLE.COM and
+#     alice@OTHER.COM never collapse onto the same members entry unless you
+#     list BOTH realms (which you should only do if that collision is intended).
+#   - Matching is case-sensitive; Kerberos realms are conventionally uppercase.
+#   - This affects only static `members:`. LDAP-backed `ldap_groups:` routing
+#     always sees the full uid@REALM string, so directory lookups are unchanged.
+#   - Omit or leave empty to keep the default exact uid@REALM matching.
+# strip_realms:
+#   - EXAMPLE.COM
+
+# ──────────────────────────────────────────────────────────────────────
 # LDAP-backed RBAC (optional)
 # ──────────────────────────────────────────────────────────────────────
 # Each entry under `ldap:` declares one directory backend. Backends are

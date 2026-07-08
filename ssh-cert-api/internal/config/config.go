@@ -29,6 +29,19 @@ type Config struct {
 	TlsKey                 string           `yaml:"tls_key"`
 	EnclaveMetricsInterval time.Duration    `yaml:"enclave_metrics_interval"`
 	LDAP                   []LDAPBackend    `yaml:"ldap"`
+
+	// StripRealms lists Kerberos realms whose @REALM suffix is removed from an
+	// authenticated principal before it is matched against static `members:`.
+	// This lets operators enumerate members by bare short name (alice) instead
+	// of alice@EXAMPLE.COM for the listed realms. Only principals whose realm
+	// appears here are stripped; identities in unlisted realms keep their full
+	// user@REALM form, so two realms never collapse onto the same members key
+	// unless the operator explicitly lists both. Matching is case-sensitive
+	// (Kerberos realms are conventionally uppercase). Empty disables stripping
+	// entirely, preserving exact user@REALM matching. Realm routing for
+	// LDAP-backed groups is unaffected — the resolver always sees the full
+	// user@REALM string.
+	StripRealms []string `yaml:"strip_realms"`
 }
 
 // Group defines a set of members and the certificate rules that apply to them.
@@ -224,6 +237,15 @@ func (c *Config) Validate() error {
 	// realm coverage early.
 	if err := c.validateLDAP(); err != nil {
 		return err
+	}
+
+	// A blank strip_realms entry would strip the empty realm — i.e. match every
+	// principal that has no realm — which is both meaningless (auth rejects
+	// realm-less credentials) and a footgun. Reject it as operator error.
+	for i, realm := range c.StripRealms {
+		if strings.TrimSpace(realm) == "" {
+			return fmt.Errorf("strip_realms[%d] must not be empty or whitespace", i)
+		}
 	}
 
 	for name, group := range c.Groups {
@@ -428,6 +450,7 @@ const (
 	WarnLDAPAnonymousNonLoopback     = "config.ldap.anonymous_non_loopback"
 	WarnLDAPCacheTTLLong             = "config.ldap.cache_ttl_long"
 	WarnLDAPRealmLowercase           = "config.ldap.realm_lowercase"
+	WarnStripRealmLowercase          = "config.strip_realm.lowercase"
 )
 
 // Warning is one non-fatal configuration issue surfaced at startup. Kind is
@@ -508,6 +531,17 @@ func (c *Config) Warnings() []Warning {
 					Detail:  "Kerberos realms are conventionally uppercase; matching is case-sensitive",
 				})
 			}
+		}
+	}
+	// strip_realms matching is case-sensitive against the realm the KDC returns
+	// (conventionally uppercase). A lowercase entry silently strips nothing.
+	for _, r := range c.StripRealms {
+		if r != strings.ToUpper(r) {
+			warns = append(warns, Warning{
+				Kind:   WarnStripRealmLowercase,
+				Key:    r,
+				Detail: "Kerberos realms are conventionally uppercase; strip_realms matching is case-sensitive",
+			})
 		}
 	}
 	slices.SortFunc(warns, func(a, b Warning) int {
