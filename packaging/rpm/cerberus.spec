@@ -282,7 +282,9 @@ exit 0
   an ssh connection (prints the cert path), so scp, rsync, sftp, and git reuse
   the pre-authenticated cert. The cache is principal-aware: cssh compares the
   cached cert's principals against the requested set and re-signs on a switch
-  (principalA -> principalB), not only on expiry.
+  (principalA -> principalB), not only on expiry. First-time users need no
+  setup: cssh generates a passphraseless ed25519 keypair when the key is missing
+  (CSSH_AUTOGEN=0 to disable; a half-present key is left untouched, not clobbered).
 - All-principals expansion: a /sign request may set all_principals: true to mint
   a cert for every principal in the user's first (alphabetical) group, instead
   of enumerating them. The API expands that group's finite allowed_principals

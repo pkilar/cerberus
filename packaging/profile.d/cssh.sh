@@ -3,7 +3,8 @@
 # Fetches a short-lived OpenSSH user certificate from the Cerberus signing API
 # (Kerberos/SPNEGO-authenticated) and drops it next to the matching private key
 # as <key>-cert.pub, where ssh(1) auto-loads it. Caches the cert and re-signs
-# only when it is missing, unreadable, or about to expire.
+# only when it is missing, unreadable, or about to expire. If the user has no
+# SSH key yet, cssh generates an ed25519 keypair first (opt out: CSSH_AUTOGEN=0).
 #
 # ── Install ──────────────────────────────────────────────────────────────────
 #   sudo install -m 0644 cssh.sh /etc/profile.d/cssh.sh
@@ -45,6 +46,9 @@
 #   CSSH_PRINCIPALS       Comma-separated principals to request. If unset, cssh
 #                         asks `ssh -G` for the login user of the destination
 #                         (covers user@host, -l user, and ssh_config User).
+#   CSSH_AUTOGEN          Auto-generate a passphraseless ed25519 keypair when the
+#                         key is missing (default on). Set to 0/false/no/off to
+#                         disable and error instead.
 #
 # ── Per-call flags (consumed before the rest is passed to ssh) ───────────────
 #   --principals u1,u2    override CSSH_PRINCIPALS for this call
@@ -197,13 +201,42 @@ EOF
         unset -f _cssh_check_krb
         return 2
     fi
+    local privkey="${pubkey%.pub}"
+
+    # Auto-generate an ed25519 keypair when NEITHER half exists, so a first-time
+    # user doesn't have to run ssh-keygen by hand. Only when both are absent — a
+    # half-present key (one file missing) is left alone and surfaces as the
+    # readability error below, never silently clobbered. Opt out with
+    # CSSH_AUTOGEN=0 (or false/no/off). The generated key is passphraseless:
+    # cssh is non-interactive and the short-lived cert is the real credential.
+    if [ ! -e "$pubkey" ] && [ ! -e "$privkey" ]; then
+        case "${CSSH_AUTOGEN:-1}" in
+            0|false|no|off|FALSE|NO|OFF) : ;; # disabled — fall through to the error
+            *)
+                local keydir
+                keydir=$(dirname "$privkey")
+                if [ ! -d "$keydir" ] && ! mkdir -p "$keydir" 2>/dev/null; then
+                    printf 'cssh: cannot create key directory: %s\n' "$keydir" >&2
+                    unset -f _cssh_check_krb
+                    return 1
+                fi
+                chmod 700 "$keydir" 2>/dev/null
+                printf 'cssh: no SSH key at %s; generating an ed25519 keypair (set CSSH_AUTOGEN=0 to disable)\n' "$privkey" >&2
+                if ! ssh-keygen -t ed25519 -f "$privkey" -N '' \
+                    -C "cssh ${USER:-$(id -un 2>/dev/null)}" >/dev/null 2>&1; then
+                    printf 'cssh: failed to generate SSH key at %s\n' "$privkey" >&2
+                    unset -f _cssh_check_krb
+                    return 1
+                fi
+                ;;
+        esac
+    fi
+
     if [ ! -r "$pubkey" ]; then
         printf 'cssh: public key not readable: %s\n' "$pubkey" >&2
         unset -f _cssh_check_krb
         return 2
     fi
-
-    local privkey="${pubkey%.pub}"
     if [ ! -r "$privkey" ]; then
         printf 'cssh: matching private key not readable: %s\n' "$privkey" >&2
         unset -f _cssh_check_krb

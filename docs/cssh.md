@@ -18,7 +18,9 @@ different identity.
 - `curl` built with GSS-API support (the system `curl` on RHEL / Amazon
   Linux / Debian / Ubuntu all qualify).
 - `jq`.
-- An ed25519 keypair at `~/.ssh/id_ed25519` (override with `CSSH_PUBKEY`).
+- An ed25519 keypair at `~/.ssh/id_ed25519` (override with `CSSH_PUBKEY`). If you
+  don't have one, `cssh` generates it for you on first use (disable with
+  `CSSH_AUTOGEN=0`).
 - The Cerberus API host's CA must be trusted by curl, either via the system
   trust store or by setting `CERBERUS_CACERT` to a CA bundle.
 
@@ -42,6 +44,7 @@ export CERBERUS_CACERT=/etc/pki/ca-trust/source/anchors/cerberus-ca.pem
 | `CSSH_PUBKEY`         | `~/.ssh/id_ed25519.pub` | Public key to sign. The matching private key must exist.        |
 | `CSSH_REFRESH_BEFORE` | `300`                   | Re-sign if cert expires within this many seconds.               |
 | `CSSH_PRINCIPALS`     | *(unset)*               | Comma-separated principals to request. If unset, `cssh` requests the destination's login user, resolved via `ssh -G` (falling back to your local login name). |
+| `CSSH_AUTOGEN`        | `1` (on)                | Auto-generate a passphraseless ed25519 keypair when the key is missing. Set `0`/`false`/`no`/`off` to disable and error instead. |
 
 ---
 
@@ -144,6 +147,11 @@ ssh -i ~/.ssh/id_ed25519 root@host2
 
 ## Behavior
 
+- **Key auto-generation.** If **neither** half of the key exists, `cssh`
+  generates a passphraseless ed25519 keypair at the target path (creating
+  `~/.ssh` as `0700`, the key as `0600`) before signing. A half-present key (one
+  file missing) is left untouched and surfaces as an error rather than being
+  clobbered. Disable with `CSSH_AUTOGEN=0` to require a pre-existing key.
 - **Cache.** A signed cert is reused only when it still covers the request:
   its principal set matches the one being requested **and** its
   `Valid: from … to …` window doesn't close within `CSSH_REFRESH_BEFORE`
