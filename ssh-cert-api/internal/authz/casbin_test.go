@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/config"
@@ -793,5 +794,86 @@ func TestAuthorize_StripRealmResolverGetsFullPrincipal(t *testing.T) {
 	}
 	if result.Source != "ldap" {
 		t.Errorf("got source %q, want ldap", result.Source)
+	}
+}
+
+// TestAuthorizeAll_FirstAlphabeticalGroup verifies AuthorizeAll selects the
+// first group (alphabetically) the user belongs to and returns its rules — the
+// group whose full allowed_principals the caller will expand.
+func TestAuthorizeAll_FirstAlphabeticalGroup(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"zebra": {
+			Members:          []string{"alice@REALM.COM"},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"zoo"}},
+		},
+		"admins": {
+			Members:          []string{"alice@REALM.COM"},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root", "ec2-user"}},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeAll(t.Context(), "alice@REALM.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeAll: %v", err)
+	}
+	if !res.Allowed {
+		t.Fatal("expected allowed")
+	}
+	if res.GroupName != "admins" { // 'admins' sorts before 'zebra'
+		t.Errorf("got group %q, want first-alphabetical 'admins'", res.GroupName)
+	}
+	if !slices.Equal(res.CertificateRules.AllowedPrincipals, []string{"root", "ec2-user"}) {
+		t.Errorf("got allowed_principals %v, want the admins group's", res.CertificateRules.AllowedPrincipals)
+	}
+}
+
+// TestAuthorizeAll_NoGroupDenied verifies a user in no group is denied.
+func TestAuthorizeAll_NoGroupDenied(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"admins": {
+			Members:          []string{"alice@REALM.COM"},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeAll(t.Context(), "stranger@REALM.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeAll: %v", err)
+	}
+	if res.Allowed {
+		t.Fatal("expected denied for a user in no group")
+	}
+}
+
+// TestAuthorizeAll_LDAPFailsClosed verifies AuthorizeAll inherits the same
+// fail-closed semantics as Authorize: an LDAP resolver error denies rather than
+// silently falling through.
+func TestAuthorizeAll_LDAPFailsClosed(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"ssh-admins": {
+			LDAPGroups:       []string{"CN=ssh-admins,DC=corp,DC=example"},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+		},
+	})
+	resolver := &fakeLDAPResolver{err: errors.New("ldap down")}
+	a, err := NewCasbinAuthorizer(cfg, resolver)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeAll(t.Context(), "alice@CORP.EXAMPLE")
+	if err != nil {
+		t.Fatalf("AuthorizeAll: %v", err)
+	}
+	if res.Allowed {
+		t.Fatal("expected fail-closed denial on LDAP error")
 	}
 }

@@ -188,93 +188,168 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject empty principals explicitly. An empty slice would trivially pass
-	// the Casbin per-principal loop below (zero iterations = unanimously
-	// allowed) and the user would receive a cert with the group's full
-	// allowed_principals set — wider than the empty request implied.
-	if len(req.Principals) == 0 {
-		outcome = outcomeMissingPrincipals
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing principals"})
-		return
-	}
-
-	// Cap principals BEFORE authorization so the per-request Casbin work
-	// doesn't scale with attacker-chosen input. The enclave enforces the
-	// same cap downstream, but only after the API has already paid the cost.
-	if len(req.Principals) > messages.MaxPrincipals {
-		outcome = outcomeInvalidBody
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
-		return
-	}
-
-	// Reject empty/whitespace principals before authorization. An empty
-	// principal could be matched by a group whose allowed_principals contains
-	// "" or "*"; the enclave rejects it regardless, so fail fast here with a
-	// clear 400 instead of burning an enclave round trip on a 500.
-	//
-	// Also reject a literal "*": it is only meaningful as a wildcard inside a
-	// group's allowed_principals policy, never as a certificate principal. The
-	// cert below is minted for exactly what was requested, and sshd matches
-	// cert principals literally (not as a glob), so a "*" would yield a useless
-	// certificate while a wildcard group would silently authorize it.
-	for _, p := range req.Principals {
-		if strings.TrimSpace(p) == "" {
-			outcome = outcomeInvalidBody
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Empty principal"})
-			return
-		}
-		if strings.TrimSpace(p) == "*" {
-			outcome = outcomeInvalidBody
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Wildcard principal not allowed"})
-			return
-		}
-	}
-
 	principal := user.Username + "@" + user.Realm
-	slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)
 
-	// Check authorization and get user's group configuration
-	result, authzErr := s.authorizer.Authorize(r.Context(), principal, req.Principals)
-	if authzErr != nil {
-		outcome = outcomeAuthzError
-		slog.Error("authz.error", "principal", principal, "error", authzErr)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
-		return
-	}
-	if !result.Allowed {
-		outcome = outcomeDenied
-		slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
-		return
+	// Two request shapes, mutually exclusive: an explicit principals list, or
+	// all_principals (mint a cert for every principal in the user's first group).
+	// Both paths end with an authorized result and a concrete grantedPrincipals
+	// set that feeds the enclave request below.
+	var result *authz.AuthorizationResult
+	var grantedPrincipals []string
+
+	if req.AllPrincipals {
+		if len(req.Principals) != 0 {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "principals and all_principals are mutually exclusive"})
+			return
+		}
+
+		slog.Info("sign.request", "principal", principal, "all_principals", true, "remote_addr", r.RemoteAddr)
+
+		var authzErr error
+		result, authzErr = s.authorizer.AuthorizeAll(r.Context(), principal)
+		if authzErr != nil {
+			outcome = outcomeAuthzError
+			slog.Error("authz.error", "principal", principal, "error", authzErr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
+			return
+		}
+		if !result.Allowed {
+			outcome = outcomeDenied
+			slog.Warn("authz.denied", "principal", principal, "all_principals", true)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized (no group membership)"})
+			return
+		}
+
+		// Expand to the matched group's finite allowed_principals. A "*" grant is
+		// an unbounded set that can't be enumerated into a cert — refuse with a
+		// clear 400 rather than mint a surprising any-principal certificate.
+		allowed := result.CertificateRules.AllowedPrincipals
+		if slices.Contains(allowed, "*") {
+			outcome = outcomeInvalidBody
+			slog.Warn("authz.all_principals.wildcard_group", "principal", principal, "group", result.GroupName)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Group grants any principal (allowed_principals: [\"*\"]); all_principals cannot be expanded — request explicit principals"})
+			return
+		}
+
+		grantedPrincipals = slices.Clone(allowed)
+		slices.Sort(grantedPrincipals)
+		grantedPrincipals = slices.Compact(grantedPrincipals)
+		// config.Validate rejects groups with no allowed_principals, so an empty
+		// expansion is defensive — deny rather than mint an empty (any-principal)
+		// cert.
+		if len(grantedPrincipals) == 0 {
+			outcome = outcomeDenied
+			slog.Warn("authz.denied", "principal", principal, "group", result.GroupName, "all_principals", true)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized (group has no principals)"})
+			return
+		}
+		if len(grantedPrincipals) > messages.MaxPrincipals {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Group has too many principals to expand"})
+			return
+		}
+	} else {
+		// Explicit-principals path.
+		//
+		// Reject empty principals explicitly. An empty slice would trivially pass
+		// the Casbin per-principal loop (zero iterations = unanimously allowed)
+		// and the user would receive a cert with the group's full
+		// allowed_principals set — wider than the empty request implied.
+		if len(req.Principals) == 0 {
+			outcome = outcomeMissingPrincipals
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Missing principals"})
+			return
+		}
+
+		// Cap principals BEFORE authorization so the per-request Casbin work
+		// doesn't scale with attacker-chosen input. The enclave enforces the
+		// same cap downstream, but only after the API has already paid the cost.
+		if len(req.Principals) > messages.MaxPrincipals {
+			outcome = outcomeInvalidBody
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Too many principals"})
+			return
+		}
+
+		// Reject empty/whitespace principals before authorization. An empty
+		// principal could be matched by a group whose allowed_principals contains
+		// "" or "*"; the enclave rejects it regardless, so fail fast here with a
+		// clear 400 instead of burning an enclave round trip on a 500.
+		//
+		// Also reject a literal "*": it is only meaningful as a wildcard inside a
+		// group's allowed_principals policy, never as a certificate principal. The
+		// cert below is minted for exactly what was requested, and sshd matches
+		// cert principals literally (not as a glob), so a "*" would yield a useless
+		// certificate while a wildcard group would silently authorize it. Callers
+		// wanting the whole group use all_principals, not a "*" principal.
+		for _, p := range req.Principals {
+			if strings.TrimSpace(p) == "" {
+				outcome = outcomeInvalidBody
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Empty principal"})
+				return
+			}
+			if strings.TrimSpace(p) == "*" {
+				outcome = outcomeInvalidBody
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Wildcard principal not allowed"})
+				return
+			}
+		}
+
+		slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)
+
+		var authzErr error
+		result, authzErr = s.authorizer.Authorize(r.Context(), principal, req.Principals)
+		if authzErr != nil {
+			outcome = outcomeAuthzError
+			slog.Error("authz.error", "principal", principal, "error", authzErr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Authorization check failed"})
+			return
+		}
+		if !result.Allowed {
+			outcome = outcomeDenied
+			slog.Warn("authz.denied", "principal", principal, "requested_principals", req.Principals)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized for requested principals"})
+			return
+		}
+
+		// Issue the certificate for exactly the principals the user requested,
+		// not the group's full allowed_principals set. Authorization above has
+		// confirmed every requested principal is permitted by the matched group,
+		// so honoring the request is least-privilege: a user asking for
+		// ["deploy"] receives a cert valid only for "deploy" even if their group
+		// also allows "root". Deduplicate so a request padded with repeats does
+		// not bloat the cert's ValidPrincipals.
+		grantedPrincipals = slices.Clone(req.Principals)
+		slices.Sort(grantedPrincipals)
+		grantedPrincipals = slices.Compact(grantedPrincipals)
 	}
 
 	// Static attributes from config become custom extensions on the cert.
 	customAttributes := maps.Clone(result.CertificateRules.StaticAttributes)
-
-	// Issue the certificate for exactly the principals the user requested, not
-	// the group's full allowed_principals set. Authorization above has already
-	// confirmed every requested principal is permitted by the matched group, so
-	// honoring the request is least-privilege: a user asking for ["deploy"]
-	// receives a cert valid only for "deploy", even if their group also allows
-	// "root". This also makes wildcard groups (allowed_principals: ["*"]) behave
-	// correctly — the cert carries the concrete requested names rather than a
-	// literal "*". Deduplicate so a request padded with repeats does not bloat
-	// the cert's ValidPrincipals.
-	grantedPrincipals := slices.Clone(req.Principals)
-	slices.Sort(grantedPrincipals)
-	grantedPrincipals = slices.Compact(grantedPrincipals)
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,

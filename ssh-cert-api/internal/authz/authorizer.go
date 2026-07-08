@@ -33,4 +33,13 @@ type Authorizer interface {
 	// for the matched group. ctx is propagated to any directory-service
 	// lookups; implementations that do not perform I/O may ignore it.
 	Authorize(ctx context.Context, userPrincipal string, requestedPrincipals []string) (*AuthorizationResult, error)
+
+	// AuthorizeAll selects the group for an all-principals expansion request:
+	// the first alphabetical group the user belongs to. Unlike Authorize it
+	// does not filter by requested principals — the caller expands the returned
+	// group's AllowedPrincipals and is responsible for refusing a group whose
+	// AllowedPrincipals contains "*" (an unbounded set can't be enumerated into
+	// a cert). Returns Allowed=false if the user is in no group, or if LDAP is
+	// configured and fails closed for this principal.
+	AuthorizeAll(ctx context.Context, userPrincipal string) (*AuthorizationResult, error)
 }

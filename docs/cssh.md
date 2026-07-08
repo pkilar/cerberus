@@ -56,6 +56,7 @@ cssh --pubkey ~/.ssh/id_rsa.pub host    # sign a non-default key
 cssh --cacert /path/to/ca.pem user@host # trust a private CA for the API's TLS
 cssh --sign-only                        # just refresh the cert; don't connect
 cssh --sign-only user@host              # refresh a cert for host's login user
+cssh --sign-only --all-principals       # cert for every principal in your group
 cssh -- -L 8080:localhost:80 user@host  # pass-through ssh args after --
 cssh                                    # prints usage
 cssh --help                             # prints usage
@@ -114,6 +115,30 @@ within `CSSH_REFRESH_BEFORE` of expiry, so calling it before each command is
 cheap. `HOST` is optional in this mode — supply one only to resolve the login
 principal from `ssh -G`, or pass `--principals` to mint a cert for the login
 names you'll use across tools.
+
+### `--all-principals`
+
+If a single Cerberus group grants you several principals, `--all-principals`
+mints one cert covering **all** of them, so you can act as any of those logins
+without re-signing per principal:
+
+```sh
+cssh --sign-only --all-principals   # e.g. a cert valid for root, ec2-user, deploy
+scp file user@host:                 # use whichever principal the target expects
+ssh -i ~/.ssh/id_ed25519 root@host2
+```
+
+- The server expands the **first group (alphabetically)** you belong to into its
+  full `allowed_principals` set — you don't enumerate them.
+- It **requires `--sign-only`** (a broad, multi-identity cert is for staging, not
+  a single interactive session) and is **mutually exclusive** with
+  `--principals`.
+- If that first group grants `allowed_principals: ["*"]` (any principal), the
+  request is **refused** — an unbounded set can't be enumerated into a cert.
+  Request explicit `--principals` instead.
+- The broad cert is cached on expiry alone (there's no fixed requested set to
+  compare); entitlement changes are picked up on the next re-sign (expiry or
+  `--force`).
 
 ---
 

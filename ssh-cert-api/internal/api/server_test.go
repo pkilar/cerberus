@@ -34,11 +34,20 @@ func (f *fakeAuthenticator) AuthenticateRequest(*http.Request) (*auth.Authentica
 }
 
 type fakeAuthorizer struct {
-	result *authz.AuthorizationResult
-	err    error
+	result    *authz.AuthorizationResult
+	err       error
+	allResult *authz.AuthorizationResult // returned by AuthorizeAll; falls back to result/err when nil
+	allErr    error
 }
 
 func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.AuthorizationResult, error) {
+	return f.result, f.err
+}
+
+func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
+	if f.allResult != nil || f.allErr != nil {
+		return f.allResult, f.allErr
+	}
 	return f.result, f.err
 }
 
@@ -341,6 +350,105 @@ func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
 	}
 	if signer.got != nil {
 		t.Error("wildcard request must be rejected before reaching the signer")
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsExpands verifies that all_principals mints
+// a cert for the whole (finite) allowed_principals set of the matched group,
+// sorted and deduplicated, without the caller enumerating them.
+func TestHandleSignRequest_AllPrincipalsExpands(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root", "ec2-user", "deploy"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"deploy", "ec2-user", "root"}) {
+		t.Errorf("cert principals = %v, want the group's full set sorted", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsMutualExclusion verifies that combining
+// all_principals with an explicit principals list is a 400 (ambiguous request).
+func TestHandleSignRequest_AllPrincipalsMutualExclusion(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true,"principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "mutually exclusive") {
+		t.Errorf("body missing mutual-exclusion error: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("contradictory request must be rejected before the signer")
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsWildcardGroupRefused verifies that
+// all_principals against a group whose allowed_principals is ["*"] is refused
+// with a 400 (an unbounded set can't be enumerated into a cert) rather than
+// minting an any-principal certificate.
+func TestHandleSignRequest_AllPrincipalsWildcardGroupRefused(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cannot be expanded") {
+		t.Errorf("body missing wildcard-group refusal: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("wildcard-group all_principals must be refused before the signer")
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsDenied verifies a user in no group gets a
+// 403 for an all_principals request.
+func TestHandleSignRequest_AllPrincipalsDenied(t *testing.T) {
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "nobody", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: false}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("denied all_principals must not reach the signer")
 	}
 }
 
