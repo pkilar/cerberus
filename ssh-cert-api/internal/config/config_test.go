@@ -404,6 +404,59 @@ func TestValidate(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "valid strip_realms",
+			config: Config{
+				KeytabPath:  "/etc/keytab/test.keytab",
+				StripRealms: []string{"EXAMPLE.COM", "OTHER.COM"},
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "strip_realms with empty entry",
+			config: Config{
+				KeytabPath:  "/etc/keytab/test.keytab",
+				StripRealms: []string{"EXAMPLE.COM", ""},
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "strip_realms",
+		},
+		{
+			name: "strip_realms with whitespace entry",
+			config: Config{
+				KeytabPath:  "/etc/keytab/test.keytab",
+				StripRealms: []string{"   "},
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: []string{"admin"},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "strip_realms",
+		},
 	}
 
 	for _, tt := range tests {
@@ -984,6 +1037,37 @@ func TestWarnings_LDAP(t *testing.T) {
 				t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWarnings_StripRealm(t *testing.T) {
+	t.Parallel()
+	// An uppercase realm is silent; a lowercase one warns (it would strip
+	// nothing, since KDC realms are conventionally uppercase and matching is
+	// case-sensitive).
+	cfg := Config{
+		KeytabPath:  "/etc/keytab/test.keytab",
+		StripRealms: []string{"EXAMPLE.COM", "lower.example.com"},
+		Groups: map[string]Group{
+			"admin": {
+				Members: []string{"admin"},
+				CertificateRules: CertificateRules{
+					Validity:          "24h",
+					AllowedPrincipals: []string{"admin"},
+				},
+			},
+		},
+	}
+	want := []Warning{
+		{
+			Kind:   WarnStripRealmLowercase,
+			Key:    "lower.example.com",
+			Detail: "Kerberos realms are conventionally uppercase; strip_realms matching is case-sensitive",
+		},
+	}
+	got := cfg.Warnings()
+	if !slices.Equal(got, want) {
+		t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, want)
 	}
 }
 

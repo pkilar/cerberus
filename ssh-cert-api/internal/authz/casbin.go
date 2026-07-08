@@ -47,6 +47,7 @@ type CasbinAuthorizer struct {
 	userGroups        map[string][]string                 // user principal -> static groups in sorted order
 	ldapGroupBindings map[string]map[string]struct{}      // Cerberus group name -> normalized DN set
 	resolver          LDAPResolver                        // nil disables LDAP-backed authorization
+	stripRealms       map[string]struct{}                 // realms whose @REALM suffix is stripped for static members lookup; nil disables
 }
 
 // NewCasbinAuthorizer creates a CasbinAuthorizer with policies loaded from
@@ -69,6 +70,7 @@ func NewCasbinAuthorizer(cfg *config.Config, resolver LDAPResolver) (*CasbinAuth
 		userGroups:        make(map[string][]string),
 		ldapGroupBindings: make(map[string]map[string]struct{}),
 		resolver:          resolver,
+		stripRealms:       realmSet(cfg.StripRealms),
 	}
 
 	if err := ca.loadPolicies(cfg); err != nil {
@@ -129,6 +131,12 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 // the static-only door" semantic; static-only users are unaffected because
 // the resolver returns ok=false for realms with no LDAP backend.
 //
+// The static-membership lookup key is derived from userPrincipal via
+// staticMemberKey: for realms listed in strip_realms the @REALM suffix is
+// removed so `members:` can enumerate bare short names. This affects only the
+// static lookup; the full user@REALM is still passed to the LDAP resolver so
+// realm routing is unchanged.
+//
 // An empty requestedPrincipals slice is refused. With nothing to check, the
 // per-principal Casbin loop below would trivially "allow" and return the
 // first group's full rules — wider than the empty request implied. The HTTP
@@ -148,7 +156,7 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	slices.Sort(reqPrincipals)
 	reqPrincipals = slices.Compact(reqPrincipals)
 
-	staticGroups := ca.userGroups[userPrincipal]
+	staticGroups := ca.userGroups[ca.staticMemberKey(userPrincipal)]
 	candidates := slices.Clone(staticGroups)
 	ldapMatchedGroups := map[string]struct{}{}
 
@@ -210,6 +218,44 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	}
 
 	return &AuthorizationResult{Allowed: false}, nil
+}
+
+// realmSet builds a lookup set from a list of Kerberos realms, returning nil
+// for an empty list so callers can treat "no stripping configured" as a cheap
+// nil check.
+func realmSet(realms []string) map[string]struct{} {
+	if len(realms) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(realms))
+	for _, r := range realms {
+		m[r] = struct{}{}
+	}
+	return m
+}
+
+// staticMemberKey returns the key used to look up static `members:`
+// authorization for an authenticated principal. When the principal's realm is
+// listed in strip_realms, the trailing @REALM is removed so operators can
+// enumerate members by bare short name. Principals in unlisted realms — and
+// principals with no realm — are returned unchanged, so cross-realm identities
+// never collapse onto the same key. The realm is taken as everything after the
+// final '@' (Kerberos short names may themselves be multi-component but do not
+// contain '@'); only this static lookup is affected — the LDAP resolver still
+// receives the full user@REALM string for realm routing.
+func (ca *CasbinAuthorizer) staticMemberKey(userPrincipal string) string {
+	if len(ca.stripRealms) == 0 {
+		return userPrincipal
+	}
+	at := strings.LastIndex(userPrincipal, "@")
+	if at < 0 {
+		return userPrincipal
+	}
+	realm := userPrincipal[at+1:]
+	if _, strip := ca.stripRealms[realm]; strip {
+		return userPrincipal[:at]
+	}
+	return userPrincipal
 }
 
 // normalizeDN lowercases an LDAP DN for case-insensitive comparison. RFC 4514

@@ -662,3 +662,136 @@ func TestLDAPResolver_MalformedPrincipal(t *testing.T) {
 		t.Errorf("expected (false, error) for malformed principal, got ok=%v err=%v", ok, err)
 	}
 }
+
+// stripRealmConfig builds a static-only config with a single group and the
+// given strip_realms list, so the strip-realm tests share one setup.
+func stripRealmConfig(members, stripRealms []string) *config.Config {
+	cfg := newTestConfig(map[string]config.Group{
+		"engineers": {
+			Members: members,
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	cfg.StripRealms = stripRealms
+	return cfg
+}
+
+// TestAuthorize_StripRealmMatchesBareMember verifies that a principal whose
+// realm is listed in strip_realms matches a bare short-name members: entry.
+func TestAuthorize_StripRealmMatchesBareMember(t *testing.T) {
+	t.Parallel()
+	cfg := stripRealmConfig([]string{"alice"}, []string{"EXAMPLE.COM"})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	result, err := a.Authorize(t.Context(), "alice@EXAMPLE.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected allowed: alice@EXAMPLE.COM should match bare member 'alice'")
+	}
+	if result.GroupName != "engineers" {
+		t.Errorf("got group %q, want engineers", result.GroupName)
+	}
+}
+
+// TestAuthorize_StripRealmUnlistedRealmKeepsFullForm verifies that a principal
+// in a realm NOT listed in strip_realms is not stripped: it does not match a
+// bare member, but still matches a fully-qualified one. This is the guard
+// against cross-realm collision.
+func TestAuthorize_StripRealmUnlistedRealmKeepsFullForm(t *testing.T) {
+	t.Parallel()
+
+	// Bare member 'alice' must NOT match alice@OTHER.COM when OTHER.COM is not
+	// stripped.
+	bare := stripRealmConfig([]string{"alice"}, []string{"EXAMPLE.COM"})
+	a, err := NewCasbinAuthorizer(bare, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	result, err := a.Authorize(t.Context(), "alice@OTHER.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("expected denied: alice@OTHER.COM must not collapse onto bare 'alice' for an unlisted realm")
+	}
+
+	// A fully-qualified member for the unlisted realm still matches unchanged.
+	full := stripRealmConfig([]string{"bob@OTHER.COM"}, []string{"EXAMPLE.COM"})
+	a2, err := NewCasbinAuthorizer(full, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	result, err = a2.Authorize(t.Context(), "bob@OTHER.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected allowed: bob@OTHER.COM should still match its fully-qualified member")
+	}
+}
+
+// TestAuthorize_StripRealmDisabledExactMatch verifies that with no strip_realms
+// configured, a bare member does not match a full user@REALM principal —
+// behavior is byte-for-byte the pre-feature exact match.
+func TestAuthorize_StripRealmDisabledExactMatch(t *testing.T) {
+	t.Parallel()
+	cfg := stripRealmConfig([]string{"alice"}, nil)
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	result, err := a.Authorize(t.Context(), "alice@EXAMPLE.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("expected denied: with stripping disabled, bare 'alice' must not match alice@EXAMPLE.COM")
+	}
+}
+
+// TestAuthorize_StripRealmResolverGetsFullPrincipal verifies that realm
+// stripping does not affect LDAP routing: the resolver still receives the full
+// user@REALM string even when that realm is listed in strip_realms. resultsBy
+// is keyed on the full principal, so a match proves the unstripped form reached
+// the resolver.
+func TestAuthorize_StripRealmResolverGetsFullPrincipal(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"ssh-admins": {
+			LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	cfg.StripRealms = []string{"CORP.EXAMPLE"}
+	resolver := &fakeLDAPResolver{
+		resultsBy: map[string][]string{
+			// Keyed on the FULL principal; if stripping leaked into the resolver
+			// input the key would be "alice" and this lookup would miss.
+			"alice@CORP.EXAMPLE": {"CN=ssh-admins,DC=corp,DC=example"},
+		},
+	}
+	a, err := NewCasbinAuthorizer(cfg, resolver)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	result, err := a.Authorize(t.Context(), "alice@CORP.EXAMPLE", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected allowed via LDAP: resolver must receive the full user@REALM despite strip_realms")
+	}
+	if result.Source != "ldap" {
+		t.Errorf("got source %q, want ldap", result.Source)
+	}
+}
