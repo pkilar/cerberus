@@ -69,6 +69,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Kerberos authenticator: %v", err)
 	}
+
+	// Authentication method(s). Kerberos/SPNEGO is always present. When OIDC is
+	// enabled, both are wrapped behind a scheme-dispatching MultiAuthenticator;
+	// when disabled, the bare Kerberos authenticator is used and behavior is
+	// byte-for-byte unchanged. OIDC discovery runs here and fails startup fast
+	// (like the LDAP initial-bind probe) if the issuer is unreachable — the host
+	// has network, unlike the enclave.
+	authenticator := auth.Authenticator(kerberosAuthenticator)
+	if cfg.OAuth.Enabled {
+		discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), cfg.OAuth.HTTPTimeout)
+		oidcAuthenticator, err := auth.NewOIDCAuthenticator(discoveryCtx, cfg.OAuth)
+		discoveryCancel()
+		if err != nil {
+			log.Fatalf("Failed to initialize OIDC authenticator: %v", err)
+		}
+		authenticator = auth.NewMultiAuthenticator(kerberosAuthenticator, oidcAuthenticator)
+		slog.Info("oauth.startup.ready", "issuer", cfg.OAuth.Issuer, "audiences", cfg.OAuth.Audiences)
+	}
+
 	enclaveClient := enclave.New()
 	defer func() { _ = enclaveClient.Close() }()
 
@@ -175,7 +194,7 @@ func main() {
 	enclaveMetrics.Start(rootCtx)
 
 	// --- 5. Setup API Server ---
-	server, err := api.NewServer(cfg, kerberosAuthenticator, authorizer, enclaveClient, healthMonitor)
+	server, err := api.NewServer(cfg, authenticator, authorizer, enclaveClient, healthMonitor)
 	if err != nil {
 		log.Fatalf("Failed to initialize API server: %v", err)
 	}

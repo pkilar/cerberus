@@ -270,6 +270,27 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 09 2026 Paul Kilar <pkilar@gmail.com> - 0.7.0-1
+- OIDC bearer-token authentication (optional, opt-in via the new top-level
+  oauth: config block): the API now accepts Authorization: Bearer <JWT> from an
+  OIDC identity provider (Okta, Azure AD, Google, Keycloak, any OIDC IdP) as a
+  second authentication method alongside Kerberos/SPNEGO. The middleware
+  dispatches on the Authorization scheme (Negotiate -> Kerberos, Bearer ->
+  OIDC); when oauth is disabled the service behaves exactly as before.
+- Tokens are validated entirely offline: issuer discovery at startup fetches and
+  caches the JWKS (refreshed on key rotation); every request verifies the JWT
+  signature, iss, aud, and exp/nbf/iat with a configurable clock-skew leeway.
+  Accepted signing algorithms are restricted to an asymmetric allowlist
+  (default RS256); none and any HMAC HS* algorithm are rejected at config load
+  and again at verification to defeat algorithm-confusion attacks.
+- Authorization for OIDC users comes from the token's groups claim, matched
+  against a new per-group oidc_groups: binding (parallel to ldap_groups:). The
+  username_claim plus a configured synthetic realm form the Username@Realm
+  identity used for the cert KeyID, audit logs, and rate limiting. A group has
+  exactly one membership source: members, ldap_groups, or oidc_groups.
+- Server-side only in this release: there is no cssh device flow yet; callers
+  send a token obtained out-of-band. See docs/RUNBOOK.md (OIDC / OAuth Bearer
+  Authentication) and docs/THREAT-MODEL.md (OIDC-1..OIDC-6).
 * Wed Jul 08 2026 Paul Kilar <pkilar@gmail.com> - 0.6.0-1
 - New cerberus-client subpackage (noarch): installs the cssh SSH wrapper to
   /etc/profile.d/cssh.sh. cssh fetches a short-lived OpenSSH user certificate

@@ -964,3 +964,232 @@ func TestAuthorizeSelf_RootFloorAlwaysDenied(t *testing.T) {
 		t.Fatal("expected 'root' to be denied by the hard floor even with an empty deny list")
 	}
 }
+
+// --- OIDC oidc_groups authorization ---------------------------------------
+//
+// OIDC group membership is carried on the request context (WithAssertedGroups),
+// not derived from the principal string. The identity string is the synthetic
+// Username@Realm; group matching is decided entirely by the asserted groups.
+
+func TestAuthorize_OIDCGrantsMembership(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"ssh-admins": {
+			OIDCGroups: []string{"platform-eng", "sre"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	ctx := WithAssertedGroups(t.Context(), []string{"sre", "some-other-team"})
+	result, err := a.Authorize(ctx, "jsmith@OIDC", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected allowed via oidc_groups")
+	}
+	if result.GroupName != "ssh-admins" {
+		t.Errorf("got group %q, want ssh-admins", result.GroupName)
+	}
+	if result.Source != "oidc" {
+		t.Errorf("got source %q, want oidc", result.Source)
+	}
+}
+
+func TestAuthorize_OIDCNoMatch(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"ssh-admins": {
+			OIDCGroups: []string{"platform-eng"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	ctx := WithAssertedGroups(t.Context(), []string{"marketing"})
+	result, err := a.Authorize(ctx, "jsmith@OIDC", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("expected denied; asserted group binds no Cerberus group")
+	}
+}
+
+// A group is configured with oidc_groups, but the request carries no asserted
+// groups (the Kerberos path). The OIDC block must be a no-op and the request
+// must be denied exactly as before OIDC support existed.
+func TestAuthorize_OIDCNoAssertedGroupsIsInert(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"static-eng": {
+			Members: []string{"alice@REALM.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+		"oidc-admins": {
+			OIDCGroups: []string{"platform-eng"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	// Plain context (no asserted groups): the static member still resolves...
+	res, err := a.Authorize(t.Context(), "alice@REALM.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !res.Allowed || res.GroupName != "static-eng" || res.Source != "static" {
+		t.Errorf("static path changed: allowed=%v group=%q source=%q", res.Allowed, res.GroupName, res.Source)
+	}
+	// ...and a would-be OIDC member with no asserted groups is denied.
+	res, err = a.Authorize(t.Context(), "jsmith@OIDC", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if res.Allowed {
+		t.Fatal("expected denied: no asserted groups on the context")
+	}
+}
+
+// Two oidc-bound groups both match; the first alphabetical group wins, both for
+// AuthorizeAll (selection) and Authorize (per-group scan order).
+func TestAuthorize_OIDCFirstAlphabeticalWins(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"aardvark": {
+			OIDCGroups: []string{"everyone"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "1h",
+				AllowedPrincipals: []string{"shared"},
+			},
+		},
+		"zebra": {
+			OIDCGroups: []string{"everyone"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"shared"},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	ctx := WithAssertedGroups(t.Context(), []string{"everyone"})
+
+	res, err := a.Authorize(ctx, "jsmith@OIDC", []string{"shared"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !res.Allowed || res.GroupName != "aardvark" {
+		t.Errorf("Authorize picked %q, want aardvark (first alphabetical)", res.GroupName)
+	}
+
+	all, err := a.AuthorizeAll(ctx, "jsmith@OIDC")
+	if err != nil {
+		t.Fatalf("AuthorizeAll: %v", err)
+	}
+	if !all.Allowed || all.GroupName != "aardvark" || all.Source != "oidc" {
+		t.Errorf("AuthorizeAll picked group=%q source=%q, want aardvark/oidc", all.GroupName, all.Source)
+	}
+}
+
+// Namespace isolation: an OIDC request whose synthesized principal ALSO happens
+// to match a static members: entry (the realm-collision scenario) must be
+// authorized SOLELY via oidc_groups — the static group must not leak in. This
+// is the structural guard against a colliding realm label granting a Kerberos
+// group to an OIDC identity.
+func TestAuthorize_OIDCIsolatedFromStaticMembership(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		// Sorts first alphabetically and lists the OIDC principal as a static
+		// member; under union semantics it would win. Isolation must exclude it.
+		"aa-static": {
+			Members: []string{"jsmith@OIDC"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "1h",
+				AllowedPrincipals: []string{"shared"},
+			},
+		},
+		"zz-oidc": {
+			OIDCGroups: []string{"platform-eng"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"shared"},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	ctx := WithAssertedGroups(t.Context(), []string{"platform-eng"})
+	all, err := a.AuthorizeAll(ctx, "jsmith@OIDC")
+	if err != nil {
+		t.Fatalf("AuthorizeAll: %v", err)
+	}
+	if all.GroupName != "zz-oidc" || all.Source != "oidc" {
+		t.Errorf("OIDC request selected group %q source %q, want zz-oidc/oidc (static member must not leak)", all.GroupName, all.Source)
+	}
+
+	// Explicit-principals path: same isolation.
+	res, err := a.Authorize(ctx, "jsmith@OIDC", []string{"shared"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !res.Allowed || res.GroupName != "zz-oidc" {
+		t.Errorf("Authorize selected %q, want zz-oidc (static member must not leak)", res.GroupName)
+	}
+}
+
+// An OIDC request does not consult LDAP at all, so a configured LDAP resolver
+// that errors for other (Kerberos) principals does not affect it — it is still
+// authorized via oidc_groups. (LDAP fail-closed applies only to the Kerberos
+// path; see TestAuthorize_LDAPErrorFailsClosed.)
+func TestAuthorize_OIDCUnaffectedByLDAPError(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"oidc-admins": {
+			OIDCGroups: []string{"platform-eng"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	resolver := &fakeLDAPResolver{err: errors.New("ldap down")}
+	a, err := NewCasbinAuthorizer(cfg, resolver)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	ctx := WithAssertedGroups(t.Context(), []string{"platform-eng"})
+	res, err := a.Authorize(ctx, "jsmith@OIDC", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !res.Allowed || res.Source != "oidc" {
+		t.Fatalf("OIDC request must authorize via oidc_groups regardless of LDAP resolver state; got allowed=%v source=%q", res.Allowed, res.Source)
+	}
+	if resolver.calls != 0 {
+		t.Errorf("LDAP resolver was consulted %d times for an OIDC request; want 0", resolver.calls)
+	}
+}

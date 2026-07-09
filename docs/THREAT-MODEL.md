@@ -1,7 +1,7 @@
 # Cerberus Threat Model
 
 > **Status:** Living document — regenerate when trust boundaries or the threat surface change.
-> **Date:** 2026-06-15 · **Scope:** `feature/host-mediated-kms-decrypt` (host-mediated attested KMS decrypt; no KMS proxy).
+> **Date:** 2026-07-09 · **Scope:** `feat/oidc-bearer-auth` — adds optional OIDC bearer authentication alongside Kerberos (`OIDC-*`); builds on the host-mediated attested KMS decrypt design (no KMS proxy).
 > **Methodology:** STRIDE per element + DREAD scoring. Findings are grounded in the source with `file:line` evidence.
 
 ---
@@ -13,8 +13,9 @@ enumerates the threats against that system, the controls already present in the 
 controls, and the deployment-side prerequisites the design depends on.
 
 **In scope:** the two services (`ssh-cert-api` host gateway, `ssh-cert-signer` enclave), the VSOCK boundary, the
-host-mediated KMS decrypt + Nitro attestation chain, Kerberos/SPNEGO authentication, Casbin + LDAP authorization, SSH
-certificate issuance, observability, and the build/deploy (EIF/PCR/RPM) supply chain.
+host-mediated KMS decrypt + Nitro attestation chain, Kerberos/SPNEGO authentication, optional OIDC bearer
+authentication, Casbin + LDAP authorization, SSH certificate issuance, observability, and the build/deploy
+(EIF/PCR/RPM) supply chain.
 
 **Out of scope:** compromise of the Nitro hypervisor or AWS KMS itself; the Kerberos KDC's own security; `sshd`
 configuration on relying hosts (assumed to validate signature, principals, and validity correctly); IAM
@@ -43,6 +44,7 @@ pipeline.
 - HTTP request body → JSON deserialization → authz/enclave dispatch
 - Kerberos authentication layer → Casbin authorizer: the authenticated principal string crosses this boundary
 - LDAP wire (`ldaps://` / `ldap://`) → LDAP client: the directory server is an external trust partner whose responses drive group-membership decisions
+- OIDC IdP (issuer discovery + JWKS over HTTPS) → OIDC authenticator: when `oauth:` is enabled, the identity provider is an external trust partner whose signing keys authenticate the caller and whose `groups` claim drives group membership
 - `config.yaml` operator input → `config.Validate()`: all group and LDAP policy originates from a static operator-written file
 - Positive cache layer → authorization decision: singleflight-collapsed results bypass the live directory for up to 10 minutes
 - Static-group path vs LDAP-group path: a single resolver error collapses both paths for any principal whose realm is covered by an LDAP backend
@@ -103,14 +105,14 @@ issuance · **LOG** = logging/secrets · **SC** = supply chain/deploy.
 
 ## 6. Executive summary
 
-73 threats were identified across 8 trust-boundary domains:
+79 threats were identified across 9 trust-boundary domains:
 
 | Severity | Count |
 |---|---|
 | Critical | 1 |
-| High | 28 |
-| Medium | 36 |
-| Low | 8 |
+| High | 30 |
+| Medium | 38 |
+| Low | 10 |
 
 **The single Critical (`KMS-1`) and its siblings `KMS-2`/`SC-4` are not code defects — they are the load-bearing
 *deployment* control.** Because the change is host-mediated, the host holds the KMS-encrypted CA key *and*
@@ -126,9 +128,11 @@ assumption; (b) availability — slow-loris and enclave 32-connection-slot exhau
 (c) the host-as-adversary VSOCK surface, which is well-contained by the strict CMS parser, request-variant rejection,
 the one-shot load gate that pins the CA identity after first load (`VSOCK-3b`), and the CA-pubkey pin now baked into
 packaged EIFs by default (`VSOCK-2`/`VSOCK-3`, `KMS-2`/`KMS-5`); (d) LDAP transport security (`AUTHZ-7`) and the
-first-alphabetical-group authorization rule (`AUTHZ-1`).
+first-alphabetical-group authorization rule (`AUTHZ-1`); (e) the optional OIDC bearer-authentication surface
+(`OIDC-1` algorithm confusion, `OIDC-2` issuer/JWKS trust), contained in code by the asymmetric-only signing
+allowlist (rejecting `none`/HS* at config load and at verification) and mandatory verified TLS to the IdP.
 
-## 7. Threat register (all 73)
+## 7. Threat register (all 79)
 
 | ID | Sev | DREAD | STRIDE | Title |
 |---|---|---|---|---|
@@ -157,10 +161,12 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `EDGE-8` | High | 6.2 | D | Oversized or malformed SPNEGO token causing unbounded parsing work |
 | `LOG-3` | High | 6.2 | I | /metrics exposes Go runtime build metadata and request timing without authentication |
 | `SC-1` | High | 6.2 | TE | Unpinned amazonlinux:latest base image poisons EIF PCR0 silently |
+| `OIDC-1` | High | 6.2 | SE | Token forgery via JWS algorithm confusion or alg:none if the signing-algorithm allowlist were bypassed |
 | `AUTHZ-10` | High | 6 | D | LDAP query timeout stalls /sign hot path through enclave concurrency cap |
 | `SIGN-3` | High | 6 | TE | CriticalOptions injection — force-command or source-address overridden by host |
 | `SIGN-9` | High | 6 | TS | Flag-only extension value enforcement differs host vs. enclave — non-empty permit-pty value reaching the wire |
 | `SC-6` | High | 6 | TI | encrypt-ca-key materializes the plaintext CA key during generation (mitigated: RAM-backed /dev/shm by default) |
+| `OIDC-2` | High | 6 | TE | Rogue or MitM OIDC issuer/JWKS over plaintext http substitutes signing keys, forging accepted tokens |
 | `DOS-2` | Medium | 6 | D | Oversized /sign body amplifies host memory consumption before the body cap fires |
 | `DOS-5` | Medium | 5.8 | D | Enclave fd exhaustion or OOM triggers accept-loop backoff storm, stalling all signing |
 | `VSOCK-4` | Medium | 5.8 | ET | Repeated BeginKeyLoad invocations allow host to atomically swap the live CA signer mid-operation (now blocked by the one-shot `keyLoadGate` — see `VSOCK-3b`) |
@@ -184,9 +190,11 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `SC-2` | Medium | 5.2 | TE | govulncheck and gosec installed at @latest in CI — build-gating tools can be trojanized |
 | `SC-5` | Medium | 5.2 | TR | Arch-less EIF path operator copy step has no integrity verification before enclave launch |
 | `SC-7` | Medium | 5.2 | TE | GitHub Actions pinned by semver tag (not SHA) for checkout, setup-go, golangci-lint-action |
+| `OIDC-3` | Medium | 5.2 | SE | Audience confusion: a token minted for a different relying party accepted if audiences are misconfigured |
 | `VSOCK-7` | Medium | 5 | IR | Enclave error strings from CMS/key-parse failures leak implementation details via the wire error field |
 | `LOG-1` | Medium | 5 | I | Signed certificate wire representation logged at DEBUG in enclave |
 | `SC-9` | Medium | 5 | T | cerberus-signer.service has no systemd security hardening — runs as root, no ProtectSystem |
+| `OIDC-4` | Medium | 5 | S | Bearer-token theft or replay — no client device flow yet, so callers store tokens replayable until exp |
 | `AUTHZ-2` | Medium | 4.8 | ET | LDAP-backed group bypasses static group restriction via DN case manipulation |
 | `AUTHZ-8` | Medium | 4.8 | E | Realm routing case-sensitivity: lowercase realm in config silently misroutes principals |
 | `SIGN-5` | Medium | 4.6 | TI | Non-namespaced extension key collision with future OpenSSH standard extension |
@@ -202,13 +210,15 @@ first-alphabetical-group authorization rule (`AUTHZ-1`).
 | `AUTHZ-9` | Low | 3.4 | E | Members-static-or-LDAP exclusivity violation allows cross-source union if config validation bypassed |
 | `LOG-4` | Low | 3.4 | TR | Log injection via user-controlled principal strings in text log format |
 | `AUTHZ-13` | Low | 3.2 | E | Self-service issuance (`self_principal`) grants a cert for the caller's own short uid without group membership — via explicit `--self` or an implicit connect for the caller's own uid |
+| `OIDC-5` | Low | 3.2 | E | oauth.realm collision conflates the OIDC identity with a Kerberos/LDAP principal for audit/rate-limit and self_principal (group authz is namespace-isolated) |
 | `VSOCK-6` | Low | 3 | I | Unbounded bufio.NewReader on host response path allows enclave error response to consume host memory |
+| `OIDC-6` | Low | 3 | D | IdP discovery unreachable at startup blocks service start (intentional fail-fast, availability coupling) |
 | `LOG-8` | Low | 2.8 | I | CiphertextForRecipient redaction depends on a nil-check that misses a future zero-length blob |
 | `SIGN-10` | Low | 2.4 | TR | Serial number collision — non-unique serials reduce revocation precision |
 
 ## 8. Detailed findings — Critical & High
 
-Full write-ups for every Critical and High threat (29 total). Medium/Low findings are tabulated in §9.
+Full write-ups for every Critical and High threat (31 total). Medium/Low findings are tabulated in §9.
 
 ### External Edge — HTTPS/TLS Termination and Kerberos/SPNEGO Authentication (ssh-cert-api)
 
@@ -251,6 +261,27 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 - **Existing controls:** ReadHeaderTimeout: 5 * time.Second (main.go:195) bounds how long a header can be sent. Go's net/http default MaxHeaderBytes of 1 MiB limits header size. base64.StdEncoding.DecodeString in kerberos.go:94 is O(n) but bounded by header size. The gokrb5 ASN.1 parsers are not known to have quadratic behavior. auth.failed is logged at Warn for token rejections (server.go:127), providing visibility.
 - **Residual risk:** No application-level MaxHeaderBytes override is set. No per-IP connection rate limiting at the application layer. A sustained 1-MiB header flood with concurrent connections is limited only by OS network stack and TLS overhead. TLS handshake cost per connection provides natural back-pressure but also means the attacker must complete TLS before hitting the parse path, raising the attacker's own cost.
 - **DREAD:** Damage 5 · Reproducibility 7 · Exploitability 6 · Affected 7 · Discoverability 6
+
+
+### External Edge — OIDC Bearer Authentication (ssh-cert-api/internal/auth/oidc.go, multiauth.go)
+
+This surface exists only when the optional `oauth:` block is enabled; when disabled, none of these apply and the edge is Kerberos-only.
+
+#### `OIDC-1` — Token forgery via JWS algorithm confusion or alg:none
+**High** · DREAD 6.2 · STRIDE: Spoofing, ElevationOfPrivilege
+
+- **Attack:** OIDC bearer tokens are self-describing JWS: the header names the signing algorithm. Two classic forgeries follow if a verifier honors that header uncritically. (1) `alg:none` — an attacker submits an unsigned token with arbitrary `sub`/`groups`, spoofing any identity and any group membership. (2) Algorithm confusion — the attacker takes the issuer's *public* RSA/EC key (published in the JWKS) and forges an `HS256` token using the public-key bytes as the HMAC secret; a verifier that selects the HMAC verifier keyed on the "public key" accepts it. Either yields a cert for any principal a bound `oidc_groups` group allows, including groups mapping to `root`.
+- **Existing controls:** The verifier is constructed with an explicit asymmetric-only allowlist — `SupportedSigningAlgs: cfg.Algorithms` (oidc.go), defaulting to `["RS256"]` and validated at config load to contain only `RS*/ES*/PS*`. `config.validateOAuth()` rejects `none` and any `HS*` entry *fatally at startup* (config.go), and go-oidc/go-jose reject a token whose header alg is not in the allowlist *before* signature verification, so an `HS*` or `none` token never reaches a key-selection step. The keyset holds only the issuer's public keys. Unit tests cover both forgeries: `TestOIDC_AlgNoneRejected` and `TestOIDC_AlgConfusionHS256Rejected` (oidc_test.go).
+- **Residual risk:** Low. The defense is dual-layer (config load + per-request) and does not depend on operator configuration beyond leaving the default allowlist asymmetric. The one operator footgun — adding an `HS*` algorithm to `algorithms:` — is a hard startup error, not a silent acceptance. Residual risk reduces to trust in go-jose's alg-gating, a widely-audited library.
+- **DREAD:** Damage 9 · Reproducibility 6 · Exploitability 4 · Affected 8 · Discoverability 4
+
+#### `OIDC-2` — Rogue or MitM issuer/JWKS substitutes signing keys
+**High** · DREAD 6 · STRIDE: Tampering, ElevationOfPrivilege
+
+- **Attack:** Trust in a bearer token reduces to trust in the JWKS used to verify it. If discovery (`/.well-known/openid-configuration`) or the JWKS endpoint is fetched over plaintext `http://`, or against a TLS endpoint whose certificate is not verified, a network attacker can substitute their own public key and thereafter forge tokens the service accepts — a full authentication bypass analogous to the LDAP MitM in `AUTHZ-7`.
+- **Existing controls:** The HTTP client used for discovery and JWKS is a stdlib `http.Client` with a bounded `Timeout` and **default TLS verification — `InsecureSkipVerify` is never set** (oidc.go `NewOIDCAuthenticator`). The keyset captures this client at verifier construction (via `VerifierContext`), so key-rotation refreshes reuse the verified-TLS client rather than falling back to an unbounded default. A non-`https://` issuer is surfaced at startup as `slog.Warn("config.oauth.issuer_not_https", …)` (config.go `Warnings`). The issuer is bound at discovery and every token's `iss` is checked against it by go-oidc.
+- **Residual risk:** Medium, and entirely operator-configuration-dependent: an operator who sets an `http://` issuer gets a warning but not a hard refusal (mirroring the LDAP plaintext-URL posture). There is no certificate pinning to the IdP beyond the host trust store. A compromised IdP, or a compromised CA in the host trust store, is out of scope — the same trust assumption every OIDC relying party makes. **Availability note:** a token with an allowed alg but an unknown `kid` triggers a synchronous JWKS refetch inside `authMiddleware`, *before* the per-principal rate limiter (which wraps only `/sign`); an unauthenticated attacker sending RS256 tokens with fresh random `kid`s can drive one outbound IdP fetch each (bounded by the 5s `http_timeout` and go-oidc's singleflight, but still a new pre-auth cost that did not exist for the Kerberos-only edge). Restrict the edge at the network layer as for `/health` (`EDGE-4`).
+- **DREAD:** Damage 9 · Reproducibility 5 · Exploitability 5 · Affected 8 · Discoverability 5
 
 
 ### Authorization — Casbin per-group policy and LDAP-backed RBAC (ssh-cert-api/internal/authz/*, ssh-cert-api/internal/ldap/*)
@@ -499,9 +530,11 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 | `SC-2` | Medium | 5.2 | TE | govulncheck/gosec at @latest in CI — gating tools trojanizable | golangci-lint pinned `golangci/golangci-lint-action@v9` (`version: v2.12.2`); Dependabot tracks updates |
 | `SC-5` | Medium | 5.2 | TR | Arch-less EIF copy step has no integrity verification pre-launch | `run-enclave.sh:25-28` checks the EIF exists but verifies no hash/signature before launch |
 | `SC-7` | Medium | 5.2 | TE | GitHub Actions pinned by semver tag, not SHA | Action versions pinned by tag (`v9`, `version: v2.12.2`); not commit-SHA-pinned |
+| `OIDC-3` | Medium | 5.2 | SE | Audience confusion: a token minted for a different relying party accepted if audiences misconfigured | `validateOAuth` requires ≥1 non-empty audience `config.go`; per-request `aud`-intersection check `oidc.go`; issuer bound and `iss` checked by go-oidc |
 | `VSOCK-7` | Medium | 5 | IR | Enclave error strings leak implementation detail via the wire error field | `RedactedJSON`/`RedactedResponseJSON` `messages.go:168-196` elide blobs; error strings are descriptive, not key material |
 | `LOG-1` | Medium | 5 | I | Signed certificate wire representation logged at DEBUG in enclave | Gated by `DEBUG=true` (`logging.go:65`); off by default; the cert is a public artifact |
 | `SC-9` | Medium | 5 | T | cerberus-signer.service has no systemd hardening — runs as root | sysconfig mode 0640 root:root (`cerberus.spec:175`); root required by nitro-cli; no `ProtectSystem`/`NoNewPrivileges` |
+| `OIDC-4` | Medium | 5 | S | Bearer-token theft or replay — no client device flow yet, tokens replayable until exp | `exp`/`nbf`/`iat` checked with `leeway` (capped 5m, warned >2m) `oidc.go`/`config.go`; TLS in transit; token bytes never logged; caller must protect the token at rest |
 | `AUTHZ-2` | Medium | 4.8 | ET | LDAP-backed group bypasses static restriction via DN case manipulation | `normalizeDN()` `casbin.go:215-223` with documented RFC4514 approximation caveat |
 | `AUTHZ-8` | Medium | 4.8 | E | Lowercase realm in config silently misroutes principals | `WarnLDAPRealmLowercase` `config.go:502-509`; empty/whitespace realm rejected |
 | `SIGN-5` | Medium | 4.6 | TI | Non-namespaced extension key collision with future OpenSSH extension | `config.Warnings()` `config.go:458-526` emits `WarnStaticAttributeNotNamespaced` (PROTOCOL.certkeys §4) |
@@ -517,7 +550,9 @@ Full write-ups for every Critical and High threat (29 total). Medium/Low finding
 | `AUTHZ-9` | Low | 3.4 | E | Static-or-LDAP exclusivity violation allows cross-source union | Hard error at `LoadConfig` if both set `config.go:230-234` |
 | `LOG-4` | Low | 3.4 | TR | Log injection via user-controlled principal strings (text format) | `LOG_FORMAT=json` (recommended) escapes control chars; stdlib slog handlers quote attribute values |
 | `AUTHZ-13` | Low | 3.2 | E | Self-service issuance (`self_principal`) grants a cert for the caller's own short uid without group membership — via explicit `--self` or an implicit connect for the caller's own uid | Opt-in, off by default; realm allowlist blocks the cross-realm uid collision; denylist with a hard `root` floor (`selfDenySet` in `casbin.go`) config cannot remove; cert scoped to exactly the uid; the implicit connect path only self-accepts when the requested principal set is **exactly** the caller's own uid (`server.go` fallback), any other principal still needs a group; sshd is still the final gate (the account must be named/mapped to the principal — pair with `AuthorizedPrincipalsFile`). `config.Validate()` requires realms+validity when enabled; `AuthorizeSelf` + fallback unit-tested (realm allowlist, denylist, root floor, requested==uid) |
+| `OIDC-5` | Low | 3.2 | E | oauth.realm collision conflates the OIDC identity with a Kerberos/LDAP principal for audit/rate-limit and self_principal | Group authz is namespace-isolated — an OIDC request resolves membership only from `oidc_groups`, never static/LDAP (`candidateGroups` `casbin.go`), so a colliding realm cannot grant a Kerberos group; `WarnOAuthRealmCollision` covers LDAP/strip_realms; realm must not contain `@`; with `self_principal` enabled + the OIDC realm allowlisted, use a non-mutable unique `username_claim` (`sub`) |
 | `VSOCK-6` | Low | 3 | I | Unbounded host response reader can consume host memory | 30s wall-clock `conn.SetDeadline` `client.go:90` bounds the read window |
+| `OIDC-6` | Low | 3 | D | IdP discovery unreachable at startup blocks service start (availability coupling) | Intentional fail-fast mirroring the LDAP initial-bind probe `main.go`; bounded by `http_timeout`; disabling `oauth` decouples |
 | `LOG-8` | Low | 2.8 | I | Redaction nil-check could miss a future zero-length blob | Explicit redaction before marshalling `messages.go:159-196`; current types always populate the blob when present |
 | `SIGN-10` | Low | 2.4 | TR | Serial collision reduces revocation precision | Serial from `crypto/rand` over 2^64 `sign-public-key.go:91`; collision probability negligible |
 
@@ -536,6 +571,7 @@ from what the operator MUST provide; the deployment column is where most residua
 | Replay protection | In-process gokrb5 replay cache | NTP sync within the clock-skew window; minimize restarts | EDGE-1 |
 | Keytab / TLS key secrecy | Startup permission check (0600/0400) | Filesystem perms after startup; rotation requires restart | EDGE-2 |
 | LDAP integrity | TLS-capable client; fail-closed | **`ldaps://` + verified TLS (no `InsecureSkipVerify`)** | AUTHZ-7 |
+| OIDC token authenticity (when enabled) | Asymmetric-only alg allowlist (rejects `none`/HS* at load + verify); offline JWKS verify of signature/`iss`/`aud`/`exp`; OIDC authz namespace-isolated to `oidc_groups` (never static/LDAP) | **`https://` issuer with verified TLS; distinct realm label; audience registered at the IdP; network-restrict the bearer edge** | OIDC-1, OIDC-2, OIDC-3, OIDC-5 |
 | Enclave launch integrity | — | Trusted EIF build host; SHA-pinned base image; `REQUIRE_ATTESTATION` set | SC-1, KMS-4 |
 | Host process privilege | — | systemd hardening (root required by nitro-cli) | SC-9 |
 

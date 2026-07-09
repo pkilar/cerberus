@@ -47,6 +47,12 @@ type Config struct {
 	// (the short uid of the authenticated Kerberos principal). Disabled unless
 	// Enabled is true. See SelfPrincipalConfig.
 	SelfPrincipal SelfPrincipalConfig `yaml:"self_principal"`
+
+	// OAuth enables OIDC bearer-token authentication as a second method
+	// alongside Kerberos/SPNEGO. Disabled unless Enabled is true; when disabled
+	// the service behaves exactly as it did before OIDC support existed. See
+	// OAuthConfig.
+	OAuth OAuthConfig `yaml:"oauth"`
 }
 
 // SelfPrincipalConfig controls the self-service issuance path: an authenticated
@@ -72,13 +78,46 @@ type SelfPrincipalConfig struct {
 	CertificateRules CertificateRules `yaml:"certificate_rules"`
 }
 
+// OAuthConfig enables OIDC bearer-token authentication as a second method
+// alongside Kerberos/SPNEGO. It is opt-in (Enabled) and, when off, the service
+// behaves exactly as it did before OIDC support existed. When on, a request may
+// present `Authorization: Bearer <JWT>`; the token is validated offline against
+// the issuer's JWKS (signature, iss, aud, exp/nbf/iat with Leeway) and mapped to
+// an identity and a set of groups:
+//   - UsernameClaim selects the claim used as the short uid; together with Realm
+//     it forms the Username@Realm identity used for the cert KeyID, audit logs,
+//     and per-principal rate limiting — exactly parallel to a Kerberos principal.
+//   - GroupsClaim selects the claim (a JSON array of strings) whose values are
+//     matched against per-group `oidc_groups:` bindings for authorization —
+//     parallel to LDAP `ldap_groups:`. The groups claim never influences the
+//     cert identity.
+//   - Realm is a synthetic label (e.g. "OIDC"); it must not collide with a
+//     Kerberos/LDAP realm or a strip_realms entry, or OIDC identities would be
+//     misrouted to LDAP or have their realm stripped (surfaced as a warning).
+//   - Algorithms restricts the accepted JWS signing algorithms to an asymmetric
+//     allowlist; `none` and any HMAC (HS*) algorithm are rejected at config load
+//     and again at verification time, defeating algorithm-confusion attacks.
+type OAuthConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Issuer        string        `yaml:"issuer"`
+	Audiences     []string      `yaml:"audiences"`
+	UsernameClaim string        `yaml:"username_claim"`
+	GroupsClaim   string        `yaml:"groups_claim"`
+	Realm         string        `yaml:"realm"`
+	Algorithms    []string      `yaml:"algorithms"`
+	Leeway        time.Duration `yaml:"leeway"`
+	HTTPTimeout   time.Duration `yaml:"http_timeout"`
+}
+
 // Group defines a set of members and the certificate rules that apply to them.
-// Members and LDAPGroups are mutually exclusive: a group is either statically
-// enumerated (members) or LDAP-backed (ldap_groups), never both. Enforced by
-// Validate so operators wanting hybrid behavior must split into two groups.
+// Membership has exactly one source: static `members:`, LDAP `ldap_groups:`, or
+// OIDC `oidc_groups:` — never more than one. Enforced by Validate, so operators
+// wanting hybrid behavior must split into separate groups (the
+// first-alphabetical rule still applies across them).
 type Group struct {
 	Members          []string         `yaml:"members"`
 	LDAPGroups       []string         `yaml:"ldap_groups"`
+	OIDCGroups       []string         `yaml:"oidc_groups"`
 	CertificateRules CertificateRules `yaml:"certificate_rules"`
 }
 
@@ -134,6 +173,16 @@ const ldapCacheTTLMax = 10 * time.Minute
 // ldapTimeoutMax bounds the per-query timeout. A pathological value here can
 // stall the entire /sign hot path through the enclave's 32-concurrent cap.
 const ldapTimeoutMax = 30 * time.Second
+
+// oauthLeewayMax bounds the clock-skew tolerance applied to a token's
+// exp/nbf/iat. A large leeway widens the window in which an expired or
+// not-yet-valid token is accepted, so cap it hard.
+const oauthLeewayMax = 5 * time.Minute
+
+// oauthHTTPTimeoutMax bounds the HTTP timeout for issuer discovery and JWKS
+// fetches. Discovery is a startup call and JWKS fetches happen off the hot
+// path (cached), but a pathological value should still be rejected.
+const oauthHTTPTimeoutMax = 30 * time.Second
 
 // CertificateRules specifies the parameters for a signed SSH certificate.
 type CertificateRules struct {
@@ -232,6 +281,23 @@ func (c *Config) applyDefaults() {
 			b.Bind.Krb5ConfPath = "/etc/krb5.conf"
 		}
 	}
+	if c.OAuth.Enabled {
+		if c.OAuth.UsernameClaim == "" {
+			c.OAuth.UsernameClaim = "sub"
+		}
+		if c.OAuth.GroupsClaim == "" {
+			c.OAuth.GroupsClaim = "groups"
+		}
+		if len(c.OAuth.Algorithms) == 0 {
+			c.OAuth.Algorithms = []string{"RS256"}
+		}
+		if c.OAuth.Leeway == 0 {
+			c.OAuth.Leeway = 60 * time.Second
+		}
+		if c.OAuth.HTTPTimeout == 0 {
+			c.OAuth.HTTPTimeout = 5 * time.Second
+		}
+	}
 }
 
 // Validate checks the configuration for logical errors. It does not mutate
@@ -280,17 +346,31 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateOAuth(); err != nil {
+		return err
+	}
+
 	for name, group := range c.Groups {
 		hasStatic := len(group.Members) > 0
 		hasLDAP := len(group.LDAPGroups) > 0
-		if hasStatic && hasLDAP {
-			return fmt.Errorf("group '%s': members and ldap_groups are mutually exclusive — split into two groups", name)
+		hasOIDC := len(group.OIDCGroups) > 0
+		sources := 0
+		for _, has := range []bool{hasStatic, hasLDAP, hasOIDC} {
+			if has {
+				sources++
+			}
 		}
-		if !hasStatic && !hasLDAP {
-			return fmt.Errorf("group '%s' has no members and no ldap_groups", name)
+		if sources == 0 {
+			return fmt.Errorf("group '%s' has no members, ldap_groups, or oidc_groups", name)
+		}
+		if sources > 1 {
+			return fmt.Errorf("group '%s': members, ldap_groups, and oidc_groups are mutually exclusive — split into separate groups", name)
 		}
 		if hasLDAP && len(c.LDAP) == 0 {
 			return fmt.Errorf("group '%s' references ldap_groups but no ldap: backends are configured", name)
+		}
+		if hasOIDC && !c.OAuth.Enabled {
+			return fmt.Errorf("group '%s' references oidc_groups but oauth is not enabled", name)
 		}
 
 		rules := group.CertificateRules
@@ -519,6 +599,78 @@ func (c *Config) validateSelfPrincipal() error {
 	return nil
 }
 
+// oauthAllowedAlgorithms is the asymmetric JWS signing-algorithm allowlist for
+// OIDC token validation. Restricting verification to these — and rejecting
+// `none` and every HMAC HS* algorithm — is the config-load half of the
+// algorithm-confusion defense: the verifier's keyset holds only the issuer's
+// RSA/EC public keys, so an attacker cannot present an HS256 token signed with
+// the public-key bytes as the shared secret. The verifier enforces the same
+// allowlist again at request time.
+var oauthAllowedAlgorithms = map[string]struct{}{
+	"RS256": {}, "RS384": {}, "RS512": {},
+	"ES256": {}, "ES384": {}, "ES512": {},
+	"PS256": {}, "PS384": {}, "PS512": {},
+}
+
+// validateOAuth checks the OIDC bearer-auth block. A disabled block is not
+// validated (a stale/incomplete config must not break startup). When enabled it
+// requires an absolute issuer URL, at least one audience, a synthetic realm
+// label, and an asymmetric-only algorithm allowlist; it bounds the leeway and
+// HTTP timeout. UsernameClaim/GroupsClaim are not required here because
+// applyDefaults fills them ("sub"/"groups") before LoadConfig reaches Validate.
+func (c *Config) validateOAuth() error {
+	o := &c.OAuth
+	if !o.Enabled {
+		return nil
+	}
+	if o.Issuer == "" {
+		return fmt.Errorf("oauth is enabled but has no issuer")
+	}
+	u, err := url.Parse(o.Issuer)
+	if err != nil {
+		return fmt.Errorf("oauth issuer %q is not a valid URL: %w", o.Issuer, err)
+	}
+	if !u.IsAbs() || u.Host == "" {
+		return fmt.Errorf("oauth issuer %q must be an absolute URL (e.g. https://idp.example.com)", o.Issuer)
+	}
+	if len(o.Audiences) == 0 {
+		return fmt.Errorf("oauth is enabled but has no audiences; list the token audience(s) that identify this service")
+	}
+	for i, a := range o.Audiences {
+		if strings.TrimSpace(a) == "" {
+			return fmt.Errorf("oauth.audiences[%d] must not be empty or whitespace", i)
+		}
+	}
+	if strings.TrimSpace(o.Realm) == "" {
+		return fmt.Errorf("oauth is enabled but has no realm; set a synthetic realm label for OIDC identities")
+	}
+	if strings.Contains(o.Realm, "@") {
+		return fmt.Errorf("oauth.realm %q must not contain '@'", o.Realm)
+	}
+	if len(o.Algorithms) == 0 {
+		return fmt.Errorf("oauth is enabled but has no algorithms; list the JWS signing algorithms to accept")
+	}
+	for _, alg := range o.Algorithms {
+		if _, ok := oauthAllowedAlgorithms[alg]; !ok {
+			return fmt.Errorf("oauth.algorithms entry %q is not an allowed asymmetric algorithm "+
+				"(permitted: RS256/384/512, ES256/384/512, PS256/384/512; none and HS* are rejected to prevent algorithm confusion)", alg)
+		}
+	}
+	if o.Leeway < 0 {
+		return fmt.Errorf("oauth.leeway must not be negative, got %v", o.Leeway)
+	}
+	if o.Leeway > oauthLeewayMax {
+		return fmt.Errorf("oauth.leeway %v exceeds maximum %v", o.Leeway, oauthLeewayMax)
+	}
+	if o.HTTPTimeout < 0 {
+		return fmt.Errorf("oauth.http_timeout must not be negative, got %v", o.HTTPTimeout)
+	}
+	if o.HTTPTimeout > oauthHTTPTimeoutMax {
+		return fmt.Errorf("oauth.http_timeout %v exceeds maximum %v", o.HTTPTimeout, oauthHTTPTimeoutMax)
+	}
+	return nil
+}
+
 // Warning kinds. The string value is used directly as the slog event name at
 // startup so log aggregators can key on it; the prefix follows the
 // <area>.<event>[.<sub>] convention shared with the rest of the service.
@@ -531,6 +683,9 @@ const (
 	WarnLDAPRealmLowercase           = "config.ldap.realm_lowercase"
 	WarnStripRealmLowercase          = "config.strip_realm.lowercase"
 	WarnSelfPrincipalRealmLowercase  = "config.self_principal.realm_lowercase"
+	WarnOAuthIssuerNotHTTPS          = "config.oauth.issuer_not_https"
+	WarnOAuthRealmCollision          = "config.oauth.realm_collision"
+	WarnOAuthLeewayLong              = "config.oauth.leeway_long"
 )
 
 // Warning is one non-fatal configuration issue surfaced at startup. Kind is
@@ -635,6 +790,38 @@ func (c *Config) Warnings() []Warning {
 					Detail: "Kerberos realms are conventionally uppercase; self_principal.realms matching is case-sensitive",
 				})
 			}
+		}
+	}
+	// OIDC bearer-auth warnings.
+	if c.OAuth.Enabled {
+		if u, err := url.Parse(c.OAuth.Issuer); err == nil && u.Scheme != "https" {
+			warns = append(warns, Warning{
+				Kind:   WarnOAuthIssuerNotHTTPS,
+				Detail: fmt.Sprintf("oauth.issuer %q is not https://; discovery and JWKS are fetched over an unauthenticated channel", c.OAuth.Issuer),
+			})
+		}
+		// A realm label that collides with an LDAP backend realm or a strip_realms
+		// entry would misroute OIDC identities into LDAP or strip their synthetic
+		// realm, breaking the identity contract described on OAuthConfig.
+		collides := slices.Contains(c.StripRealms, c.OAuth.Realm)
+		for i := range c.LDAP {
+			if slices.Contains(c.LDAP[i].Realms, c.OAuth.Realm) {
+				collides = true
+				break
+			}
+		}
+		if collides {
+			warns = append(warns, Warning{
+				Kind:   WarnOAuthRealmCollision,
+				Key:    c.OAuth.Realm,
+				Detail: "oauth.realm collides with an LDAP backend realm or a strip_realms entry; pick a label unique to OIDC",
+			})
+		}
+		if c.OAuth.Leeway > 2*time.Minute {
+			warns = append(warns, Warning{
+				Kind:   WarnOAuthLeewayLong,
+				Detail: fmt.Sprintf("oauth.leeway=%v exceeds 2m; widens the window in which expired or not-yet-valid tokens are accepted", c.OAuth.Leeway),
+			})
 		}
 	}
 	slices.SortFunc(warns, func(a, b Warning) int {

@@ -982,7 +982,7 @@ func TestValidate_LDAP(t *testing.T) {
 				g.LDAPGroups = nil
 				c.Groups["ssh-admins"] = g
 			},
-			wantErr: "no members and no ldap_groups",
+			wantErr: "no members, ldap_groups, or oidc_groups",
 		},
 	}
 	for _, tt := range tests {
@@ -1299,6 +1299,258 @@ func TestValidateListen(t *testing.T) {
 			}
 			if tt.wantError && tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
 				t.Errorf("expected error containing %q, got: %v", tt.errSubstr, err)
+			}
+		})
+	}
+}
+
+// validOAuthConfig returns a config with OIDC bearer-auth enabled and a single
+// oidc_groups-backed group — the analog of validLDAPConfig for the OAuth tests.
+func validOAuthConfig() Config {
+	return Config{
+		KeytabPath: "/etc/keytab",
+		OAuth: OAuthConfig{
+			Enabled:       true,
+			Issuer:        "https://idp.example.com",
+			Audiences:     []string{"cerberus"},
+			UsernameClaim: "sub",
+			GroupsClaim:   "groups",
+			Realm:         "OIDC",
+			Algorithms:    []string{"RS256"},
+		},
+		Groups: map[string]Group{
+			"ssh-admins": {
+				OIDCGroups: []string{"platform-eng"},
+				CertificateRules: CertificateRules{
+					Validity:          "8h",
+					AllowedPrincipals: []string{"root"},
+				},
+			},
+		},
+	}
+}
+
+func TestValidate_OAuth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(c *Config)
+		wantErr string
+	}{
+		{name: "baseline valid", mutate: func(c *Config) {}, wantErr: ""},
+		{
+			name:    "missing issuer",
+			mutate:  func(c *Config) { c.OAuth.Issuer = "" },
+			wantErr: "no issuer",
+		},
+		{
+			name:    "relative issuer",
+			mutate:  func(c *Config) { c.OAuth.Issuer = "/realms/main" },
+			wantErr: "must be an absolute URL",
+		},
+		{
+			name:    "no audiences",
+			mutate:  func(c *Config) { c.OAuth.Audiences = nil },
+			wantErr: "no audiences",
+		},
+		{
+			name:    "empty audience entry",
+			mutate:  func(c *Config) { c.OAuth.Audiences = []string{" "} },
+			wantErr: "must not be empty",
+		},
+		{
+			name:    "missing realm",
+			mutate:  func(c *Config) { c.OAuth.Realm = "" },
+			wantErr: "no realm",
+		},
+		{
+			name:    "realm with @",
+			mutate:  func(c *Config) { c.OAuth.Realm = "OIDC@x" },
+			wantErr: "must not contain '@'",
+		},
+		{
+			name:    "no algorithms",
+			mutate:  func(c *Config) { c.OAuth.Algorithms = nil },
+			wantErr: "no algorithms",
+		},
+		{
+			name:    "algorithm none rejected",
+			mutate:  func(c *Config) { c.OAuth.Algorithms = []string{"none"} },
+			wantErr: "algorithm confusion",
+		},
+		{
+			name:    "HMAC algorithm rejected",
+			mutate:  func(c *Config) { c.OAuth.Algorithms = []string{"HS256"} },
+			wantErr: "algorithm confusion",
+		},
+		{
+			name:    "leeway too long",
+			mutate:  func(c *Config) { c.OAuth.Leeway = 10 * time.Minute },
+			wantErr: "exceeds maximum",
+		},
+		{
+			name:    "negative leeway",
+			mutate:  func(c *Config) { c.OAuth.Leeway = -1 },
+			wantErr: "must not be negative",
+		},
+		{
+			name:    "http_timeout too long",
+			mutate:  func(c *Config) { c.OAuth.HTTPTimeout = time.Minute },
+			wantErr: "exceeds maximum",
+		},
+		{
+			name: "oidc_groups group while oauth disabled",
+			mutate: func(c *Config) {
+				c.OAuth.Enabled = false
+			},
+			wantErr: "oauth is not enabled",
+		},
+		{
+			name: "group mixing oidc_groups and members",
+			mutate: func(c *Config) {
+				g := c.Groups["ssh-admins"]
+				g.Members = []string{"alice@OIDC"}
+				c.Groups["ssh-admins"] = g
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "disabled oauth skips validation",
+			mutate: func(c *Config) {
+				// A blank-but-disabled block must not fail startup; drop the
+				// oidc group so the only oauth reference is the disabled block.
+				c.OAuth = OAuthConfig{Enabled: false, Issuer: ""}
+				c.Groups = map[string]Group{
+					"admins": {
+						Members: []string{"admin@REALM"},
+						CertificateRules: CertificateRules{
+							Validity:          "8h",
+							AllowedPrincipals: []string{"root"},
+						},
+					},
+				}
+			},
+			wantErr: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validOAuthConfig()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("expected no error, got: %v", err)
+			case tt.wantErr != "" && err == nil:
+				t.Errorf("expected error containing %q, got nil", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestApplyDefaults_OAuth(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		KeytabPath: "/etc/keytab",
+		OAuth: OAuthConfig{
+			Enabled:   true,
+			Issuer:    "https://idp.example.com",
+			Audiences: []string{"cerberus"},
+			Realm:     "OIDC",
+		},
+		Groups: map[string]Group{
+			"admins": {
+				OIDCGroups:       []string{"admins"},
+				CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+			},
+		},
+	}
+	cfg.applyDefaults()
+	if cfg.OAuth.UsernameClaim != "sub" {
+		t.Errorf("UsernameClaim default = %q, want sub", cfg.OAuth.UsernameClaim)
+	}
+	if cfg.OAuth.GroupsClaim != "groups" {
+		t.Errorf("GroupsClaim default = %q, want groups", cfg.OAuth.GroupsClaim)
+	}
+	if !slices.Equal(cfg.OAuth.Algorithms, []string{"RS256"}) {
+		t.Errorf("Algorithms default = %v, want [RS256]", cfg.OAuth.Algorithms)
+	}
+	if cfg.OAuth.Leeway != 60*time.Second {
+		t.Errorf("Leeway default = %v, want 60s", cfg.OAuth.Leeway)
+	}
+	if cfg.OAuth.HTTPTimeout != 5*time.Second {
+		t.Errorf("HTTPTimeout default = %v, want 5s", cfg.OAuth.HTTPTimeout)
+	}
+	// Defaults must not touch a disabled block.
+	disabled := Config{OAuth: OAuthConfig{Enabled: false}}
+	disabled.applyDefaults()
+	if disabled.OAuth.UsernameClaim != "" || disabled.OAuth.Leeway != 0 {
+		t.Errorf("applyDefaults mutated a disabled oauth block: %+v", disabled.OAuth)
+	}
+}
+
+func TestWarnings_OAuth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(c *Config)
+		want   []Warning
+	}{
+		{name: "no warnings on baseline", mutate: func(c *Config) {}, want: nil},
+		{
+			name:   "http issuer",
+			mutate: func(c *Config) { c.OAuth.Issuer = "http://idp.example.com" },
+			want: []Warning{{
+				Kind:   WarnOAuthIssuerNotHTTPS,
+				Detail: `oauth.issuer "http://idp.example.com" is not https://; discovery and JWKS are fetched over an unauthenticated channel`,
+			}},
+		},
+		{
+			name:   "realm collides with strip_realms",
+			mutate: func(c *Config) { c.StripRealms = []string{"OIDC"} },
+			want: []Warning{{
+				Kind:   WarnOAuthRealmCollision,
+				Key:    "OIDC",
+				Detail: "oauth.realm collides with an LDAP backend realm or a strip_realms entry; pick a label unique to OIDC",
+			}},
+		},
+		{
+			name:   "long leeway",
+			mutate: func(c *Config) { c.OAuth.Leeway = 3 * time.Minute },
+			want: []Warning{{
+				Kind:   WarnOAuthLeewayLong,
+				Detail: "oauth.leeway=3m0s exceeds 2m; widens the window in which expired or not-yet-valid tokens are accepted",
+			}},
+		},
+		{
+			name: "disabled oauth is silent",
+			mutate: func(c *Config) {
+				c.OAuth.Enabled = false
+				c.OAuth.Issuer = "http://idp.example.com"
+				c.OAuth.Leeway = 9 * time.Minute
+				// swap the oidc group for a static one so the disabled config is valid
+				c.Groups = map[string]Group{
+					"admins": {
+						Members:          []string{"admin@REALM"},
+						CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+					},
+				}
+			},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validOAuthConfig()
+			tt.mutate(&cfg)
+			cfg.applyDefaults()
+			got := cfg.Warnings()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, tt.want)
 			}
 		})
 	}

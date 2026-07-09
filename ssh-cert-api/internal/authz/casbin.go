@@ -37,6 +37,9 @@ var _ Authorizer = (*CasbinAuthorizer)(nil)
 //   - ldapGroupBindings + resolver: LDAP-backed `ldap_groups:` mappings,
 //     resolved at request time. A nil resolver disables LDAP entirely and
 //     behavior is identical to the static-only model.
+//   - oidcGroupBindings: OIDC `oidc_groups:` mappings, matched at request time
+//     against the identity-provider-asserted groups carried on the request
+//     context (WithAssertedGroups). Empty when no group uses oidc_groups.
 //
 // The Casbin policy itself is mutated only at startup. Authorize never calls
 // AddPolicy — see loadPolicies for the one and only mutation site. The
@@ -46,6 +49,7 @@ type CasbinAuthorizer struct {
 	groupRules        map[string]*config.CertificateRules // group name -> certificate rules
 	userGroups        map[string][]string                 // user principal -> static groups in sorted order
 	ldapGroupBindings map[string]map[string]struct{}      // Cerberus group name -> normalized DN set
+	oidcGroupBindings map[string]map[string]struct{}      // Cerberus group name -> accepted OIDC groups-claim values (exact match)
 	resolver          LDAPResolver                        // nil disables LDAP-backed authorization
 	stripRealms       map[string]struct{}                 // realms whose @REALM suffix is stripped for static members lookup; nil disables
 
@@ -77,6 +81,7 @@ func NewCasbinAuthorizer(cfg *config.Config, resolver LDAPResolver) (*CasbinAuth
 		groupRules:        make(map[string]*config.CertificateRules),
 		userGroups:        make(map[string][]string),
 		ldapGroupBindings: make(map[string]map[string]struct{}),
+		oidcGroupBindings: make(map[string]map[string]struct{}),
 		resolver:          resolver,
 		stripRealms:       realmSet(cfg.StripRealms),
 		selfOn:            cfg.SelfPrincipal.Enabled,
@@ -114,8 +119,8 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 			}
 		}
 
-		// A group is either static-membership or LDAP-bound (validated at
-		// config load); the two branches below are mutually exclusive.
+		// A group's membership has exactly one source — static, LDAP, or OIDC
+		// (validated at config load); the branches below are mutually exclusive.
 		for _, member := range group.Members {
 			ca.userGroups[member] = append(ca.userGroups[member], groupName)
 		}
@@ -125,6 +130,16 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 				dns[normalizeDN(dn)] = struct{}{}
 			}
 			ca.ldapGroupBindings[groupName] = dns
+		}
+		if len(group.OIDCGroups) > 0 {
+			// OIDC group-claim values are matched by exact string equality
+			// (unlike LDAP DNs, which are structurally normalized): the values
+			// come from the IdP's groups claim verbatim.
+			vals := make(map[string]struct{}, len(group.OIDCGroups))
+			for _, g := range group.OIDCGroups {
+				vals[g] = struct{}{}
+			}
+			ca.oidcGroupBindings[groupName] = vals
 		}
 	}
 	return nil
@@ -168,7 +183,7 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	slices.Sort(reqPrincipals)
 	reqPrincipals = slices.Compact(reqPrincipals)
 
-	candidates, ldapMatchedGroups, ok := ca.candidateGroups(ctx, userPrincipal)
+	candidates, groupSources, ok := ca.candidateGroups(ctx, userPrincipal)
 	if !ok || len(candidates) == 0 {
 		return &AuthorizationResult{Allowed: false}, nil
 	}
@@ -186,15 +201,11 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 			}
 		}
 		if allAllowed {
-			source := "static"
-			if _, viaLDAP := ldapMatchedGroups[groupName]; viaLDAP {
-				source = "ldap"
-			}
 			return &AuthorizationResult{
 				Allowed:          true,
 				GroupName:        groupName,
 				CertificateRules: ca.groupRules[groupName],
-				Source:           source,
+				Source:           groupSources[groupName],
 			}, nil
 		}
 	}
@@ -202,17 +213,58 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 	return &AuthorizationResult{Allowed: false}, nil
 }
 
-// candidateGroups returns the user's candidate Cerberus groups (static
-// members plus LDAP-derived, deduplicated and sorted alphabetically) and the
-// subset matched via LDAP. ok is false with no groups when authorization must
-// fail closed — a configured LDAP resolver returned an error for this
-// principal — mirroring Authorize's fail-closed semantics. This is the single
-// source of the candidate-set computation shared by Authorize and AuthorizeAll.
-func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal string) (candidates []string, ldapMatched map[string]struct{}, ok bool) {
-	staticGroups := ca.userGroups[ca.staticMemberKey(userPrincipal)]
-	candidates = slices.Clone(staticGroups)
-	ldapMatched = map[string]struct{}{}
+// candidateGroups returns the user's candidate Cerberus groups, deduplicated
+// and sorted alphabetically, together with a map from each candidate group name
+// to the source that contributed it ("static" | "ldap" | "oidc"). The candidate
+// set depends on how the request was authenticated:
+//
+//   - OIDC-authenticated requests (marked via WithAssertedGroups) are authorized
+//     SOLELY from `oidc_groups:` bindings matched against the token's asserted
+//     groups — never static `members:` or LDAP. This keeps the OIDC identity in
+//     its own namespace, so an OIDC principal can never match a static or LDAP
+//     group even if its synthetic realm label collides with a Kerberos/LDAP
+//     realm.
+//   - Kerberos requests are authorized from static `members:` plus LDAP-backed
+//     `ldap_groups:`, exactly as before OIDC support existed.
+//
+// ok is false with no groups when authorization must fail closed — a configured
+// LDAP resolver returned an error for a Kerberos principal — mirroring
+// Authorize's fail-closed semantics. This is the single source of the
+// candidate-set computation shared by Authorize and AuthorizeAll.
+func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal string) (candidates []string, sources map[string]string, ok bool) {
+	sources = map[string]string{}
 
+	// OIDC-authenticated request: authorize solely via oidc_groups. Static
+	// members: and LDAP are deliberately not consulted (namespace isolation).
+	if asserted, isOIDC := oidcAssertionFromContext(ctx); isOIDC {
+		if len(asserted) > 0 && len(ca.oidcGroupBindings) > 0 {
+			want := make(map[string]struct{}, len(asserted))
+			for _, g := range asserted {
+				want[g] = struct{}{}
+			}
+			for groupName, boundVals := range ca.oidcGroupBindings {
+				for v := range boundVals {
+					if _, hit := want[v]; hit {
+						candidates = append(candidates, groupName)
+						sources[groupName] = "oidc"
+						break
+					}
+				}
+			}
+		}
+		slices.Sort(candidates)
+		candidates = slices.Compact(candidates)
+		return candidates, sources, true
+	}
+
+	// Kerberos request: static `members:` membership.
+	for _, g := range ca.userGroups[ca.staticMemberKey(userPrincipal)] {
+		candidates = append(candidates, g)
+		sources[g] = "static"
+	}
+
+	// LDAP-backed `ldap_groups:` membership, resolved at request time. A
+	// configured resolver that errors for this principal fails closed.
 	if ca.resolver != nil {
 		dns, resolved, err := ca.resolver.GroupsForPrincipal(ctx, userPrincipal)
 		if err != nil {
@@ -226,7 +278,9 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 				for _, dn := range dns {
 					if _, hit := boundDNs[normalizeDN(dn)]; hit {
 						candidates = append(candidates, groupName)
-						ldapMatched[groupName] = struct{}{}
+						if _, taken := sources[groupName]; !taken {
+							sources[groupName] = "ldap"
+						}
 						break
 					}
 				}
@@ -234,12 +288,12 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 		}
 	}
 
-	// Deduplicate (a name could appear via both static and LDAP paths if a
-	// future config relaxation allowed it) and sort to preserve the
-	// established first-alphabetical-wins precedence rule.
+	// Deduplicate (a name could appear via both static and LDAP if a future
+	// config relaxation allowed it) and sort to preserve the established
+	// first-alphabetical-wins precedence rule.
 	slices.Sort(candidates)
 	candidates = slices.Compact(candidates)
-	return candidates, ldapMatched, true
+	return candidates, sources, true
 }
 
 // AuthorizeAll implements the all-principals expansion group selection: it
@@ -248,21 +302,17 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 // expands CertificateRules.AllowedPrincipals and must refuse a "*" group. The
 // same fail-closed LDAP semantics as Authorize apply.
 func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal string) (*AuthorizationResult, error) {
-	candidates, ldapMatched, ok := ca.candidateGroups(ctx, userPrincipal)
+	candidates, groupSources, ok := ca.candidateGroups(ctx, userPrincipal)
 	if !ok || len(candidates) == 0 {
 		return &AuthorizationResult{Allowed: false}, nil
 	}
 
 	groupName := candidates[0]
-	source := "static"
-	if _, viaLDAP := ldapMatched[groupName]; viaLDAP {
-		source = "ldap"
-	}
 	return &AuthorizationResult{
 		Allowed:          true,
 		GroupName:        groupName,
 		CertificateRules: ca.groupRules[groupName],
-		Source:           source,
+		Source:           groupSources[groupName],
 	}, nil
 }
 

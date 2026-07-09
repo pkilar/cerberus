@@ -233,6 +233,75 @@ In the `cssh` client: `cssh --self --sign-only` explicitly fetches your own cert
 - **Matching is case-sensitive.** Kerberos realms are conventionally uppercase; a lowercase entry strips nothing and is surfaced at startup as `slog.Warn("config.strip_realm.lowercase", "key", ...)`. A blank/whitespace entry is a hard startup failure.
 - Audit logs (`auth.success`, `sign.request`) and the per-principal rate limiter always key on the full `uid@REALM`, regardless of this setting.
 
+### OIDC / OAuth Bearer Authentication
+
+Cerberus can accept **OIDC bearer tokens** (`Authorization: Bearer <JWT>`) as a second authentication method alongside Kerberos/SPNEGO — for users backed by a cloud IdP (Okta, Azure AD, Google, Keycloak, …) rather than a Kerberos ticket. It is opt-in via the top-level `oauth:` block; omit it (or set `enabled: false`) and the service behaves exactly as a Kerberos-only deployment. When enabled the API dispatches on the `Authorization` scheme — `Negotiate` → Kerberos, `Bearer` → OIDC — and an unauthenticated `/sign` is challenged with **both** `WWW-Authenticate: Negotiate` and `WWW-Authenticate: Bearer`.
+
+Tokens are validated **entirely offline**: the issuer's JWKS is discovered at startup (`/.well-known/openid-configuration`) and cached (refreshed on key rotation); every request verifies the JWT signature, `iss`, `aud`, and `exp`/`nbf`/`iat` (with `leeway` clock-skew tolerance). The enclave is never involved — validation happens entirely on the host, which already has network.
+
+**Identity vs authorization.** The token's `username_claim` plus the configured `realm` label form the `Username@Realm` identity used for the cert `KeyID`, audit logs, and per-principal rate limiting — the same contract a Kerberos principal has. **Authorization is separate**: it comes from the token's `groups_claim`, whose values are matched against per-group `oidc_groups:` bindings, exactly parallel to LDAP `ldap_groups:`. The groups claim never influences the cert identity, and the identity claims never grant access. OIDC requests are authorized **only** via `oidc_groups` — an OIDC identity never matches a static `members:` entry or an LDAP group even if its `realm` label collides with a Kerberos/LDAP realm (the namespaces are isolated in `candidateGroups`), so the label is a cosmetic identity tag for authz purposes.
+
+| Key | Meaning | Default |
+| --------------- | ------------------------------------------------------------------ | ------------- |
+| `enabled` | Turn OIDC bearer auth on | `false` |
+| `issuer` | OIDC issuer URL (discovery base); startup fails fast if unreachable | — (required) |
+| `audiences` | Acceptable `aud` values; a token must carry at least one | — (required) |
+| `username_claim` | Claim used as the short uid | `sub` |
+| `groups_claim` | Claim (JSON array) matched against `oidc_groups:` | `groups` |
+| `realm` | Synthetic realm label for the `Username@Realm` identity | — (required) |
+| `algorithms` | Accepted JWS signing algorithms (asymmetric only) | `["RS256"]` |
+| `leeway` | Clock-skew tolerance for `exp`/`nbf`/`iat` | `60s` |
+| `http_timeout` | Timeout for discovery and JWKS fetches | `5s` |
+
+```yaml
+oauth:
+  enabled: true
+  issuer: "https://idp.example.com"
+  audiences: ["cerberus"]
+  username_claim: "preferred_username"
+  groups_claim: "groups"
+  realm: "OIDC"
+  algorithms: ["RS256"]
+  leeway: "60s"
+  http_timeout: "5s"
+
+groups:
+  oidc-admins:
+    oidc_groups: ["platform-eng"]        # matched against the token's groups claim
+    certificate_rules:
+      validity: "8h"
+      allowed_principals: ["root"]
+      permissions: { permit-pty: "" }
+```
+
+**Setup.**
+
+1. Register this service with the IdP and note the audience/client identifier it mints into tokens; list it under `audiences`.
+2. Choose `username_claim` (`sub` is stable but opaque; `preferred_username`/`email` are human-readable) and a `groups_claim` your IdP populates.
+3. Pick a `realm` label **distinct from every Kerberos and LDAP realm and every `strip_realms` entry** — a collision would misroute OIDC identities into LDAP or strip their realm, and is warned at startup (`config.oauth.realm_collision`).
+4. Map IdP groups to Cerberus groups with `oidc_groups:`. A group has exactly one membership source — `oidc_groups` cannot coexist with `members:` or `ldap_groups:`.
+
+**Security notes.**
+
+- **Algorithm-confusion is blocked two ways:** only asymmetric algorithms are accepted (`none` and any HMAC `HS*` are rejected at config load **and** at verification), so the issuer's public keys can never be abused as an HMAC secret.
+- **Group authorization is namespace-isolated.** An OIDC request resolves membership *only* from `oidc_groups`, never static `members:` or LDAP, so a token's `username_claim` can never grant a Kerberos/LDAP group even if `realm` collides with a real realm.
+- **`self_principal` + OIDC needs a trustworthy username claim.** If `self_principal` is enabled *and* the OIDC `realm` is listed in `self_principal.realms`, an OIDC user can self-issue a cert for their `username_claim` value. Use a claim the user cannot edit at the IdP and that is unique per person (`sub` is safest; `email`/`preferred_username` only if the IdP guarantees them). A mutable or non-unique claim would let one user self-issue for another's uid, and also conflates audit logs and rate-limit buckets.
+- **No client device flow yet.** Callers obtain a token out-of-band (their IdP CLI/SDK) and send it as a bearer token, so protect tokens in transit and at rest; a leaked token is replayable until `exp` + `leeway`. Keep `leeway` small (default 60s; > 2m is warned as `config.oauth.leeway_long`).
+- **Network-restrict the bearer edge.** A token with an unknown key id triggers a JWKS refetch in the auth middleware *before* the per-principal rate limiter, so an unauthenticated flood of bogus-`kid` tokens can drive outbound IdP fetches (bounded by `http_timeout` and go-oidc's single-flight). Protect the edge with the same network ACL you use for `/health` and `/metrics`.
+- **Startup couples to the IdP.** Like the LDAP initial-bind probe, the API refuses to start if issuer discovery fails.
+
+**Troubleshooting.**
+
+| Symptom | Cause / fix |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `401` with `WWW-Authenticate: Negotiate` + `Bearer` | Missing/invalid credential; expected for the first probe. Send a valid bearer token. |
+| `token verification failed` in `auth.failed` | Bad signature, wrong `iss`, unknown `kid`, or a disallowed `alg`. Confirm `issuer` matches the token and the signing alg is in `algorithms`. |
+| `token audience … not in the allowed set` | The token's `aud` isn't in `audiences`. Add this service's audience. |
+| `token expired` / `token not yet valid` | Clock skew between IdP and host beyond `leeway`; sync NTP or raise `leeway` slightly. |
+| `username claim "…" is empty or missing` | The `username_claim` isn't present in the token; pick a claim the IdP emits. |
+| Authenticated user gets `403` | Their token's `groups_claim` values match no `oidc_groups:` binding. (A group using `oidc_groups` while `oauth.enabled` is false is a hard startup error, not a 403.) |
+| Startup aborts: `Failed to initialize OIDC authenticator` | Issuer discovery failed — unreachable/misconfigured `issuer`, or `http_timeout` too low. |
+
 ### Validation Constraints
 
 | Constraint                 | Value                   |
