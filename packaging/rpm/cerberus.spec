@@ -270,6 +270,20 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 09 2026 Paul Kilar <pkilar@gmail.com> - 0.8.0-1
+- cssh OIDC device-code login (cerberus-client): cssh can now authenticate to
+  the signing API with an OIDC identity provider instead of Kerberos, via the
+  OAuth 2.0 Device Authorization Grant (RFC 8628). Opt in per-shell with
+  CSSH_AUTH=oidc or per-call with --oauth; the Kerberos path is unchanged by
+  default. cssh prints a verification URL + user code, polls for the token, and
+  sends it as an Authorization: Bearer header to /sign.
+- The token (and, when the IdP grants offline_access, a refresh token) is cached
+  at ~/.cache/cerberus/oidc-token.json (mode 0600) and refreshed silently, so
+  the browser step happens once and later ssh/scp/rsync calls reuse or renew the
+  token without re-prompting. A rejected token (HTTP 401) is refreshed and the
+  request retried once. New site config lives in cerberus-env.sh: CSSH_OIDC_ISSUER,
+  CSSH_OIDC_CLIENT_ID, CSSH_OIDC_SCOPE, CSSH_OIDC_AUDIENCE, CSSH_OIDC_TOKEN,
+  CSSH_OIDC_CACERT, CSSH_OIDC_CLIENT_SECRET, CSSH_OIDC_OPEN. See docs/cssh.md.
 * Thu Jul 09 2026 Paul Kilar <pkilar@gmail.com> - 0.7.0-1
 - OIDC bearer-token authentication (optional, opt-in via the new top-level
   oauth: config block): the API now accepts Authorization: Bearer <JWT> from an

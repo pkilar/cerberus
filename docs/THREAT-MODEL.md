@@ -194,7 +194,7 @@ allowlist (rejecting `none`/HS* at config load and at verification) and mandator
 | `VSOCK-7` | Medium | 5 | IR | Enclave error strings from CMS/key-parse failures leak implementation details via the wire error field |
 | `LOG-1` | Medium | 5 | I | Signed certificate wire representation logged at DEBUG in enclave |
 | `SC-9` | Medium | 5 | T | cerberus-signer.service has no systemd security hardening — runs as root, no ProtectSystem |
-| `OIDC-4` | Medium | 5 | S | Bearer-token theft or replay — no client device flow yet, so callers store tokens replayable until exp |
+| `OIDC-4` | Medium | 5 | S | Bearer/refresh-token theft from the cssh on-disk token cache or in transit — replayable until expiry/revocation |
 | `AUTHZ-2` | Medium | 4.8 | ET | LDAP-backed group bypasses static group restriction via DN case manipulation |
 | `AUTHZ-8` | Medium | 4.8 | E | Realm routing case-sensitivity: lowercase realm in config silently misroutes principals |
 | `SIGN-5` | Medium | 4.6 | TI | Non-namespaced extension key collision with future OpenSSH standard extension |
@@ -534,7 +534,7 @@ This surface exists only when the optional `oauth:` block is enabled; when disab
 | `VSOCK-7` | Medium | 5 | IR | Enclave error strings leak implementation detail via the wire error field | `RedactedJSON`/`RedactedResponseJSON` `messages.go:168-196` elide blobs; error strings are descriptive, not key material |
 | `LOG-1` | Medium | 5 | I | Signed certificate wire representation logged at DEBUG in enclave | Gated by `DEBUG=true` (`logging.go:65`); off by default; the cert is a public artifact |
 | `SC-9` | Medium | 5 | T | cerberus-signer.service has no systemd hardening — runs as root | sysconfig mode 0640 root:root (`cerberus.spec:175`); root required by nitro-cli; no `ProtectSystem`/`NoNewPrivileges` |
-| `OIDC-4` | Medium | 5 | S | Bearer-token theft or replay — no client device flow yet, tokens replayable until exp | `exp`/`nbf`/`iat` checked with `leeway` (capped 5m, warned >2m) `oidc.go`/`config.go`; TLS in transit; token bytes never logged; caller must protect the token at rest |
+| `OIDC-4` | Medium | 5 | S | Bearer/refresh-token theft from the cssh on-disk token cache or in transit — replayable until expiry/revocation | `exp`/`nbf`/`iat` checked with `leeway` (capped 5m, warned >2m) `oidc.go`/`config.go`; TLS in transit; token bytes never logged. Client (`cssh`) caches token+refresh at `~/.cache/cerberus/oidc-token.json` mode 0600 and refreshes silently; revoke a lost token at the IdP. `offline_access` refresh token is the longest-lived secret |
 | `AUTHZ-2` | Medium | 4.8 | ET | LDAP-backed group bypasses static restriction via DN case manipulation | `normalizeDN()` `casbin.go:215-223` with documented RFC4514 approximation caveat |
 | `AUTHZ-8` | Medium | 4.8 | E | Lowercase realm in config silently misroutes principals | `WarnLDAPRealmLowercase` `config.go:502-509`; empty/whitespace realm rejected |
 | `SIGN-5` | Medium | 4.6 | TI | Non-namespaced extension key collision with future OpenSSH extension | `config.Warnings()` `config.go:458-526` emits `WarnStaticAttributeNotNamespaced` (PROTOCOL.certkeys §4) |

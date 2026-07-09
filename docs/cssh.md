@@ -45,6 +45,62 @@ export CERBERUS_CACERT=/etc/pki/ca-trust/source/anchors/cerberus-ca.pem
 | `CSSH_REFRESH_BEFORE` | `300`                   | Re-sign if cert expires within this many seconds.               |
 | `CSSH_PRINCIPALS`     | *(unset)*               | Comma-separated principals to request. If unset, `cssh` requests the destination's login user, resolved via `ssh -G` (falling back to your local login name). |
 | `CSSH_AUTOGEN`        | `1` (on)                | Auto-generate a passphraseless ed25519 keypair when the key is missing. Set `0`/`false`/`no`/`off` to disable and error instead. |
+| `CSSH_AUTH`           | `kerberos`              | Authentication method: `kerberos` (SPNEGO) or `oidc` (device flow). See [OIDC authentication](#oidc-authentication-device-flow). |
+
+---
+
+## OIDC authentication (device flow)
+
+By default `cssh` authenticates to the API with your Kerberos ticket. If your
+Cerberus deployment has OIDC enabled (server-side `oauth:` block), users
+**without Kerberos** can authenticate with an OIDC identity provider instead,
+via the OAuth 2.0 Device Authorization Grant (RFC 8628).
+
+Point `cssh` at your issuer and client, then opt in with `CSSH_AUTH=oidc` (or
+`--oauth` per call):
+
+```sh
+export CSSH_AUTH=oidc
+export CSSH_OIDC_ISSUER=https://idp.example.com
+export CSSH_OIDC_CLIENT_ID=cerberus-cssh
+cssh user@host
+```
+
+The first sign triggers the device flow:
+
+```
+cssh: to authenticate, open this URL in a browser:
+
+    https://idp.example.com/device
+
+and enter the code:  WXYZ-1234
+
+cssh: waiting for authorization (Ctrl-C to abort)...
+```
+
+Approve in the browser and `cssh` obtains a bearer token, caches it at
+`~/.cache/cerberus/oidc-token.json` (mode `0600`), and completes the request.
+Subsequent calls reuse the cached token and — when the IdP grants
+`offline_access` — silently refresh it, so you approve **once** and then
+`ssh`/`scp`/`rsync` for as long as the refresh token lives. Authorization is by
+the token's groups claim mapped to the server's `oidc_groups:`; requested
+principals work exactly as with Kerberos.
+
+| Variable                  | Default                                      | Purpose                                                        |
+| ------------------------- | -------------------------------------------- | -------------------------------------------------------------- |
+| `CSSH_AUTH`               | `kerberos`                                   | `oidc` selects the device flow (or pass `--oauth` per call).   |
+| `CSSH_OIDC_ISSUER`        | *(required for OIDC)*                         | OIDC issuer URL; its discovery document is fetched.            |
+| `CSSH_OIDC_CLIENT_ID`     | *(required for OIDC)*                         | Public client ID registered for the device grant.             |
+| `CSSH_OIDC_SCOPE`         | `openid profile email groups offline_access` | Scopes to request (`offline_access` enables silent refresh).   |
+| `CSSH_OIDC_AUDIENCE`      | *(unset)*                                     | Requested token audience; set it if your IdP needs it to mint an access token carrying the API's `aud` (e.g. Auth0). |
+| `CSSH_OIDC_TOKEN`         | `access`                                      | Which token to send: `access` or `id`.                        |
+| `CSSH_OIDC_CACERT`        | system trust                                  | CA bundle to trust for the IdP's TLS.                          |
+| `CSSH_OIDC_CLIENT_SECRET` | *(unset)*                                     | Client secret, if the IdP requires one.                       |
+| `CSSH_OIDC_OPEN`          | off                                           | Try to open the verification URL in a browser (`xdg-open`/`open`). |
+
+The cached token file holds the access token and (if issued) a long-lived
+refresh token — protect it like any credential. Delete it to force a fresh
+browser login: `rm ~/.cache/cerberus/oidc-token.json`.
 
 ---
 
@@ -222,6 +278,10 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
 | `cssh: signing failed (HTTP 401): ...`                      | SPNEGO auth was rejected. Common causes: keytab kvno mismatch with the KDC, clock skew >5 min, no TGT. |
 | sshd rejects with `Certificate option "permit-pty" corrupt` | Server-side config bug — a flag-style cert extension was given a non-empty value. Fix the YAML.        |
 | ssh asks for a password                                     | The cert was issued for a different principal than the SSH login name. Use `--principals <login>`.     |
+| `cssh: OIDC auth needs CSSH_OIDC_ISSUER and CSSH_OIDC_CLIENT_ID` | `CSSH_AUTH=oidc`/`--oauth` but the issuer/client aren't set. Set them (see [OIDC authentication](#oidc-authentication-device-flow)). |
+| `cssh: issuer advertises no device_authorization_endpoint`  | The IdP's discovery doc lacks device-grant support, or the client isn't allowed to use it. Enable the device flow for the client. |
+| `cssh: device code expired ...`                             | You didn't approve in the browser in time. Run `cssh --oauth` again.                                   |
+| OIDC user gets `signing failed (HTTP 403)`                  | The token's groups claim matches no `oidc_groups:` group for the principal requested.                  |
 
 If a cached cert seems wrong, the safest reset is:
 

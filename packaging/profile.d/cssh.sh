@@ -1,10 +1,16 @@
 # cssh — Cerberus-signed SSH wrapper (system-wide, bash + zsh).
 #
 # Fetches a short-lived OpenSSH user certificate from the Cerberus signing API
-# (Kerberos/SPNEGO-authenticated) and drops it next to the matching private key
-# as <key>-cert.pub, where ssh(1) auto-loads it. Caches the cert and re-signs
-# only when it is missing, unreadable, or about to expire. If the user has no
-# SSH key yet, cssh generates an ed25519 keypair first (opt out: CSSH_AUTOGEN=0).
+# and drops it next to the matching private key as <key>-cert.pub, where ssh(1)
+# auto-loads it. Caches the cert and re-signs only when it is missing,
+# unreadable, or about to expire. If the user has no SSH key yet, cssh generates
+# an ed25519 keypair first (opt out: CSSH_AUTOGEN=0).
+#
+# Authenticates to the API with Kerberos/SPNEGO by default. Set CSSH_AUTH=oidc
+# (or pass --oauth) to authenticate with an OIDC identity provider instead, via
+# the OAuth 2.0 Device Authorization Grant (RFC 8628): cssh prints a URL + code
+# to visit in a browser, then caches the resulting bearer token (with silent
+# refresh) so subsequent calls don't re-prompt. See "OIDC authentication" below.
 #
 # ── Install ──────────────────────────────────────────────────────────────────
 #   sudo install -m 0644 cssh.sh /etc/profile.d/cssh.sh
@@ -49,6 +55,31 @@
 #   CSSH_AUTOGEN          Auto-generate a passphraseless ed25519 keypair when the
 #                         key is missing (default on). Set to 0/false/no/off to
 #                         disable and error instead.
+#   CSSH_AUTH             Authentication method: "kerberos" (default) or "oidc".
+#                         --oauth forces "oidc" for a single call.
+#
+# ── OIDC authentication (CSSH_AUTH=oidc / --oauth) ───────────────────────────
+# For users without Kerberos, cssh can authenticate to the API with an OIDC
+# bearer token obtained via the OAuth 2.0 Device Authorization Grant: it prints a
+# verification URL + user code, you approve in a browser, and cssh polls for the
+# token. The token (and its refresh token, when the IdP grants offline_access) is
+# cached at ${XDG_CACHE_HOME:-~/.cache}/cerberus/oidc-token.json (mode 0600) and
+# renewed silently, so you approve once and then ssh/scp/rsync for as long as the
+# refresh token lives. Requires jq and curl (already cssh dependencies).
+#
+#   CSSH_OIDC_ISSUER      OIDC issuer URL (required for OIDC; discovery base).
+#   CSSH_OIDC_CLIENT_ID   OAuth public client ID registered for the device flow.
+#   CSSH_OIDC_SCOPE       Scopes to request. Default
+#                         "openid profile email groups offline_access"
+#                         (offline_access is what enables silent refresh).
+#   CSSH_OIDC_AUDIENCE    Requested token audience — set this if your IdP needs it
+#                         to mint an access token carrying the Cerberus API's aud
+#                         (e.g. Auth0). Optional.
+#   CSSH_OIDC_TOKEN       Which token to send: "access" (default) or "id".
+#   CSSH_OIDC_CACERT      CA bundle to trust for the IdP's TLS (optional).
+#   CSSH_OIDC_CLIENT_SECRET  Client secret, if the IdP requires one (optional).
+#   CSSH_OIDC_OPEN        Try to open the verification URL in a browser
+#                         (xdg-open/open); default off (the URL is always printed).
 #
 # ── Per-call flags (consumed before the rest is passed to ssh) ───────────────
 #   --principals u1,u2    override CSSH_PRINCIPALS for this call
@@ -73,14 +104,246 @@
 #                         --principals and --all-principals. To just connect as
 #                         yourself, run cssh normally — the server accepts a
 #                         request for your own uid without any flag.
+#   --oauth               authenticate with OIDC (device flow) for this call
+#                         instead of Kerberos (same as CSSH_AUTH=oidc). Requires
+#                         CSSH_OIDC_ISSUER and CSSH_OIDC_CLIENT_ID.
 #   --verbose             print the cert path to stdout in --sign-only mode
 #                         (otherwise --sign-only is silent).
 #   --                    end of cssh flags; remaining args go to ssh verbatim
 
+# ── OIDC device-flow helpers (file-level on purpose) ─────────────────────────
+# Unlike the small nested helpers inside cssh() (which are unset on return to
+# keep the shell namespace clean), the OIDC device-flow logic is large enough
+# that carrying it as two _cssh_-prefixed module functions — defined once when
+# this file is sourced — is clearer and avoids per-call define/unset bookkeeping.
+# They are only invoked when the caller opts into OIDC (CSSH_AUTH=oidc / --oauth)
+# AND a fresh certificate is actually needed.
+
+# _cssh_oidc_store persists an OAuth token-endpoint response to the on-disk cache
+# (mode 0600) and prints the token to send (per CSSH_OIDC_TOKEN) to stdout.
+#   $1 = path to the token-endpoint JSON response
+#   $2 = fallback refresh_token to keep when the response omits a new one
+# Returns 1 if the requested token type is absent from the response. A cache
+# write failure is non-fatal — the token is still returned so signing proceeds.
+_cssh_oidc_store() {
+    local _resp="$1" _fallback_refresh="$2"
+    local _issuer="$CSSH_OIDC_ISSUER" _cid="$CSSH_OIDC_CLIENT_ID"
+    local _scope="${CSSH_OIDC_SCOPE:-openid profile email groups offline_access}"
+    local _aud="${CSSH_OIDC_AUDIENCE:-}"
+    local _want="${CSSH_OIDC_TOKEN:-access}"
+    local _dir="${XDG_CACHE_HOME:-$HOME/.cache}/cerberus"
+    local _file="$_dir/oidc-token.json"
+
+    local _at _it _rt _exp_in _now _expiry _send
+    _at=$(jq -r '.access_token // empty' "$_resp" 2>/dev/null)
+    _it=$(jq -r '.id_token // empty' "$_resp" 2>/dev/null)
+    _rt=$(jq -r '.refresh_token // empty' "$_resp" 2>/dev/null)
+    _exp_in=$(jq -r '.expires_in // empty' "$_resp" 2>/dev/null)
+    case "$_exp_in" in ''|*[!0-9]*) _exp_in=300 ;; esac
+    [ -n "$_rt" ] || _rt="$_fallback_refresh"
+    _now=$(date +%s); _expiry=$((_now + _exp_in))
+
+    if [ "$_want" = id ]; then _send="$_it"; else _send="$_at"; fi
+    if [ -z "$_send" ]; then
+        printf 'cssh: OIDC token response has no %s token\n' "$_want" >&2
+        return 1
+    fi
+
+    # Cache both tokens + refresh token so a later CSSH_OIDC_TOKEN change reuses
+    # the same response. Expiry tracks the access token's expires_in; a stale
+    # token is caught by the sign path's one-shot 401 retry regardless.
+    [ -d "$_dir" ] || { mkdir -p "$_dir" 2>/dev/null && chmod 700 "$_dir" 2>/dev/null; }
+    local _tmp
+    if _tmp=$(mktemp "${_file}.XXXXXX" 2>/dev/null); then
+        if jq -nc \
+            --arg iss "$_issuer" --arg cid "$_cid" --arg aud "$_aud" --arg scope "$_scope" \
+            --arg at "$_at" --arg it "$_it" --arg rt "$_rt" --argjson exp "$_expiry" \
+            '{issuer:$iss, client_id:$cid, audience:$aud, scope:$scope, access_token:$at, id_token:$it, refresh_token:$rt, expiry:$exp}' \
+            >| "$_tmp" 2>/dev/null
+        then
+            chmod 600 "$_tmp" 2>/dev/null
+            mv -f "$_tmp" "$_file" 2>/dev/null || rm -f "$_tmp"
+        else
+            rm -f "$_tmp"
+        fi
+    fi
+    printf '%s' "$_send"
+    return 0
+}
+
+# _cssh_oidc_token obtains an OIDC bearer token for the Cerberus API via the
+# OAuth 2.0 Device Authorization Grant (RFC 8628), with a cached-token fast path
+# and silent refresh-token renewal. It prints the token to stdout; every prompt
+# and diagnostic goes to stderr, so `tok=$(_cssh_oidc_token)` captures only the
+# token. Requires CSSH_OIDC_ISSUER and CSSH_OIDC_CLIENT_ID.
+#   $1 = force (1 = skip the cached access token; renew via refresh_token, else
+#        run the device flow). Used by the sign path's 401 retry.
+_cssh_oidc_token() {
+    local _force="${1:-0}"
+    local _issuer="${CSSH_OIDC_ISSUER:-}" _cid="${CSSH_OIDC_CLIENT_ID:-}"
+    local _scope="${CSSH_OIDC_SCOPE:-openid profile email groups offline_access}"
+    local _aud="${CSSH_OIDC_AUDIENCE:-}"
+    local _secret="${CSSH_OIDC_CLIENT_SECRET:-}"
+    local _want="${CSSH_OIDC_TOKEN:-access}"
+    local _cacert="${CSSH_OIDC_CACERT:-}"
+    local _skew="${CSSH_OIDC_SKEW:-30}"
+    case "$_skew" in ''|*[!0-9]*) _skew=30 ;; esac
+
+    if [ -z "$_issuer" ] || [ -z "$_cid" ]; then
+        printf 'cssh: OIDC auth needs CSSH_OIDC_ISSUER and CSSH_OIDC_CLIENT_ID (set them in /etc/profile.d/cerberus-env.sh)\n' >&2
+        return 1
+    fi
+
+    local _dir="${XDG_CACHE_HOME:-$HOME/.cache}/cerberus"
+    local _file="$_dir/oidc-token.json"
+    local _now _tmp _code _cached_refresh="" _match=0
+    _now=$(date +%s)
+
+    # Cache is reusable only when issuer/client/audience/scope all still match.
+    if [ -r "$_file" ]; then
+        local _m
+        _m=$(jq -r --arg iss "$_issuer" --arg cid "$_cid" --arg aud "$_aud" --arg scope "$_scope" \
+            'if (.issuer==$iss and .client_id==$cid and (.audience//"")==$aud and (.scope//"")==$scope) then "1" else "0" end' \
+            "$_file" 2>/dev/null)
+        [ "$_m" = 1 ] && _match=1
+    fi
+
+    # 1) Fast path: a still-valid cached token (unless the caller forced renewal).
+    if [ "$_force" -eq 0 ] && [ "$_match" -eq 1 ]; then
+        local _exp _send
+        _exp=$(jq -r '.expiry // 0' "$_file" 2>/dev/null)
+        case "$_exp" in ''|*[!0-9]*) _exp=0 ;; esac
+        if [ "$_exp" -gt $((_now + _skew)) ]; then
+            if [ "$_want" = id ]; then _send=$(jq -r '.id_token // empty' "$_file" 2>/dev/null)
+            else _send=$(jq -r '.access_token // empty' "$_file" 2>/dev/null); fi
+            if [ -n "$_send" ]; then printf '%s' "$_send"; return 0; fi
+        fi
+    fi
+    [ "$_match" -eq 1 ] && _cached_refresh=$(jq -r '.refresh_token // empty' "$_file" 2>/dev/null)
+
+    # OIDC discovery — locate the device-authorization and token endpoints.
+    _tmp=$(mktemp "${TMPDIR:-/tmp}/cssh-oidc.XXXXXX") || return 1
+    _code=$(
+        set -- --silent --show-error -o "$_tmp" -w '%{http_code}'
+        [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
+        curl "$@" "${_issuer%/}/.well-known/openid-configuration"
+    )
+    if [ "$_code" != 200 ]; then
+        printf 'cssh: OIDC discovery failed (HTTP %s) at %s/.well-known/openid-configuration\n' "$_code" "${_issuer%/}" >&2
+        rm -f "$_tmp"; return 1
+    fi
+    local _dev_ep _tok_ep
+    _dev_ep=$(jq -r '.device_authorization_endpoint // empty' "$_tmp" 2>/dev/null)
+    _tok_ep=$(jq -r '.token_endpoint // empty' "$_tmp" 2>/dev/null)
+    if [ -z "$_dev_ep" ] || [ -z "$_tok_ep" ]; then
+        printf 'cssh: issuer advertises no device_authorization_endpoint (device flow unsupported)\n' >&2
+        rm -f "$_tmp"; return 1
+    fi
+
+    # 2) Silent refresh, when we hold a cached refresh token.
+    if [ -n "$_cached_refresh" ]; then
+        printf 'cssh: refreshing OIDC token...\n' >&2
+        _code=$(
+            set -- --silent --show-error -o "$_tmp" -w '%{http_code}' \
+                --data-urlencode "grant_type=refresh_token" \
+                --data-urlencode "client_id=$_cid" \
+                --data-urlencode "refresh_token=$_cached_refresh" \
+                --data-urlencode "scope=$_scope"
+            [ -n "$_aud" ] && set -- "$@" --data-urlencode "audience=$_aud"
+            [ -n "$_secret" ] && set -- "$@" --data-urlencode "client_secret=$_secret"
+            [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
+            curl "$@" "$_tok_ep"
+        )
+        if [ "$_code" = 200 ]; then
+            local _out; _out=$(_cssh_oidc_store "$_tmp" "$_cached_refresh"); local _rc=$?
+            rm -f "$_tmp"
+            [ "$_rc" -eq 0 ] && [ -n "$_out" ] && { printf '%s' "$_out"; return 0; }
+            return 1
+        fi
+        printf 'cssh: OIDC refresh failed (HTTP %s); falling back to device login\n' "$_code" >&2
+    fi
+
+    # 3) Device Authorization Grant.
+    _code=$(
+        set -- --silent --show-error -o "$_tmp" -w '%{http_code}' \
+            --data-urlencode "client_id=$_cid" \
+            --data-urlencode "scope=$_scope"
+        [ -n "$_aud" ] && set -- "$@" --data-urlencode "audience=$_aud"
+        [ -n "$_secret" ] && set -- "$@" --data-urlencode "client_secret=$_secret"
+        [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
+        curl "$@" "$_dev_ep"
+    )
+    if [ "$_code" != 200 ]; then
+        local _e; _e=$(jq -r '.error_description // .error // empty' "$_tmp" 2>/dev/null)
+        printf 'cssh: device authorization request failed (HTTP %s): %s\n' "$_code" "${_e:-unknown}" >&2
+        rm -f "$_tmp"; return 1
+    fi
+    local _device_code _user_code _vuri _vuri_complete _interval _expires
+    _device_code=$(jq -r '.device_code // empty' "$_tmp" 2>/dev/null)
+    _user_code=$(jq -r '.user_code // empty' "$_tmp" 2>/dev/null)
+    _vuri=$(jq -r '.verification_uri // .verification_url // empty' "$_tmp" 2>/dev/null)
+    _vuri_complete=$(jq -r '.verification_uri_complete // empty' "$_tmp" 2>/dev/null)
+    _interval=$(jq -r '.interval // 5' "$_tmp" 2>/dev/null)
+    _expires=$(jq -r '.expires_in // 600' "$_tmp" 2>/dev/null)
+    case "$_interval" in ''|*[!0-9]*) _interval=5 ;; esac
+    case "$_expires" in ''|*[!0-9]*) _expires=600 ;; esac
+    if [ -z "$_device_code" ] || [ -z "$_user_code" ] || [ -z "$_vuri" ]; then
+        printf 'cssh: incomplete device authorization response\n' >&2
+        rm -f "$_tmp"; return 1
+    fi
+
+    printf '\ncssh: to authenticate, open this URL in a browser:\n\n    %s\n\nand enter the code:  %s\n\n' "$_vuri" "$_user_code" >&2
+    [ -n "$_vuri_complete" ] && printf 'cssh: (or open this direct link, code pre-filled)\n\n    %s\n\n' "$_vuri_complete" >&2
+    case "${CSSH_OIDC_OPEN:-0}" in
+        1|true|yes|on|TRUE|YES|ON)
+            local _opener
+            for _opener in xdg-open open sensible-browser; do
+                if command -v "$_opener" >/dev/null 2>&1; then
+                    "$_opener" "${_vuri_complete:-$_vuri}" >/dev/null 2>&1 &
+                    break
+                fi
+            done
+            ;;
+    esac
+    printf 'cssh: waiting for authorization (Ctrl-C to abort)...\n' >&2
+
+    local _deadline=$((_now + _expires))
+    while :; do
+        sleep "$_interval"
+        if [ "$(date +%s)" -ge "$_deadline" ]; then
+            printf 'cssh: device code expired before authorization; run cssh --oauth again\n' >&2
+            rm -f "$_tmp"; return 1
+        fi
+        _code=$(
+            set -- --silent --show-error -o "$_tmp" -w '%{http_code}' \
+                --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+                --data-urlencode "device_code=$_device_code" \
+                --data-urlencode "client_id=$_cid"
+            [ -n "$_secret" ] && set -- "$@" --data-urlencode "client_secret=$_secret"
+            [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
+            curl "$@" "$_tok_ep"
+        )
+        if [ "$_code" = 200 ]; then
+            local _out2; _out2=$(_cssh_oidc_store "$_tmp" ""); local _rc2=$?
+            rm -f "$_tmp"
+            [ "$_rc2" -eq 0 ] && [ -n "$_out2" ] && { printf '%s' "$_out2"; return 0; }
+            return 1
+        fi
+        local _err; _err=$(jq -r '.error // empty' "$_tmp" 2>/dev/null)
+        case "$_err" in
+            authorization_pending) : ;;
+            slow_down) _interval=$((_interval + 5)) ;;
+            access_denied) printf 'cssh: authorization denied at the identity provider\n' >&2; rm -f "$_tmp"; return 1 ;;
+            expired_token) printf 'cssh: device code expired; run cssh --oauth again\n' >&2; rm -f "$_tmp"; return 1 ;;
+            *) printf 'cssh: OIDC token error: %s\n' "${_err:-HTTP $_code}" >&2; rm -f "$_tmp"; return 1 ;;
+        esac
+    done
+}
+
 cssh() {
     _cssh_usage() {
         cat >&2 <<'EOF'
-Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--self] [--verbose] [--] HOST [SSH_ARGS...]
+Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--self] [--oauth] [--verbose] [--] HOST [SSH_ARGS...]
 
 Flags:
   --principals u1,u2  request specific cert principals
@@ -94,10 +357,13 @@ Flags:
                       --sign-only, mutually exclusive with --principals
   --self              fetch a cert for your own identity (server issues for your
                       uid); requires --sign-only, excl. --principals/--all-principals
+  --oauth             authenticate with OIDC (device flow) instead of Kerberos
+                      (needs CSSH_OIDC_ISSUER + CSSH_OIDC_CLIENT_ID)
   --verbose           print the cert path in --sign-only mode
   --                  end of cssh flags; remainder passed to ssh
 
 Env: CERBERUS_URL CERBERUS_CACERT CSSH_PUBKEY CSSH_REFRESH_BEFORE CSSH_PRINCIPALS
+     CSSH_AUTH CSSH_OIDC_ISSUER CSSH_OIDC_CLIENT_ID CSSH_OIDC_SCOPE CSSH_OIDC_AUDIENCE
 EOF
     }
 
@@ -153,6 +419,7 @@ EOF
     local self_req=0
     local principals_set_by_flag=0
     local verbose=0
+    local auth_mode="${CSSH_AUTH:-kerberos}"
 
     # Reject a non-integer CSSH_REFRESH_BEFORE before it reaches arithmetic.
     case "$refresh_before" in
@@ -173,6 +440,7 @@ EOF
             --sign-only)    sign_only=1; shift ;;
             --all-principals) all_principals=1; shift ;;
             --self)         self_req=1; shift ;;
+            --oauth)        auth_mode=oidc; shift ;;
             --verbose)      verbose=1; shift ;;
             -h|--help)      _cssh_usage; unset -f _cssh_usage _cssh_check_krb; return 0 ;;
             --)             shift; break ;;
@@ -180,6 +448,18 @@ EOF
         esac
     done
     unset -f _cssh_usage
+
+    # Authentication method: kerberos (default, SPNEGO) or oidc (Bearer token via
+    # the OAuth device flow). --oauth sets oidc for one call; CSSH_AUTH sets the
+    # default. Anything else is an operator typo — fail loudly.
+    case "$auth_mode" in
+        kerberos|oidc) ;;
+        *)
+            printf 'cssh: invalid CSSH_AUTH=%s (expected "kerberos" or "oidc")\n' "$auth_mode" >&2
+            unset -f _cssh_check_krb
+            return 2
+            ;;
+    esac
 
     # --all-principals mints a broad cert (every principal in your first Cerberus
     # group) for pre-authentication. Require --sign-only (you're staging a cert
@@ -359,11 +639,8 @@ EOF
             unset -f _cssh_check_krb
             return 1
         fi
-        if ! _cssh_check_krb; then
-            unset -f _cssh_check_krb
-            return 1
-        fi
-
+        # Build the request body first so an empty principal set fails fast,
+        # before any (possibly interactive) authentication.
         local req_json
         if [ "$self_req" -ne 0 ]; then
             req_json=$(jq -nc --rawfile k "$pubkey" '{ssh_key: $k, self_principal: true}')
@@ -381,30 +658,57 @@ EOF
             req_json=$(jq -nc --rawfile k "$pubkey" --argjson p "$principals_json" '{ssh_key: $k, principals: $p}')
         fi
 
-        local resp http_code curl_rc
-        resp=$(mktemp "${TMPDIR:-/tmp}/cssh.XXXXXX") || { unset -f _cssh_check_krb; return 1; }
-        # The optional --cacert is passed via an explicit branch rather than the
-        # ${cacert:+--cacert "$cacert"} idiom: that relies on word-splitting an
-        # unquoted expansion, which bash does but native zsh does NOT — under zsh
-        # curl would receive "--cacert /path" as a single mangled argument.
-        if [ -n "$cacert" ]; then
-            http_code=$(curl --silent --show-error \
-                --negotiate -u : \
-                --cacert "$cacert" \
-                -H 'Content-Type: application/json' \
-                --data-binary "$req_json" \
-                -o "$resp" -w '%{http_code}' \
-                "${cerberus_url%/}/sign")
-            curl_rc=$?
+        # Resolve the Authorization credential. Kerberos uses curl's SPNEGO
+        # negotiate; OIDC obtains a bearer token via the device flow (cached and
+        # silently refreshed) and sends it as an Authorization: Bearer header.
+        local auth_header="" token=""
+        if [ "$auth_mode" = oidc ]; then
+            token=$(_cssh_oidc_token 0)
+            if [ $? -ne 0 ] || [ -z "$token" ]; then
+                unset -f _cssh_check_krb
+                return 1
+            fi
+            auth_header="Bearer $token"
         else
-            http_code=$(curl --silent --show-error \
-                --negotiate -u : \
-                -H 'Content-Type: application/json' \
-                --data-binary "$req_json" \
-                -o "$resp" -w '%{http_code}' \
-                "${cerberus_url%/}/sign")
-            curl_rc=$?
+            if ! _cssh_check_krb; then
+                unset -f _cssh_check_krb
+                return 1
+            fi
         fi
+
+        local resp http_code curl_rc sign_try=0
+        resp=$(mktemp "${TMPDIR:-/tmp}/cssh.XXXXXX") || { unset -f _cssh_check_krb; return 1; }
+        # curl args are assembled with `set --` inside a command substitution so
+        # the optional --cacert and the auth style are appended without the
+        # ${cacert:+...} word-splitting idiom (which native zsh does not split).
+        # `set --` runs in the $(...) subshell, so cssh's own positional args
+        # (the ssh command line) are left intact. A rejected OIDC token (401) may
+        # be stale/expired-early, so refresh once and retry the request.
+        while :; do
+            http_code=$(
+                set -- --silent --show-error \
+                    -H 'Content-Type: application/json' \
+                    --data-binary "$req_json" \
+                    -o "$resp" -w '%{http_code}'
+                [ -n "$cacert" ] && set -- "$@" --cacert "$cacert"
+                if [ -n "$auth_header" ]; then
+                    set -- "$@" -H "Authorization: $auth_header"
+                else
+                    set -- "$@" --negotiate -u :
+                fi
+                curl "$@" "${cerberus_url%/}/sign"
+            )
+            curl_rc=$?
+            if [ "$auth_mode" = oidc ] && [ "$curl_rc" -eq 0 ] && [ "$http_code" = 401 ] && [ "$sign_try" -eq 0 ]; then
+                sign_try=1
+                token=$(_cssh_oidc_token 1)
+                if [ $? -eq 0 ] && [ -n "$token" ]; then
+                    auth_header="Bearer $token"
+                    continue
+                fi
+            fi
+            break
+        done
 
         if [ "$curl_rc" -ne 0 ] || [ "$http_code" != "200" ]; then
             local err
