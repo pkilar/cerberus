@@ -2,7 +2,7 @@
 
 # **Cerberus: An AWS Nitro Enclave SSH Certificate Authority**
 
-[![CI][ci-badge]][ci] [![Go Report Card][go-reportcard-badge]][go-reportcard] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev]
+[![CI][ci-badge]][ci] [![License: MIT][license-badge]][license] [![Go Reference][pkg.go.dev-badge]][pkg.go.dev]
 
 Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to run on AWS. It leverages AWS Nitro Enclaves to ensure that the CA's private signing key is never exposed to the host operating system, network, or any user. It provides a web API for users to request signed SSH certificates after authenticating with Kerberos.
 
@@ -370,7 +370,7 @@ See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full operations runbook covering:
 
 [ci]: https://github.com/pkilar/cerberus/actions/workflows/go.yml
 [ci-badge]: https://github.com/pkilar/cerberus/actions/workflows/go.yml/badge.svg?branch=main
-[go-reportcard]: https://goreportcard.com/report/github.com/pkilar/cerberus
-[go-reportcard-badge]: https://goreportcard.com/badge/github.com/pkilar/cerberus
+[license]: https://github.com/pkilar/cerberus/blob/main/LICENSE
+[license-badge]: https://img.shields.io/badge/License-MIT-blue.svg
 [pkg.go.dev]: https://pkg.go.dev/github.com/pkilar/cerberus
 [pkg.go.dev-badge]: https://pkg.go.dev/badge/github.com/pkilar/cerberus.svg
