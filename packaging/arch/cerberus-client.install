@@ -1,0 +1,15 @@
+# pacman scriptlet for cerberus-client (the cssh wrapper).
+
+post_install() {
+    cat <<'MSG'
+==> cerberus-client (cssh) installed.
+    Set your signing endpoint in /etc/profile.d/cerberus-env.sh (or export
+    CERBERUS_URL), then open a new login shell so cssh is defined.
+    For OIDC (no Kerberos) login, set CSSH_AUTH=oidc and the CSSH_OIDC_* values
+    in that file. See /usr/share/doc/cerberus-client/cssh.md.
+MSG
+}
+
+post_upgrade() {
+    :
+}

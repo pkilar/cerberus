@@ -33,6 +33,12 @@ ssh-cert-signer/pcr-manifest-*.json
 *.rpm
 *.src.rpm
 
+# Arch build tree and built packages (produced by packaging/arch/build-arch.sh).
+# The optional cerberus-signer-eif package carries CA key material — never commit.
+# *.pkg.tar* covers every makepkg PKGEXT (.zst/.xz/.gz/… and uncompressed).
+/archbuild/
+*.pkg.tar*
+
 # Debian build tree and built packages (produced by packaging/debian/build-deb.sh).
 # The optional cerberus-signer-eif package carries CA key material — never commit.
 /debbuild/

@@ -547,6 +547,18 @@ The RPM version is read from the `VERSION` file in the project root. Bump it bef
 echo "1.0.0" > VERSION
 ```
 
+### Arch Linux packages
+
+The repo also ships Arch Linux packaging in [`packaging/arch/`](../packaging/arch/) — a `makepkg` split package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (noarch), and the opt-in `cerberus-signer-eif`. Build it as a **regular user** (`makepkg` refuses to run as root), with `base-devel` and `go` installed:
+
+```bash
+./packaging/arch/build-arch.sh                                   # → ./archbuild/*.pkg.tar.zst
+./packaging/arch/build-arch.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # opt-in EIF package
+sudo pacman -U ./archbuild/cerberus-client-*.pkg.tar.zst
+```
+
+`build-arch.sh` stages the same source-tarball snapshot as `build-rpm.sh` and pins `pkgver` from `VERSION`. The Arch packages follow Arch/systemd conventions: service env files live in `/etc/conf.d/` (not `/etc/sysconfig/`), the enclave wrapper is at `/usr/lib/cerberus/run-enclave.sh`, and the `cerberus` user plus `/var/log/cerberus` are created declaratively via `sysusers.d`/`tmpfiles.d` (pacman hooks) rather than a scriptlet. The opt-in `cerberus-signer-eif` package carries per-deployment CA key material — the same distribution caveat as the RPM applies. See [`packaging/arch/README.md`](../packaging/arch/README.md).
+
 ### Debian / Ubuntu packages
 
 The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: all`), and the opt-in `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
