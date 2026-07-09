@@ -2,7 +2,7 @@ module github.com/pkilar/cerberus
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	github.com/jcmturner/gokrb5/v8 v8.4.4
