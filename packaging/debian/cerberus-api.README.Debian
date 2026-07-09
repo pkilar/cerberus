@@ -1,0 +1,19 @@
+cerberus-api for Debian
+=======================
+
+The service is installed but NOT enabled or started (it needs site config and an
+AWS Nitro-enabled EC2 host running the cerberus-signer enclave). To bring it up:
+
+  1. Create the config from the example and lock it down:
+       cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+       chown root:cerberus /etc/cerberus/config.yaml
+       chmod 0640 /etc/cerberus/config.yaml
+  2. Install the Kerberos keytab referenced by keytab_path (mode 0600 or 0400).
+  3. Review /etc/default/cerberus-api (AWS_REGION, CONFIG_PATH, ...).
+  4. Enable and start:
+       systemctl enable --now cerberus-api
+
+The cerberus system user and /var/log/cerberus are created automatically via
+systemd-sysusers / systemd-tmpfiles on install. See RUNBOOK.md in this directory.
+
+ -- Paul Kilar <pkilar@gmail.com>

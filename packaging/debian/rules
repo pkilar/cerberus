@@ -1,0 +1,98 @@
+#!/usr/bin/make -f
+# Cerberus Debian packaging. Go >= 1.26 must be on PATH (see debian/control).
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export GOOS = linux
+export CGO_ENABLED = 0
+export GOFLAGS = -mod=readonly -trimpath
+# Confine the module cache and build cache to the build tree.
+export GOPATH = $(CURDIR)/_build/gopath
+export GOCACHE = $(CURDIR)/_build/gocache
+
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+ifeq ($(DEB_HOST_ARCH),amd64)
+export GOARCH = amd64
+endif
+ifeq ($(DEB_HOST_ARCH),arm64)
+export GOARCH = arm64
+endif
+
+%:
+	dh $@
+
+override_dh_auto_build-arch:
+	cd ssh-cert-api    && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-api    ./cmd/ssh-cert-api
+	cd ssh-cert-signer && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-signer ./cmd/ssh-cert-signer
+
+# The cssh client (Architecture: all) is shell — nothing to compile. Splitting
+# the build override keeps an indep-only build (dpkg-buildpackage -A) from
+# invoking the Go toolchain (or falling through to the default make-based build).
+override_dh_auto_build-indep:
+
+# Upstream tests need network/module access and are run in CI, not at packaging time.
+override_dh_auto_test:
+
+override_dh_auto_clean:
+	rm -rf _build
+	rm -f ssh-cert-api/ssh-cert-api ssh-cert-signer/ssh-cert-signer
+
+# Architecture-dependent packages (api, signer, and the opt-in eif). Installed
+# with explicit modes to mirror the RPM/Arch packaging; files under /etc become
+# conffiles automatically (dpkg preserves operator edits, saving updates as
+# .dpkg-dist / prompting).
+override_dh_auto_install-arch:
+	install -D -m 0755 ssh-cert-api/ssh-cert-api \
+		debian/cerberus-api/usr/bin/ssh-cert-api
+	install -D -m 0640 packaging/rpm/cerberus-api.sysconfig \
+		debian/cerberus-api/etc/default/cerberus-api
+	install -D -m 0640 ssh-cert-api/configs/config-example.yaml \
+		debian/cerberus-api/etc/cerberus/config.yaml.example
+	install -D -m 0755 ssh-cert-signer/ssh-cert-signer \
+		debian/cerberus-signer/usr/bin/ssh-cert-signer
+	install -D -m 0640 packaging/rpm/cerberus-signer.sysconfig \
+		debian/cerberus-signer/etc/default/cerberus-signer
+	install -D -m 0755 packaging/rpm/run-enclave.sh \
+		debian/cerberus-signer/usr/lib/cerberus/run-enclave.sh
+	install -D -m 0644 ssh-cert-signer/Dockerfile \
+		debian/cerberus-signer/usr/share/cerberus/Dockerfile
+ifneq (,$(filter pkg.cerberus.eif,$(DEB_BUILD_PROFILES)))
+	install -D -m 0644 "$(CERBERUS_EIF_FILE)" \
+		debian/cerberus-signer-eif/usr/share/cerberus/ssh-cert-signer.eif
+endif
+
+# Architecture-independent package (the cssh client). cssh.sh is code but lands
+# under /etc/profile.d, so dpkg treats it as a conffile — an unmodified copy is
+# updated automatically on upgrade, so fixes still apply.
+override_dh_auto_install-indep:
+	install -D -m 0644 packaging/profile.d/cssh.sh \
+		debian/cerberus-client/etc/profile.d/cssh.sh
+	install -D -m 0644 packaging/profile.d/cerberus-env.sh \
+		debian/cerberus-client/etc/profile.d/cerberus-env.sh
+
+# Preserve the 0640 (not world-readable) modes on the env files and the config
+# example, mirroring the RPM's %attr. dh_fixperms would otherwise normalise them
+# to 0644. These files carry no secrets, but the not-world-readable intent is
+# kept; systemd reads the EnvironmentFiles as root regardless.
+override_dh_fixperms:
+	dh_fixperms -Xetc/default/cerberus-api -Xetc/default/cerberus-signer -Xetc/cerberus/config.yaml.example
+
+# Go static binaries carry no DWARF for dwz and are already stripped (-s -w);
+# skip dwz and the automatic -dbgsym package.
+override_dh_dwz:
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+# dh_installsysusers is not in the default dh sequence at compat 13 (it was added
+# for compat 14, which is newer than Ubuntu 22.04's debhelper). Invoke it
+# explicitly, before dh_installtmpfiles, so its postinst snippet runs first and
+# the cerberus user exists before /var/log/cerberus is created and chowned to it.
+override_dh_installtmpfiles:
+	dh_installsysusers
+	dh_installtmpfiles
+
+# These services need site config and a Nitro host, so install the units without
+# enabling or starting them; the operator runs `systemctl enable --now` after
+# setup (matches the RPM/Arch behavior).
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start

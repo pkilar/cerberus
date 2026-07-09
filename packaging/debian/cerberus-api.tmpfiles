@@ -1,0 +1,6 @@
+# Cerberus runtime directory for the API service. dh_installtmpfiles installs
+# this to /usr/lib/tmpfiles.d/cerberus-api.conf and invokes systemd-tmpfiles from
+# the postinst (after systemd-sysusers, so the cerberus user exists). The API
+# service declares ReadWritePaths=/var/log/cerberus, so it must exist first.
+#Type Path               Mode UID      GID      Age Argument
+d     /var/log/cerberus  0750 cerberus cerberus -

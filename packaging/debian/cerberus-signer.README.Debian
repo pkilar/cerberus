@@ -1,0 +1,18 @@
+cerberus-signer for Debian
+==========================
+
+The service is installed but NOT enabled or started. The Enclave Image File is
+NOT shipped by default: it bakes in the KMS-encrypted CA private key
+(per-deployment). Build it and copy it in:
+
+    make eif-<arch>                                  # ssh-cert-signer-<arch>.eif
+    sudo cp ssh-cert-signer-<arch>.eif /usr/share/cerberus/ssh-cert-signer.eif
+
+(Or install the opt-in cerberus-signer-eif package, which places it there.)
+Review /etc/default/cerberus-signer (ENCLAVE_CID/CPU/MEMORY), then:
+
+    systemctl enable --now cerberus-signer
+
+Requires aws-nitro-enclaves-cli (nitro-cli) and a Nitro-enabled EC2 host.
+
+ -- Paul Kilar <pkilar@gmail.com>

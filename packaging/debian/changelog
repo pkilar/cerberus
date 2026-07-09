@@ -1,0 +1,14 @@
+cerberus (0.8.0) unstable; urgency=medium
+
+  * Initial Debian packaging, mirroring the RPM and Arch packaging. Multi-binary
+    source package producing:
+    - cerberus-api: the host-side HTTPS gateway service.
+    - cerberus-signer: the Nitro Enclave signer service (binary, wrapper, unit).
+    - cerberus-client: the cssh shell wrapper (Architecture: all).
+    - cerberus-signer-eif: opt-in, built only under the pkg.cerberus.eif build
+      profile; bundles a prebuilt EIF carrying per-deployment CA key material.
+  * Service env files live in /etc/default/; the cerberus user and
+    /var/log/cerberus are created via sysusers.d/tmpfiles.d; units are installed
+    without being enabled or started (they need site config and a Nitro host).
+
+ -- Paul Kilar <pkilar@gmail.com>  Thu, 09 Jul 2026 18:00:00 -0400

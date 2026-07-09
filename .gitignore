@@ -39,6 +39,14 @@ ssh-cert-signer/pcr-manifest-*.json
 /archbuild/
 *.pkg.tar*
 
+# Debian build tree and built packages (produced by packaging/debian/build-deb.sh).
+# The optional cerberus-signer-eif package carries CA key material — never commit.
+/debbuild/
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
 # A template or example file (e.g., config.example.yaml) should be committed instead.
