@@ -1,0 +1,6 @@
+# Cerberus system user for the API service. dh_installsysusers installs this to
+# /usr/lib/sysusers.d/cerberus-api.conf and invokes systemd-sysusers from the
+# postinst. The 'u' type creates both the group and the user; the home directory
+# (/etc/cerberus) is shipped by the package.
+#Type Name     ID GECOS             Home          Shell
+u     cerberus -  "Cerberus SSH CA" /etc/cerberus /usr/sbin/nologin

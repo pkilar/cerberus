@@ -1,0 +1,10 @@
+# ssh-cert-api is a position-independent EXECUTABLE (built with -buildmode=pie),
+# so it is ET_DYN and lintian misclassifies it as a shared library. It is a
+# program, not a library: it has no SONAME and no library prerequisites.
+cerberus-api: shared-library-lacks-prerequisites [usr/bin/ssh-cert-api]
+
+# The service env file and the config template are shipped 0640 (not
+# world-readable) on purpose, matching the RPM/Arch packaging. systemd reads the
+# EnvironmentFile as root, so the restricted mode is defense-in-depth.
+cerberus-api: non-standard-file-perm 0640 != 0644 [etc/default/cerberus-api]
+cerberus-api: non-standard-file-perm 0640 != 0644 [etc/cerberus/config.yaml.example]

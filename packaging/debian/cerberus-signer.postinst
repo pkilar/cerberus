@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+if [ "$1" = "configure" ] && [ -n "$2" ] && [ -d /run/systemd/system ]; then
+    # On upgrade (old version = $2), re-launch the enclave so wrapper/unit
+    # changes take effect, ONLY if the operator already has it running. Mirrors
+    # the RPM's %systemd_postun_with_restart; a fresh install is a no-op.
+    deb-systemd-invoke try-restart cerberus-signer.service >/dev/null || true
+fi

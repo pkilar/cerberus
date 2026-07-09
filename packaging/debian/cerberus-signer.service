@@ -1,0 +1,16 @@
+[Unit]
+Description=Cerberus SSH Certificate Signer (Nitro Enclave)
+Documentation=https://github.com/pkilar/cerberus
+After=nitro-enclaves-allocator.service
+Requires=nitro-enclaves-allocator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/cerberus-signer
+ExecStart=/usr/lib/cerberus/run-enclave.sh start
+ExecStop=/usr/lib/cerberus/run-enclave.sh stop
+ExecReload=/usr/lib/cerberus/run-enclave.sh restart
+
+[Install]
+WantedBy=multi-user.target

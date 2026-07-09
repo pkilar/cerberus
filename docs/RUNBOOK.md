@@ -547,6 +547,18 @@ The RPM version is read from the `VERSION` file in the project root. Bump it bef
 echo "1.0.0" > VERSION
 ```
 
+### Debian / Ubuntu packages
+
+The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: all`), and the opt-in `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
+
+```bash
+./packaging/debian/build-deb.sh                                    # → ./debbuild/*.deb
+./packaging/debian/build-deb.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # opt-in EIF package
+sudo apt install ./debbuild/cerberus-client_*.deb
+```
+
+`build-deb.sh` stages the same source snapshot as `build-rpm.sh` and pins the `debian/changelog` version from `VERSION` (`3.0 (native)` format, so no orig tarball). The Debian packages follow Debian/systemd conventions: service env files live in `/etc/default/` (not `/etc/sysconfig/`), the enclave wrapper is `/usr/lib/cerberus/run-enclave.sh`, files under `/etc` are dpkg conffiles, and the `cerberus` user plus `/var/log/cerberus` are created via `sysusers.d`/`tmpfiles.d` (needs debhelper ≥ 13.6, i.e. Debian 12 / Ubuntu 22.04+). Units are installed **without** being enabled/started (they need site config and a Nitro host). The opt-in `cerberus-signer-eif` package carries per-deployment CA key material — same distribution caveat as the RPM. See [`packaging/debian/README.md`](../packaging/debian/README.md).
+
 ---
 
 ## Deployment

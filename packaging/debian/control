@@ -1,0 +1,77 @@
+Source: cerberus
+Section: net
+Priority: optional
+Maintainer: Paul Kilar <pkilar@gmail.com>
+# Go >= 1.26 must be on PATH at build time. It is intentionally NOT expressed as
+# a build dependency: the toolchain the code needs (1.26) is newer than the
+# distro's golang-go, so builds use an upstream Go (e.g. the golang:1.26 image or
+# a manually installed toolchain). go.mod's `go 1.26.0` is the real floor and
+# `go build` fails loudly on an older toolchain.
+#
+# debhelper (>= 13.6~) is required because rules explicitly invokes
+# dh_installsysusers (added in 13.6); the bare compat-13 pin is otherwise
+# satisfied by 13.3 (Debian 11 bullseye), where that helper does not exist.
+Build-Depends: debhelper-compat (= 13), debhelper (>= 13.6~)
+Standards-Version: 4.6.2
+Homepage: https://github.com/pkilar/cerberus
+Rules-Requires-Root: no
+
+Package: cerberus-api
+Architecture: amd64 arm64
+Depends: ${misc:Depends}
+Recommends: krb5-user
+Description: SSH certificate authority API service for AWS Nitro Enclaves
+ Cerberus is an SSH Certificate Authority whose CA private key lives only
+ inside an AWS Nitro Enclave. This package provides the host-side HTTPS
+ gateway service: it authenticates requests with Kerberos/SPNEGO (and,
+ optionally, OIDC bearer tokens), enforces per-group authorization, forwards
+ signing requests to the enclave over VSOCK, and performs the attested KMS
+ Decrypt on the enclave's behalf (the enclave has no network of its own).
+ .
+ The service is designed for an AWS Nitro-enabled EC2 host running the
+ cerberus-signer enclave.
+
+Package: cerberus-signer
+Architecture: amd64 arm64
+Depends: ${misc:Depends}
+Recommends: aws-nitro-enclaves-cli
+Description: SSH certificate signer that runs inside an AWS Nitro Enclave
+ Cerberus is an SSH Certificate Authority whose CA private key lives only
+ inside an AWS Nitro Enclave. This package provides the signer service: the
+ signer binary, the enclave-lifecycle wrapper, the Dockerfile used to build
+ the Enclave Image File (EIF), and the systemd unit launching the enclave.
+ .
+ The signer receives the host-mediated, attested KMS Decrypt result over
+ VSOCK, decrypts the CMS envelope to install the in-memory CA signer, and
+ signs SSH certificates. Running it needs aws-nitro-enclaves-cli (nitro-cli)
+ and a Nitro-enabled EC2 host; the EIF itself is per-deployment and not
+ shipped here (see cerberus-signer-eif).
+
+Package: cerberus-client
+Architecture: all
+Depends: ${misc:Depends}, openssh-client, curl, jq, krb5-user
+Description: cssh SSH client helper (bash and zsh) for Cerberus
+ The cssh shell wrapper for end-user workstations. Using the caller's
+ Kerberos credentials (or an OIDC device-flow login), it fetches a
+ short-lived OpenSSH user certificate from the Cerberus signing API, caches
+ it next to the matching private key as <key>-cert.pub, and hands off to
+ ssh(1), re-signing only when the cached cert is missing or about to expire.
+ .
+ Installed as /etc/profile.d/cssh.sh; it defines the cssh function for login
+ shells. Set the site endpoint with CERBERUS_URL in the companion
+ /etc/profile.d/cerberus-env.sh. See /usr/share/doc/cerberus-client/cssh.md.
+
+Package: cerberus-signer-eif
+Architecture: amd64 arm64
+Build-Profiles: <pkg.cerberus.eif>
+Depends: cerberus-signer (= ${binary:Version}), ${misc:Depends}
+Description: Enclave Image File for the Cerberus signer (per-deployment)
+ Prebuilt Nitro Enclave Image File for the Cerberus signer, installed at
+ /usr/share/cerberus/ssh-cert-signer.eif.
+ .
+ OPT-IN and per-deployment: the EIF bakes in the KMS-encrypted CA private key
+ and a PCR0-pinned CA public key, so this package carries CA key material and
+ pins a deployment-specific PCR0. It is per-architecture and must be
+ distributed only over an operator-controlled channel, never a shared or
+ public repository. Built only under the pkg.cerberus.eif build profile
+ (build-deb.sh --eif <path>).
