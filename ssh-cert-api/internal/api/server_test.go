@@ -989,3 +989,165 @@ func TestAuthMiddleware_LogClassification(t *testing.T) {
 		})
 	}
 }
+
+// --- OIDC bearer authentication ---
+
+// newServerWithConfig is like newServerForTest but lets a test supply a Config
+// (e.g. with OAuth enabled) instead of the empty default.
+func newServerWithConfig(t *testing.T, cfg *config.Config, authN auth.Authenticator, authZ authz.Authorizer, signer enclave.Signer) *Server {
+	t.Helper()
+	monitor := newHealthMonitor(signer, 1*time.Hour, 100*time.Millisecond)
+	monitor.Start(t.Context())
+	s, err := NewServer(cfg, authN, authZ, signer, monitor)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+// A bearer-authenticated request whose token groups the authorizer accepts is
+// signed; the cert KeyID is the synthetic Username@Realm identity.
+func TestHandleSignRequest_OIDCBearerAllowed(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "8h",
+		AllowedPrincipals: []string{"root"},
+		Permissions:       map[string]string{"permit-pty": ""},
+	}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{
+		Username: "jsmith", Realm: "OIDC",
+		Groups: []string{"platform-eng"}, Method: "oidc",
+	}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "ssh-admins", CertificateRules: rules, Source: "oidc"}}
+	signer := &fakeSigner{signed: "cert"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if signer.got.KeyID != "jsmith@OIDC" {
+		t.Errorf("cert KeyID = %q, want jsmith@OIDC", signer.got.KeyID)
+	}
+	if !slices.Equal(signer.got.Principals, []string{"root"}) {
+		t.Errorf("cert principals = %v, want [root]", signer.got.Principals)
+	}
+}
+
+// A bearer-authenticated request whose token groups bind no Cerberus group is
+// denied and the signer is never reached.
+func TestHandleSignRequest_OIDCBearerNotAuthorized(t *testing.T) {
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{
+		Username: "jsmith", Realm: "OIDC",
+		Groups: []string{"marketing"}, Method: "oidc",
+	}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: false}}
+	signer := &fakeSigner{signed: "cert"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("signer must not be invoked for an unauthorized request")
+	}
+}
+
+// When OAuth is enabled, an unauthenticated request is challenged with both
+// Negotiate and Bearer; when disabled, only Negotiate (regression).
+func TestAuthMiddleware_WWWAuthenticateChallenge(t *testing.T) {
+	tests := []struct {
+		name        string
+		oauthOn     bool
+		wantSchemes []string
+	}{
+		{name: "oauth enabled advertises both", oauthOn: true, wantSchemes: []string{"Negotiate", "Bearer"}},
+		{name: "oauth disabled advertises only negotiate", oauthOn: false, wantSchemes: []string{"Negotiate"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{OAuth: config.OAuthConfig{Enabled: tt.oauthOn}}
+			authN := &fakeAuthenticator{err: auth.ErrNoAuthorizationHeader}
+			s := newServerWithConfig(t, cfg, authN, &fakeAuthorizer{}, &fakeSigner{})
+
+			r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{}`))
+			w := httptest.NewRecorder()
+			s.Router().ServeHTTP(w, r)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			got := w.Header().Values("WWW-Authenticate")
+			if !slices.Equal(got, tt.wantSchemes) {
+				t.Errorf("WWW-Authenticate = %v, want %v", got, tt.wantSchemes)
+			}
+		})
+	}
+}
+
+// End-to-end through the REAL Casbin authorizer: proves the middleware threads
+// the OIDC user's asserted groups into the request context and that
+// candidateGroups matches them against oidc_groups. A bound group is signed; an
+// unbound asserted group is denied — with the signer wired but unreached.
+func TestHandleSignRequest_OIDCEndToEndRealAuthorizer(t *testing.T) {
+	cfg := &config.Config{
+		KeytabPath: "/etc/krb5.keytab",
+		Groups: map[string]config.Group{
+			"ssh-admins": {
+				OIDCGroups: []string{"platform-eng"},
+				CertificateRules: config.CertificateRules{
+					Validity:          "8h",
+					AllowedPrincipals: []string{"root"},
+				},
+			},
+		},
+	}
+	authorizer, err := authz.NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		groups     []string
+		wantStatus int
+	}{
+		{name: "bound group signs", groups: []string{"platform-eng"}, wantStatus: http.StatusOK},
+		{name: "unbound group denied", groups: []string{"marketing"}, wantStatus: http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{
+				Username: "jsmith", Realm: "OIDC", Groups: tc.groups, Method: "oidc",
+			}}
+			signer := &fakeSigner{signed: "cert"}
+			s := newServerWithConfig(t, cfg, authN, authorizer, signer)
+
+			r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+			r.Header.Set("Authorization", "Bearer token")
+			w := httptest.NewRecorder()
+			s.Router().ServeHTTP(w, r)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK && signer.got == nil {
+				t.Error("signer should have been invoked for a bound group")
+			}
+			if tc.wantStatus == http.StatusForbidden && signer.got != nil {
+				t.Error("signer must not be invoked for an unbound group")
+			}
+		})
+	}
+}

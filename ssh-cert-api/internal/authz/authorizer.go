@@ -16,14 +16,15 @@ import (
 )
 
 // AuthorizationResult contains the authorization decision and the associated
-// certificate rules. Source records whether the matched group's membership
-// came from static config or an LDAP query — surfaced as a log attribute on
-// /sign success so operators can audit dynamic group assignments.
+// certificate rules. Source records how the matched group's membership was
+// determined — static config, an LDAP query, an OIDC token's groups claim, or
+// the self-service path — surfaced as a log attribute on /sign success so
+// operators can audit dynamic group assignments.
 type AuthorizationResult struct {
 	Allowed          bool
 	GroupName        string
 	CertificateRules *config.CertificateRules
-	Source           string // "static" | "ldap" | "" when denied
+	Source           string // "static" | "ldap" | "oidc" | "self" | "" when denied
 }
 
 // Authorizer decides whether a user is permitted to request specific SSH principals.

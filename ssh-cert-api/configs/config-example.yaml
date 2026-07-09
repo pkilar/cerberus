@@ -107,6 +107,55 @@ tls_key: ""
 #       permit-pty: ""
 
 # ──────────────────────────────────────────────────────────────────────
+# OIDC bearer-token authentication (optional)
+# ──────────────────────────────────────────────────────────────────────
+# Accept `Authorization: Bearer <JWT>` from an OIDC identity provider (Okta,
+# Azure AD, Google, Keycloak, …) as a SECOND authentication method alongside
+# Kerberos/SPNEGO. The API dispatches on the Authorization scheme: `Negotiate`
+# is Kerberos, `Bearer` is OIDC. Omit this block (or set enabled: false) and the
+# service behaves exactly as a Kerberos-only deployment.
+#
+# Tokens are validated entirely offline: the issuer's JWKS (discovered at
+# startup, refreshed on key rotation) verifies the signature; the issuer,
+# audience, and exp/nbf/iat are checked on every request.
+#
+#   - `issuer` is the OIDC issuer URL; its /.well-known/openid-configuration is
+#     fetched at startup and the API refuses to start if it is unreachable.
+#   - `audiences` is the set of acceptable `aud` values (this service's client
+#     ID / identifier at the IdP). A token must carry at least one of them.
+#   - `username_claim` selects the claim used as the short uid (default "sub";
+#     "preferred_username" or "email" are common). Together with `realm` it forms
+#     the Username@Realm identity used for the cert KeyID, audit logs, and rate
+#     limiting — NOT for authorization.
+#   - `groups_claim` selects the claim (a JSON array of group names, default
+#     "groups") used for authorization: its values are matched against the
+#     per-group `oidc_groups:` bindings, exactly like LDAP `ldap_groups:`.
+#   - `realm` is a SYNTHETIC label for OIDC identities. Pick one that does NOT
+#     collide with any Kerberos/LDAP realm or a strip_realms entry (a collision
+#     is warned at startup) so OIDC identities are never misrouted or stripped.
+#   - `algorithms` restricts accepted JWS signing algorithms to an asymmetric
+#     allowlist (default ["RS256"]); `none` and HMAC HS* are rejected to defeat
+#     algorithm-confusion attacks.
+#   - `leeway` is the clock-skew tolerance for exp/nbf/iat (default 60s).
+#   - `http_timeout` bounds discovery and JWKS fetches (default 5s).
+#
+# There is no client-side device flow yet: callers obtain a token out-of-band
+# (their IdP CLI / SDK) and send it as a bearer token, so protect tokens in
+# transit and at rest. See docs/RUNBOOK.md.
+# oauth:
+#   enabled: true
+#   issuer: "https://idp.example.com"
+#   audiences:
+#     - "cerberus"
+#   username_claim: "preferred_username"
+#   groups_claim: "groups"
+#   realm: "OIDC"
+#   algorithms:
+#     - "RS256"
+#   leeway: "60s"
+#   http_timeout: "5s"
+
+# ──────────────────────────────────────────────────────────────────────
 # LDAP-backed RBAC (optional)
 # ──────────────────────────────────────────────────────────────────────
 # Each entry under `ldap:` declares one directory backend. Backends are
@@ -245,6 +294,22 @@ groups:
   # ssh-admins:
   #   ldap_groups:
   #     - "CN=ssh-admins,OU=Groups,DC=corp,DC=example"
+  #   certificate_rules:
+  #     validity: "8h"
+  #     allowed_principals: ["root"]
+  #     permissions:
+  #       permit-pty: ""
+
+  # Example of an OIDC-backed group. Membership is decided per request by
+  # matching the bearer token's groups claim (see oauth.groups_claim) against
+  # the values listed here. Requires oauth.enabled: true. A group has exactly
+  # one membership source — oidc_groups cannot coexist with `members:` or
+  # `ldap_groups:` in the same group.
+  #
+  # oidc-admins:
+  #   oidc_groups:
+  #     - "platform-eng"        # values exactly as they appear in the token's groups claim
+  #     - "sre"
   #   certificate_rules:
   #     validity: "8h"
   #     allowed_principals: ["root"]

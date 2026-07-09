@@ -45,9 +45,18 @@ type KerberosAuthenticator struct {
 	settings *service.Settings
 }
 
+// AuthenticatedUser is the identity produced by an Authenticator. Username and
+// Realm together form the Username@Realm principal used for the cert KeyID,
+// audit logs, and per-principal rate limiting. Groups carries any
+// identity-provider-asserted group memberships (only set by the OIDC
+// authenticator; nil for Kerberos, whose membership is resolved from config /
+// LDAP). Method records which authenticator produced this identity
+// ("kerberos" | "oidc") for audit logging.
 type AuthenticatedUser struct {
 	Username string
 	Realm    string
+	Groups   []string
+	Method   string
 }
 
 func NewKerberosAuthenticator(keytabPath string, servicePrincipal string) (*KerberosAuthenticator, error) {
@@ -127,11 +136,12 @@ func (k *KerberosAuthenticator) AuthenticateRequest(r *http.Request) (*Authentic
 		return nil, fmt.Errorf("kerberos credential has no realm")
 	}
 
-	slog.Info("auth.success", "principal", username+"@"+realm, "remote_addr", r.RemoteAddr)
+	slog.Info("auth.success", "principal", username+"@"+realm, "method", "kerberos", "remote_addr", r.RemoteAddr)
 
 	return &AuthenticatedUser{
 		Username: username,
 		Realm:    realm,
+		Method:   "kerberos",
 	}, nil
 }
 

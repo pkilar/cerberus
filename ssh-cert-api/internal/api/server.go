@@ -127,6 +127,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				slog.Warn("auth.failed", "remote_addr", r.RemoteAddr, "error", err)
 			}
 			w.Header().Set("WWW-Authenticate", "Negotiate")
+			if s.config != nil && s.config.OAuth.Enabled {
+				// Advertise bearer auth alongside Negotiate so OIDC clients
+				// learn it is accepted (RFC 7235 permits multiple challenges).
+				w.Header().Add("WWW-Authenticate", "Bearer")
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Authentication required"})
@@ -134,6 +139,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
+		if user.Method == "oidc" {
+			// Mark OIDC-authenticated requests and hand the authorizer the
+			// identity-provider-asserted groups. This marker (set for every
+			// bearer request, even one asserting no groups) makes the authorizer
+			// resolve membership solely from oidc_groups, never static members:
+			// or LDAP. Kerberos requests are never marked, so their
+			// authorization path is unchanged.
+			ctx = authz.WithAssertedGroups(ctx, user.Groups)
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
