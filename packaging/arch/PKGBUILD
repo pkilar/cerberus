@@ -27,7 +27,7 @@ pkgrel=1
 pkgdesc="SSH Certificate Authority for AWS Nitro Enclaves"
 arch=('x86_64' 'aarch64')
 url="https://github.com/pkilar/cerberus"
-license=('custom:Proprietary')
+license=('MIT')
 # Arch's go package tracks upstream closely (and carries a pacman epoch, which
 # would dominate any `go>=1.26` version constraint anyway); the module go.mod
 # pins the real 1.26 floor and `go build` fails loudly on an older toolchain.
