@@ -139,9 +139,11 @@ tls_key: ""
 #   - `leeway` is the clock-skew tolerance for exp/nbf/iat (default 60s).
 #   - `http_timeout` bounds discovery and JWKS fetches (default 5s).
 #
-# There is no client-side device flow yet: callers obtain a token out-of-band
-# (their IdP CLI / SDK) and send it as a bearer token, so protect tokens in
-# transit and at rest. See docs/RUNBOOK.md.
+# Clients authenticate with the OAuth 2.0 Device Authorization Grant: the bundled
+# `cssh` wrapper supports `--oauth` / `CSSH_AUTH=oidc` and caches the token (with
+# silent refresh) under ~/.cache/cerberus. Callers may also supply a token
+# out-of-band. Protect cached/bearer tokens like any credential. See
+# docs/RUNBOOK.md and docs/cssh.md.
 # oauth:
 #   enabled: true
 #   issuer: "https://idp.example.com"
