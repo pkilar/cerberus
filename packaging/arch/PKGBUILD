@@ -1,0 +1,158 @@
+# Maintainer: Paul Kilar <pkilar@gmail.com>
+#
+# Arch Linux split package for Cerberus, mirroring the RPM packaging in
+# ../rpm/. Build it with packaging/arch/build-arch.sh (which stages the source
+# tarball, injects the version from VERSION, and runs makepkg) — that is the
+# supported entry point, analogous to build-rpm.sh.
+#
+# Produces three packages (plus an opt-in fourth):
+#   cerberus-api        - host-side HTTPS gateway service
+#   cerberus-signer     - Nitro Enclave signer service (binary + wrapper + unit)
+#   cerberus-client     - the cssh shell wrapper (noarch)
+#   cerberus-signer-eif - OPT-IN: bundles a prebuilt EIF; built only when
+#                         CERBERUS_EIF_FILE is set (build-arch.sh --eif <path>).
+#                         Carries per-deployment CA key material — see below.
+
+pkgbase=cerberus
+pkgname=('cerberus-api' 'cerberus-signer' 'cerberus-client')
+# The EIF sub-package is opt-in: it bakes in the KMS-encrypted CA key and a
+# PCR0-pinned public key, so it is per-deployment and per-architecture and must
+# never be published to a shared/public repo. Built only when CERBERUS_EIF_FILE
+# points at a prebuilt ssh-cert-signer-<arch>.eif (build-arch.sh --eif <path>).
+if [[ -n "${CERBERUS_EIF_FILE:-}" ]]; then
+    pkgname+=('cerberus-signer-eif')
+fi
+pkgver=0.8.0
+pkgrel=1
+pkgdesc="SSH Certificate Authority for AWS Nitro Enclaves"
+arch=('x86_64' 'aarch64')
+url="https://github.com/pkilar/cerberus"
+license=('custom:Proprietary')
+# Arch's go package tracks upstream closely (and carries a pacman epoch, which
+# would dominate any `go>=1.26` version constraint anyway); the module go.mod
+# pins the real 1.26 floor and `go build` fails loudly on an older toolchain.
+makedepends=('go')
+options=('!debug')
+# build-arch.sh stages this tarball next to the PKGBUILD before invoking makepkg.
+source=("${pkgbase}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgbase}-${pkgver}"
+
+    local goarch
+    case "$CARCH" in
+        x86_64)  goarch=amd64 ;;
+        aarch64) goarch=arm64 ;;
+        *) echo "unsupported CARCH: $CARCH" >&2; return 1 ;;
+    esac
+
+    # Static, CGO-free build (matches the RPM and the enclave build model), with
+    # Arch's hardening defaults layered on: PIE (internal-linked, so no C
+    # toolchain is needed with CGO disabled), -trimpath, and a read-only module
+    # cache confined to $srcdir.
+    export GOOS=linux GOARCH="$goarch" CGO_ENABLED=0
+    export GOPATH="$srcdir/gopath" GOCACHE="$srcdir/gocache"
+    export GOFLAGS='-mod=readonly -modcacherw'
+
+    ( cd ssh-cert-api    && go build -buildmode=pie -trimpath -ldflags='-s -w' -o ssh-cert-api    ./cmd/ssh-cert-api )
+    ( cd ssh-cert-signer && go build -buildmode=pie -trimpath -ldflags='-s -w' -o ssh-cert-signer ./cmd/ssh-cert-signer )
+}
+
+package_cerberus-api() {
+    pkgdesc="SSH certificate authority API service for AWS Nitro Enclaves (host gateway)"
+    depends=('krb5' 'systemd')
+    backup=('etc/conf.d/cerberus-api')
+    install=cerberus-api.install
+
+    cd "${pkgbase}-${pkgver}"
+
+    install -Dm755 ssh-cert-api/ssh-cert-api \
+        "$pkgdir/usr/bin/ssh-cert-api"
+    install -Dm644 packaging/arch/cerberus-api.service \
+        "$pkgdir/usr/lib/systemd/system/cerberus-api.service"
+    install -Dm640 packaging/rpm/cerberus-api.sysconfig \
+        "$pkgdir/etc/conf.d/cerberus-api"
+    # 0640 (not world-readable) mirrors the RPM's %attr on this template. Group
+    # ownership stays root (the sysusers-created cerberus group does not exist
+    # at build time); the RPM's root:cerberus is not buildable here, and 0640
+    # root:root preserves the "not world-readable" intent.
+    install -Dm640 ssh-cert-api/configs/config-example.yaml \
+        "$pkgdir/etc/cerberus/config.yaml.example"
+
+    # The cerberus system user/group and the log directory are created
+    # declaratively by systemd-sysusers / systemd-tmpfiles, which pacman runs
+    # via its shipped hooks on install and upgrade.
+    install -Dm644 packaging/arch/cerberus.sysusers \
+        "$pkgdir/usr/lib/sysusers.d/cerberus.conf"
+    install -Dm644 packaging/arch/cerberus.tmpfiles \
+        "$pkgdir/usr/lib/tmpfiles.d/cerberus.conf"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 docs/RUNBOOK.md "$pkgdir/usr/share/doc/$pkgname/RUNBOOK.md"
+}
+
+package_cerberus-signer() {
+    pkgdesc="SSH certificate signer that runs inside an AWS Nitro Enclave"
+    depends=('systemd')
+    optdepends=('aws-nitro-enclaves-cli: nitro-cli, required to actually run the signer enclave')
+    backup=('etc/conf.d/cerberus-signer')
+    install=cerberus-signer.install
+
+    cd "${pkgbase}-${pkgver}"
+
+    install -Dm755 ssh-cert-signer/ssh-cert-signer \
+        "$pkgdir/usr/bin/ssh-cert-signer"
+    install -Dm644 packaging/arch/cerberus-signer.service \
+        "$pkgdir/usr/lib/systemd/system/cerberus-signer.service"
+    install -Dm640 packaging/rpm/cerberus-signer.sysconfig \
+        "$pkgdir/etc/conf.d/cerberus-signer"
+    install -Dm755 packaging/rpm/run-enclave.sh \
+        "$pkgdir/usr/lib/cerberus/run-enclave.sh"
+    # /usr/share/cerberus (created by the Dockerfile install above) doubles as
+    # the EIF drop directory. It is left without an EIF by default: the Enclave
+    # Image File bakes in the KMS-encrypted CA key (per-deployment), so it is not
+    # shipped in the default cerberus-signer package. Operators build it
+    # (make eif-<arch>) and copy it here, or install the opt-in
+    # cerberus-signer-eif package.
+    install -Dm644 ssh-cert-signer/Dockerfile \
+        "$pkgdir/usr/share/cerberus/Dockerfile"
+
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_cerberus-client() {
+    pkgdesc="cssh SSH client helper (bash and zsh) for the Cerberus certificate authority"
+    arch=('any')
+    depends=('openssh' 'curl' 'jq' 'krb5')
+    backup=('etc/profile.d/cerberus-env.sh')
+    install=cerberus-client.install
+
+    cd "${pkgbase}-${pkgver}"
+
+    # cssh.sh is plain code (replaced on upgrade so fixes always apply); site
+    # config lives in the companion cerberus-env.sh, shipped as a backup file so
+    # pacman preserves operator edits (saving updates as .pacnew).
+    install -Dm644 packaging/profile.d/cssh.sh \
+        "$pkgdir/etc/profile.d/cssh.sh"
+    install -Dm644 packaging/profile.d/cerberus-env.sh \
+        "$pkgdir/etc/profile.d/cerberus-env.sh"
+
+    install -Dm644 docs/cssh.md "$pkgdir/usr/share/doc/$pkgname/cssh.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_cerberus-signer-eif() {
+    pkgdesc="Enclave Image File for the Cerberus signer (per-deployment CA key material)"
+    depends=("cerberus-signer=$pkgver-$pkgrel")
+
+    cd "${pkgbase}-${pkgver}"
+
+    # CERBERUS_EIF_FILE is an absolute path to a prebuilt EIF outside $srcdir,
+    # set by build-arch.sh --eif. SECURITY: this package carries the
+    # KMS-encrypted CA private key and pins a deployment-specific PCR0 — publish
+    # it only to an operator-controlled channel, never a shared/public repo.
+    install -Dm644 "$CERBERUS_EIF_FILE" \
+        "$pkgdir/usr/share/cerberus/ssh-cert-signer.eif"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

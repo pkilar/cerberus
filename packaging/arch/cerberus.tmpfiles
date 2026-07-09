@@ -1,0 +1,6 @@
+# Cerberus runtime directories (installed to /usr/lib/tmpfiles.d/cerberus.conf;
+# systemd-tmpfiles creates them via pacman's hook, after the cerberus user
+# exists). The API service declares ReadWritePaths=/var/log/cerberus, so this
+# directory must exist before it starts.
+#Type Path               Mode UID      GID      Age Argument
+d     /var/log/cerberus  0750 cerberus cerberus -

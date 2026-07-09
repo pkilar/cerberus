@@ -1,0 +1,20 @@
+# pacman scriptlet for cerberus-signer. daemon-reload is handled by systemd's
+# pacman hook; this only prints operator guidance.
+
+post_install() {
+    cat <<'MSG'
+==> cerberus-signer installed.
+    The Enclave Image File is NOT shipped by default: it bakes in the
+    KMS-encrypted CA private key (per-deployment). Build it and copy it in:
+         make eif-<arch>                  # produces ssh-cert-signer-<arch>.eif
+         sudo cp ssh-cert-signer-<arch>.eif /usr/share/cerberus/ssh-cert-signer.eif
+    (Or install the opt-in cerberus-signer-eif package, which places it there.)
+    Review /etc/conf.d/cerberus-signer (ENCLAVE_CID/CPU/MEMORY), then:
+         systemctl enable --now cerberus-signer
+    Requires aws-nitro-enclaves-cli (nitro-cli) and a Nitro-enabled EC2 host.
+MSG
+}
+
+post_upgrade() {
+    :
+}
