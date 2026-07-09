@@ -6,7 +6,7 @@ Version:        %{rpm_version}
 Release:        1%{?dist}
 Summary:        SSH Certificate Authority for AWS Nitro Enclaves
 
-License:        Proprietary
+License:        MIT
 URL:            https://github.com/pkilar/cerberus
 Source0:        %{name}-%{version}.tar.gz
 
