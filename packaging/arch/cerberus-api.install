@@ -1,0 +1,24 @@
+# pacman scriptlet for cerberus-api. The cerberus user/group and
+# /var/log/cerberus are created by systemd-sysusers/systemd-tmpfiles via
+# pacman's own hooks, and daemon-reload is handled by the systemd hook — this
+# scriptlet only prints operator guidance.
+
+post_install() {
+    cat <<'MSG'
+==> cerberus-api installed.
+    1. Create the config from the example and lock it down:
+         cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+         chown root:cerberus /etc/cerberus/config.yaml
+         chmod 0640 /etc/cerberus/config.yaml
+    2. Install the Kerberos keytab referenced by keytab_path (mode 0600 or 0400).
+    3. Review /etc/conf.d/cerberus-api (AWS_REGION, CONFIG_PATH, ...).
+    4. Enable the service:
+         systemctl enable --now cerberus-api
+    Note: this service is designed for an AWS Nitro-enabled EC2 host running the
+    cerberus-signer enclave. See /usr/share/doc/cerberus-api/RUNBOOK.md.
+MSG
+}
+
+post_upgrade() {
+    :
+}
