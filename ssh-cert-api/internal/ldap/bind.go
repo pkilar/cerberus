@@ -1,9 +1,7 @@
 package ldap
 
 import (
-	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	goldap "github.com/go-ldap/ldap/v3"
@@ -23,11 +21,10 @@ type bindCreds struct {
 	password string
 
 	// gssapi
-	gssUsername   string
-	gssRealm      string
-	keytabPath    string
-	krb5ConfPath  string
-	ldapServerSPN string
+	gssUsername  string
+	gssRealm     string
+	keytabPath   string
+	krb5ConfPath string
 }
 
 func newBindCreds(backend config.LDAPBackend, keytabPath, password string) (*bindCreds, error) {
@@ -43,40 +40,26 @@ func newBindCreds(backend config.LDAPBackend, keytabPath, password string) (*bin
 		if !ok || username == "" || realm == "" {
 			return nil, fmt.Errorf("client_principal %q must be user@REALM", backend.Bind.ClientPrincipal)
 		}
-		spn, err := ldapServerSPN(backend.URL)
-		if err != nil {
-			return nil, err
-		}
 		bc.gssUsername = username
 		bc.gssRealm = realm
 		bc.keytabPath = keytabPath
 		bc.krb5ConfPath = backend.Bind.Krb5ConfPath
-		bc.ldapServerSPN = spn
 	default:
 		return nil, fmt.Errorf("unknown bind method %q", backend.Bind.Method)
 	}
 	return bc, nil
 }
 
-// ldapServerSPN derives the conventional service principal name of the LDAP
-// server from its URL: "ldap/<hostname>". Operators with non-conventional SPN
-// naming will need to extend LDAPBind with an explicit override; deferred to
-// follow-up.
-func ldapServerSPN(rawURL string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("parse ldap url %q: %w", rawURL, err)
-	}
-	host := u.Hostname()
-	if host == "" {
-		return "", errors.New("ldap url has no hostname")
-	}
-	return "ldap/" + host, nil
+// ldapServerSPN returns the conventional SPN of an LDAP server: "ldap/<host>".
+// The host is the one actually dialed (URL host or SRV-discovered target), so
+// a gssapi bind names the server it reached.
+func ldapServerSPN(host string) string {
+	return "ldap/" + host
 }
 
 // bind runs the configured bind sequence against conn. Returns an error
 // classified as "bind" by the caller for metrics — see client.fetchUserGroups.
-func bind(conn *goldap.Conn, bc *bindCreds) error {
+func bind(conn *goldap.Conn, bc *bindCreds, spn string) error {
 	switch bc.method {
 	case config.LDAPBindSimple:
 		return conn.Bind(bc.dn, bc.password)
@@ -90,7 +73,7 @@ func bind(conn *goldap.Conn, bc *bindCreds) error {
 		// The gssapi.Client holds an active security context and must be
 		// closed after the bind exchange. The LDAP session itself stays open.
 		defer func() { _ = gssClient.Close() }()
-		return conn.GSSAPIBind(gssClient, bc.ldapServerSPN, "")
+		return conn.GSSAPIBind(gssClient, spn, "")
 	default:
 		return fmt.Errorf("unknown bind method %q", bc.method)
 	}

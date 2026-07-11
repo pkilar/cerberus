@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,16 +48,24 @@ var _ Client = (*client)(nil)
 // would mean introducing a seam over *goldap.Conn so a stub can return canned
 // search results and errors (asserting the escaped filter is what gets sent
 // and that errors propagate fail-closed).
+//
+// The target ordering and selection logic (rfc2782Order, orderedTargets behind
+// a fake resolver, urlTarget, planDial) IS unit-tested in srv_test.go and
+// connect_test.go; only the live dial/StartTLS/bind/search round trip remains
+// out of CI.
 type client struct {
 	backend  config.LDAPBackend
 	bindCred *bindCreds
-	tls      *tls.Config
+	tlsBase  *tls.Config
+	resolver srvResolver
 
 	cache   *cache
 	metrics *Metrics
 
-	mu   sync.Mutex
-	conn *goldap.Conn
+	mu         sync.Mutex
+	conn       *goldap.Conn
+	srvRecords []*net.SRV
+	srvExpires time.Time
 }
 
 // NewClient builds a real LDAP client from one validated config block. The
@@ -93,7 +103,8 @@ func NewClient(backend config.LDAPBackend, keytabPath string, metrics *Metrics) 
 	return &client{
 		backend:  backend,
 		bindCred: bc,
-		tls:      tlsCfg,
+		tlsBase:  tlsCfg,
+		resolver: net.DefaultResolver,
 		cache:    newCache(backend.CacheTTL),
 		metrics:  metrics,
 	}, nil
@@ -227,7 +238,7 @@ func (c *client) searchWithReconnect(ctx context.Context, req *goldap.SearchRequ
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.ensureConnLocked(); err != nil {
+	if err := c.ensureConnLocked(ctx); err != nil {
 		return nil, err
 	}
 	res, err := c.conn.Search(req)
@@ -241,7 +252,7 @@ func (c *client) searchWithReconnect(ctx context.Context, req *goldap.SearchRequ
 
 	// Network/closed-connection error: drop the conn and try once more.
 	c.closeLocked()
-	if err := c.ensureConnLocked(); err != nil {
+	if err := c.ensureConnLocked(ctx); err != nil {
 		return nil, err
 	}
 	res, err = c.conn.Search(req)
@@ -251,38 +262,178 @@ func (c *client) searchWithReconnect(ctx context.Context, req *goldap.SearchRequ
 	return res, err
 }
 
-// ensureConnLocked dials and binds if no conn is held. Caller MUST hold c.mu.
-func (c *client) ensureConnLocked() error {
-	if c.conn != nil && !c.conn.IsClosing() {
-		return nil
+// effectiveTLSMode collapses the url and srv config styles into a single TLS
+// mode. For a url backend the scheme decides (ldaps:// -> ldaps, else none);
+// for an srv backend the explicit tls_mode is authoritative.
+func effectiveTLSMode(b config.LDAPBackend) string {
+	if b.SRV != nil {
+		return b.TLSMode
 	}
+	if strings.HasPrefix(b.URL, "ldaps://") {
+		return config.LDAPTLSModeLDAPS
+	}
+	return config.LDAPTLSModeNone
+}
+
+// urlTarget parses a backend url into one dial target, applying default ports
+// (636 for ldaps, 389 for ldap) when the url omits one.
+func urlTarget(rawURL string) (target, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return target{}, fmt.Errorf("parse ldap url %q: %w", rawURL, err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return target{}, fmt.Errorf("ldap url %q has no host", rawURL)
+	}
+	port := 389
+	if u.Scheme == "ldaps" {
+		port = 636
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return target{}, fmt.Errorf("ldap url %q has invalid port: %w", rawURL, err)
+		}
+		port = n
+	}
+	return target{host: host, port: port}, nil
+}
+
+func srvQueryName(s *config.LDAPSRV) string {
+	return "_" + s.Service + "._" + s.Proto + "." + s.Domain
+}
+
+// orderedTargets returns the connection candidates in priority order. A url
+// backend yields exactly one static target; an srv backend resolves its record
+// (cached for srv.cache_ttl) and orders it per RFC 2782. Caller MUST hold c.mu.
+func (c *client) orderedTargets(ctx context.Context) ([]target, error) {
+	if c.backend.SRV == nil {
+		t, err := urlTarget(c.backend.URL)
+		if err != nil {
+			return nil, err
+		}
+		return []target{t}, nil
+	}
+	recs, err := c.srvRecordsCached(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := rfc2782Order(recs)
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("ldap srv %s: no usable targets", srvQueryName(c.backend.SRV))
+	}
+	return targets, nil
+}
+
+// srvRecordsCached returns the SRV answer, reusing the cached copy until it
+// expires. Caller MUST hold c.mu.
+func (c *client) srvRecordsCached(ctx context.Context) ([]*net.SRV, error) {
+	if c.srvRecords != nil && time.Now().Before(c.srvExpires) {
+		return c.srvRecords, nil
+	}
+	s := c.backend.SRV
+	_, recs, err := c.resolver.LookupSRV(ctx, s.Service, s.Proto, s.Domain)
+	if err != nil {
+		c.recordQueryError("srv")
+		return nil, fmt.Errorf("ldap srv lookup %s: %w", c.backend.Name, err)
+	}
+	c.srvRecords = recs
+	c.srvExpires = time.Now().Add(s.CacheTTL)
+	return recs, nil
+}
+
+// dialPlan captures how to dial a target without performing any I/O, so the
+// per-mode branch selection is unit-testable.
+type dialPlan struct {
+	dialURL   string
+	startTLS  bool
+	tlsConfig *tls.Config
+}
+
+// tlsFor clones the base TLS config and pins ServerName to the target host, so
+// the server certificate validates against the host actually dialed (essential
+// for SRV, where the target differs from the configured domain).
+func (c *client) tlsFor(t target) *tls.Config {
+	cfg := c.tlsBase.Clone()
+	cfg.ServerName = t.host
+	return cfg
+}
+
+// planDial computes the dial plan for t under the backend's effective TLS mode.
+func (c *client) planDial(t target) dialPlan {
+	hostport := net.JoinHostPort(t.host, strconv.Itoa(t.port))
+	switch effectiveTLSMode(c.backend) {
+	case config.LDAPTLSModeLDAPS:
+		return dialPlan{dialURL: "ldaps://" + hostport, tlsConfig: c.tlsFor(t)}
+	case config.LDAPTLSModeStartTLS:
+		return dialPlan{dialURL: "ldap://" + hostport, startTLS: true, tlsConfig: c.tlsFor(t)}
+	default: // none
+		return dialPlan{dialURL: "ldap://" + hostport}
+	}
+}
+
+// dialTarget opens (and, for starttls, upgrades) a connection to t. The caller
+// binds and stores it.
+func (c *client) dialTarget(t target) (*goldap.Conn, error) {
+	plan := c.planDial(t)
 	dialOpts := []goldap.DialOpt{
 		goldap.DialWithDialer(&net.Dialer{Timeout: c.backend.Timeout}),
 	}
-	if c.tls != nil {
-		dialOpts = append(dialOpts, goldap.DialWithTLSConfig(c.tls))
+	if plan.tlsConfig != nil && !plan.startTLS {
+		dialOpts = append(dialOpts, goldap.DialWithTLSConfig(plan.tlsConfig))
 	}
-	conn, err := goldap.DialURL(c.backend.URL, dialOpts...)
+	conn, err := goldap.DialURL(plan.dialURL, dialOpts...)
 	if err != nil {
-		c.recordQueryError("dial")
-		return fmt.Errorf("ldap dial %s: %w", c.backend.Name, err)
+		return nil, err
 	}
-	conn.SetTimeout(c.backend.Timeout)
+	if plan.startTLS {
+		if err := conn.StartTLS(plan.tlsConfig); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("starttls: %w", err)
+		}
+	}
+	return conn, nil
+}
 
-	if err := bind(conn, c.bindCred); err != nil {
-		_ = conn.Close()
-		c.recordQueryError("bind")
-		slog.Warn("ldap.bind.failure",
-			"backend", c.backend.Name,
-			"bind_method", c.bindCred.method,
-			"error", err)
-		return fmt.Errorf("ldap bind %s: %w", c.backend.Name, err)
+// ensureConnLocked dials and binds if no live conn is held, failing over across
+// the ordered targets. Caller MUST hold c.mu.
+func (c *client) ensureConnLocked(ctx context.Context) error {
+	if c.conn != nil && !c.conn.IsClosing() {
+		return nil
 	}
-	slog.Info("ldap.bind.success",
-		"backend", c.backend.Name,
-		"bind_method", c.bindCred.method)
-	c.conn = conn
-	return nil
+	targets, err := c.orderedTargets(ctx)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for _, t := range targets {
+		conn, err := c.dialTarget(t)
+		if err != nil {
+			c.recordQueryError("dial")
+			lastErr = err
+			continue
+		}
+		conn.SetTimeout(c.backend.Timeout)
+		if err := bind(conn, c.bindCred, ldapServerSPN(t.host)); err != nil {
+			_ = conn.Close()
+			c.recordQueryError("bind")
+			slog.Warn("ldap.bind.failure",
+				"backend", c.backend.Name,
+				"target", t.host,
+				"bind_method", c.bindCred.method,
+				"error", err)
+			lastErr = err
+			continue
+		}
+		slog.Info("ldap.bind.success",
+			"backend", c.backend.Name,
+			"target", t.host,
+			"bind_method", c.bindCred.method)
+		c.conn = conn
+		return nil
+	}
+	return fmt.Errorf("ldap connect %s: all targets failed: %w", c.backend.Name, lastErr)
 }
 
 func (c *client) closeLocked() {
@@ -310,10 +461,14 @@ func isReconnectable(err error) bool {
 	return goldap.IsErrorWithCode(err, goldap.ErrorNetwork)
 }
 
-// buildTLSConfig returns a *tls.Config for ldaps:// URLs, or nil for plain
-// ldap://. InsecureSkipVerify is honored but is warned about at config load.
+// buildTLSConfig returns the base *tls.Config used for ldaps and starttls
+// connections, or nil for plaintext (ldap:// url or tls_mode: none). ServerName
+// is intentionally left unset here; it is filled in per-target at dial time so
+// each discovered host validates against its own name.
 func buildTLSConfig(b config.LDAPBackend) (*tls.Config, error) {
-	if !strings.HasPrefix(b.URL, "ldaps://") {
+	switch effectiveTLSMode(b) {
+	case config.LDAPTLSModeLDAPS, config.LDAPTLSModeStartTLS:
+	default:
 		return nil, nil
 	}
 	cfg := &tls.Config{
