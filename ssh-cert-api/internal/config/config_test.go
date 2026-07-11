@@ -854,7 +854,7 @@ func TestValidate_LDAP(t *testing.T) {
 			mutate: func(c *Config) {
 				c.LDAP[0].URL = ""
 			},
-			wantErr: "url is required",
+			wantErr: "one of url or srv is required",
 		},
 		{
 			name: "missing user_base_dn",
@@ -998,6 +998,57 @@ func TestValidate_LDAP(t *testing.T) {
 				t.Errorf("expected error containing %q, got nil", tt.wantErr)
 			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
 				t.Errorf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func validSRVBackendForTest() LDAPBackend {
+	return LDAPBackend{
+		Name:       "corp",
+		Realms:     []string{"CORP.EXAMPLE.COM"},
+		SRV:        &LDAPSRV{Domain: "corp.example.com"},
+		TLSMode:    LDAPTLSModeStartTLS,
+		UserBaseDN: "DC=corp,DC=example",
+		UserFilter: "(sAMAccountName=%s)",
+		Bind:       LDAPBind{Method: LDAPBindAnonymous},
+	}
+}
+
+func TestValidate_LDAPSRV(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(b *LDAPBackend)
+		wantErr string // substring; "" means valid
+	}{
+		{"valid srv", func(b *LDAPBackend) {}, ""},
+		{"both url and srv", func(b *LDAPBackend) { b.URL = "ldaps://x:636" }, "not both"},
+		{"neither url nor srv", func(b *LDAPBackend) { b.SRV = nil; b.TLSMode = "" }, "one of url or srv"},
+		{"tls_mode with url", func(b *LDAPBackend) { b.SRV = nil; b.URL = "ldaps://x:636" }, "tls_mode is only valid with srv"},
+		{"srv missing domain", func(b *LDAPBackend) { b.SRV.Domain = "" }, "srv.domain is required"},
+		{"srv domain with scheme", func(b *LDAPBackend) { b.SRV.Domain = "ldap://corp.example.com" }, "bare domain"},
+		{"srv domain underscore prefix", func(b *LDAPBackend) { b.SRV.Domain = "_ldap._tcp.corp.example.com" }, "must not start with '_'"},
+		{"srv domain whitespace", func(b *LDAPBackend) { b.SRV.Domain = "corp .example.com" }, "whitespace"},
+		{"tls_mode missing", func(b *LDAPBackend) { b.TLSMode = "" }, "tls_mode is required"},
+		{"tls_mode invalid", func(b *LDAPBackend) { b.TLSMode = "tls" }, "invalid tls_mode"},
+		{"srv service bad label", func(b *LDAPBackend) { b.SRV.Service = "ld.ap" }, "srv.service"},
+		{"srv cache_ttl negative", func(b *LDAPBackend) { b.SRV.CacheTTL = -time.Second }, "must not be negative"},
+		{"srv cache_ttl over max", func(b *LDAPBackend) { b.SRV.CacheTTL = 20 * time.Minute }, "exceeds maximum"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := validSRVBackendForTest()
+			tt.mutate(&b)
+			c := &Config{LDAP: []LDAPBackend{b}}
+			err := c.validateLDAP()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
 			}
 		})
 	}
@@ -1181,6 +1232,45 @@ func TestApplyDefaults_LDAPKrb5ConfOnlyForGSSAPI(t *testing.T) {
 	cfg.applyDefaults()
 	if cfg.LDAP[0].Bind.Krb5ConfPath != "/etc/krb5.conf" {
 		t.Errorf("krb5_conf_path default for gssapi = %q, want /etc/krb5.conf", cfg.LDAP[0].Bind.Krb5ConfPath)
+	}
+}
+
+func TestApplyDefaults_LDAPSRV(t *testing.T) {
+	c := &Config{LDAP: []LDAPBackend{{
+		Name: "corp", Realms: []string{"CORP.EXAMPLE.COM"},
+		SRV: &LDAPSRV{Domain: "corp.example.com"}, TLSMode: LDAPTLSModeStartTLS,
+	}}}
+	c.applyDefaults()
+	s := c.LDAP[0].SRV
+	if s.Service != "ldap" || s.Proto != "tcp" || s.CacheTTL != 30*time.Second {
+		t.Fatalf("srv defaults not applied: %+v", s)
+	}
+}
+
+func TestWarnings_LDAPTLSModeNone(t *testing.T) {
+	// Non-loopback domain + tls_mode:none -> warned.
+	c := &Config{LDAP: []LDAPBackend{{
+		Name: "corp", Realms: []string{"CORP.EXAMPLE.COM"},
+		SRV: &LDAPSRV{Domain: "corp.example.com"}, TLSMode: LDAPTLSModeNone,
+		UserBaseDN: "DC=corp,DC=example", UserFilter: "(uid=%s)",
+		Bind: LDAPBind{Method: LDAPBindAnonymous},
+	}}}
+	found := false
+	for _, w := range c.Warnings() {
+		if w.Kind == WarnLDAPTLSModeNone {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected WarnLDAPTLSModeNone for non-loopback tls_mode:none")
+	}
+
+	// Loopback domain -> not warned.
+	c.LDAP[0].SRV.Domain = "localhost"
+	for _, w := range c.Warnings() {
+		if w.Kind == WarnLDAPTLSModeNone {
+			t.Fatalf("did not expect WarnLDAPTLSModeNone for loopback domain")
+		}
 	}
 }
 

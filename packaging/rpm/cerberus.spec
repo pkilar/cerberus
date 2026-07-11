@@ -270,6 +270,11 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Fri Jul 10 2026 Paul Kilar <pkilar@gmail.com> - 0.9.0-1
+- LDAP backends can now discover servers via DNS SRV records (srv: block with
+  tls_mode) and fail over across them per RFC 2782, in addition to a fixed
+  url:.
+
 * Thu Jul 09 2026 Paul Kilar <pkilar@gmail.com> - 0.8.0-1
 - cssh OIDC device-code login (cerberus-client): cssh can now authenticate to
   the signing API with an OIDC identity provider instead of Kerberos, via the

@@ -1,3 +1,11 @@
+cerberus (0.9.0) unstable; urgency=medium
+
+  * LDAP backends can now discover servers via DNS SRV records (srv: block with
+    tls_mode) and fail over across them per RFC 2782, in addition to a fixed
+    url:.
+
+ -- Paul Kilar <pkilar@gmail.com>  Fri, 10 Jul 2026 20:50:19 -0400
+
 cerberus (0.8.0) unstable; urgency=medium
 
   * Initial Debian packaging, mirroring the RPM and Arch packaging. Multi-binary

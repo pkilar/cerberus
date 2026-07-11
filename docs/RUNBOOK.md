@@ -863,6 +863,26 @@ Operational notes:
 - **Failure semantics:** LDAP-backed groups fail closed if the directory is unreachable — a `/sign` request from a user whose realm is covered by an unhealthy backend is denied (logged as `authz.ldap.error`). Static-only groups (`members:`) keep working through an LDAP outage. The top-level `/health` status does NOT flip red on LDAP failure (see [Health Endpoint](#health-endpoint)); alert on `ldap[].healthy` or the `cerberus_ldap_backend_up` gauge.
 - **Disabling LDAP entirely:** delete the entire `ldap:` section from `config.yaml` and restart. Group definitions that still reference `ldap_groups:` will fail validation at startup, so either migrate them to `members:` or delete them at the same time.
 
+#### LDAP server discovery via DNS SRV
+
+A backend may replace its `url:` with an `srv:` block to discover servers from a
+DNS SRV record (RFC 2782). The queried name is `_<service>._<proto>.<domain>`
+(defaults `_ldap._tcp`), so AD variants are just a different `domain`
+(e.g. `dc._msdcs.corp.example.com`). `url:` and `srv:` are mutually exclusive.
+
+Because AD publishes LDAP SRV records on port 389, a required `tls_mode` selects
+encryption on the SRV path: `ldaps` (implicit TLS), `starttls` (plaintext dial
+upgraded in place), or `none` (plaintext — warned at startup for a
+non-loopback domain). Discovered targets carry their own host and port and are
+tried in RFC 2782 priority order with weighted selection within a tier; the
+client fails over to the next target on a dial or bind failure. TLS certificate
+validation and the GSSAPI SPN use each *discovered* host, not the SRV domain.
+
+SRV answers are cached for `srv.cache_ttl` (default 30s, cap 10m). Note: Go's
+resolver does not expose the record's own DNS TTL, so this is a fixed bound, not
+the wire TTL. If every discovered target is unreachable, the backend shows as
+advisory-unhealthy in `/health` exactly like an unreachable `url:` backend.
+
 ### Restarting the Enclave
 
 ```bash

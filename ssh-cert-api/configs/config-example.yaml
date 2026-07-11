@@ -206,6 +206,30 @@ tls_key: ""
 #     group_membership_attr: memberOf
 #     tls:
 #       ca_file: /etc/cerberus/other-ca.pem
+#
+#   # SRV discovery: instead of a fixed url, resolve servers from a DNS SRV
+#   # record (RFC 2782). The queried name is _<service>._<proto>.<domain>
+#   # (defaults _ldap._tcp). Discovered targets carry their own host+port and
+#   # are tried in priority/weight order with failover. url and srv are
+#   # mutually exclusive.
+#   - name: corp-ad-srv
+#     realms: [CORP.EXAMPLE.COM]
+#     srv:
+#       domain: corp.example.com        # -> _ldap._tcp.corp.example.com
+#       # service: ldap                 # default
+#       # proto: tcp                    # default
+#       # cache_ttl: 30s                # SRV lookup cache; default 30s, cap 10m
+#     # AD SRV records are on port 389, so choose how to encrypt:
+#     #   starttls -> plaintext dial then upgrade; ldaps -> implicit TLS;
+#     #   none -> plaintext (warned at startup against a non-loopback domain).
+#     tls_mode: starttls                # required for srv: ldaps | starttls | none
+#     bind:
+#       method: gssapi
+#       client_principal: "HTTP/api.example.com@CORP.EXAMPLE.COM"
+#     user_base_dn: "DC=corp,DC=example"
+#     user_filter: "(sAMAccountName=%s)"
+#     tls:
+#       ca_file: /etc/cerberus/ldap-ca.pem
 
 groups:
   # The 'backend-engineers' group has access to production servers.
