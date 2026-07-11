@@ -387,6 +387,12 @@ func (c *client) dialTarget(t target) (*goldap.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound the post-dial exchange (StartTLS handshake, bind, search) by the
+	// backend timeout before performing any of it. goldap's default request
+	// timeout is 0 (unbounded); without this a server that accepts the TCP
+	// connection then stalls the StartTLS response would block the backend on
+	// the held mutex indefinitely (net.Dialer only bounds the TCP connect).
+	conn.SetTimeout(c.backend.Timeout)
 	if plan.startTLS {
 		if err := conn.StartTLS(plan.tlsConfig); err != nil {
 			_ = conn.Close()
@@ -411,10 +417,13 @@ func (c *client) ensureConnLocked(ctx context.Context) error {
 		conn, err := c.dialTarget(t)
 		if err != nil {
 			c.recordQueryError("dial")
+			slog.Warn("ldap.dial.failure",
+				"backend", c.backend.Name,
+				"target", t.host,
+				"error", err)
 			lastErr = err
 			continue
 		}
-		conn.SetTimeout(c.backend.Timeout)
 		if err := bind(conn, c.bindCred, ldapServerSPN(t.host)); err != nil {
 			_ = conn.Close()
 			c.recordQueryError("bind")

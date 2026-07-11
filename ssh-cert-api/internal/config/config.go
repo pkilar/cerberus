@@ -811,8 +811,9 @@ type Warning struct {
 //     with the same bare name);
 //   - LDAP backends that disable certificate verification, use plaintext
 //     ldap:// against a non-loopback host, allow anonymous bind against a
-//     non-loopback host, set cache_ttl greater than 5 minutes, or list realms
-//     in lower case.
+//     non-loopback host, set cache_ttl greater than 5 minutes, use tls_mode:
+//     none for an srv backend against a non-loopback host, or list realms in
+//     lower case.
 //
 // All issues are reported as warnings rather than hard errors so operators
 // can migrate existing deployments gradually. Results are sorted by

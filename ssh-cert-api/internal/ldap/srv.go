@@ -29,11 +29,13 @@ func rfc2782Order(recs []*net.SRV) []target {
 
 // rfc2782OrderWith orders SRV records per RFC 2782: ascending Priority, and
 // within each equal-Priority tier a weighted-random shuffle whose selection
-// probability is proportional to Weight (Weight-0 records keep a small chance).
-// A lone record whose Target is "." means the service is decidedly unavailable
-// and yields no targets. Trailing dots are trimmed from each Target. intn must
-// behave like math/rand/v2.IntN (returns [0, n)); it is a parameter so the
-// weighting is deterministically testable.
+// probability is proportional to Weight. Per the RFC, weight-0 records are
+// placed at the front of their tier before selection, so a weight-0 backup
+// retains a small (nonzero) chance regardless of its position in the DNS
+// answer. A lone record whose Target is "." means the service is decidedly
+// unavailable and yields no targets. Trailing dots are trimmed from each
+// Target. intn must behave like math/rand/v2.IntN (returns [0, n)); it is a
+// parameter so the weighting is deterministically testable.
 func rfc2782OrderWith(recs []*net.SRV, intn func(int) int) []target {
 	if len(recs) == 1 && recs[0].Target == "." {
 		return nil
@@ -60,11 +62,27 @@ func rfc2782OrderWith(recs []*net.SRV, intn func(int) int) []target {
 	return out
 }
 
-// weightedShuffle returns recs reordered by RFC 2782 weighted selection.
+// weightedShuffle returns recs reordered by RFC 2782 weighted selection. Per
+// the RFC, on each pick the not-yet-ordered records are arranged with all
+// weight-0 records first, then one is chosen by running weight sum against a
+// uniform threshold in [0, total].
 func weightedShuffle(recs []*net.SRV, intn func(int) int) []*net.SRV {
 	remaining := slices.Clone(recs)
 	out := make([]*net.SRV, 0, len(remaining))
 	for len(remaining) > 0 {
+		// RFC 2782: place weight-0 records at the front of the not-yet-ordered
+		// set so a zero-weight backup keeps its small selection chance.
+		slices.SortStableFunc(remaining, func(a, b *net.SRV) int {
+			az, bz := a.Weight == 0, b.Weight == 0
+			switch {
+			case az && !bz:
+				return -1
+			case !az && bz:
+				return 1
+			default:
+				return 0
+			}
+		})
 		total := 0
 		for _, r := range remaining {
 			total += int(r.Weight)

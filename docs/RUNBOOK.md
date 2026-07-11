@@ -871,8 +871,8 @@ DNS SRV record (RFC 2782). The queried name is `_<service>._<proto>.<domain>`
 (e.g. `dc._msdcs.corp.example.com`). `url:` and `srv:` are mutually exclusive.
 
 Because AD publishes LDAP SRV records on port 389, a required `tls_mode` selects
-encryption on the SRV path: `starttls` (plaintext dial upgraded in place),
-`ldaps` (implicit TLS), or `none` (plaintext — warned at startup for a
+encryption on the SRV path: `ldaps` (implicit TLS), `starttls` (plaintext dial
+upgraded in place), or `none` (plaintext — warned at startup for a
 non-loopback domain). Discovered targets carry their own host and port and are
 tried in RFC 2782 priority order with weighted selection within a tier; the
 client fails over to the next target on a dial or bind failure. TLS certificate
