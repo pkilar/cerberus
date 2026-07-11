@@ -129,6 +129,14 @@ const (
 	LDAPBindAnonymous = "anonymous"
 )
 
+// LDAP TLS modes for the SRV discovery path. The url path selects TLS from the
+// url scheme instead (ldaps:// vs ldap://).
+const (
+	LDAPTLSModeLDAPS    = "ldaps"
+	LDAPTLSModeStartTLS = "starttls"
+	LDAPTLSModeNone     = "none"
+)
+
 // LDAPBackend describes one directory service the authorizer can consult.
 // Each backend declares the Kerberos realms it serves; a user authenticating
 // from REALM-A is routed to whichever backend's realms include REALM-A. A
@@ -136,7 +144,9 @@ const (
 type LDAPBackend struct {
 	Name                string        `yaml:"name"`
 	Realms              []string      `yaml:"realms"`
-	URL                 string        `yaml:"url"`
+	URL                 string        `yaml:"url"`      // one-of with SRV
+	SRV                 *LDAPSRV      `yaml:"srv"`      // one-of with URL
+	TLSMode             string        `yaml:"tls_mode"` // SRV path only: ldaps | starttls | none
 	Bind                LDAPBind      `yaml:"bind"`
 	UserBaseDN          string        `yaml:"user_base_dn"`
 	UserFilter          string        `yaml:"user_filter"`
@@ -144,6 +154,16 @@ type LDAPBackend struct {
 	TLS                 LDAPTLS       `yaml:"tls"`
 	Timeout             time.Duration `yaml:"timeout"`
 	CacheTTL            time.Duration `yaml:"cache_ttl"`
+}
+
+// LDAPSRV configures RFC 2782 DNS SRV discovery for a backend. The queried
+// record name is "_<Service>._<Proto>.<Domain>". Discovered targets carry
+// their own host+port; TLSMode on the parent LDAPBackend selects encryption.
+type LDAPSRV struct {
+	Domain   string        `yaml:"domain"`    // required, e.g. corp.example.com or dc._msdcs.corp.example.com
+	Service  string        `yaml:"service"`   // default "ldap"
+	Proto    string        `yaml:"proto"`     // default "tcp"
+	CacheTTL time.Duration `yaml:"cache_ttl"` // SRV-record cache; default 30s, hard cap ldapCacheTTLMax (10m)
 }
 
 // LDAPBind describes how the API authenticates to the directory. For
@@ -477,11 +497,22 @@ func (c *Config) validateLDAP() error {
 			realmToBackend[r] = b.Name
 		}
 
-		if b.URL == "" {
-			return fmt.Errorf("ldap[%s]: url is required", b.Name)
-		}
-		if _, err := url.Parse(b.URL); err != nil {
-			return fmt.Errorf("ldap[%s]: invalid url %q: %w", b.Name, b.URL, err)
+		switch {
+		case b.URL != "" && b.SRV != nil:
+			return fmt.Errorf("ldap[%s]: set either url or srv, not both", b.Name)
+		case b.URL == "" && b.SRV == nil:
+			return fmt.Errorf("ldap[%s]: one of url or srv is required", b.Name)
+		case b.URL != "":
+			if _, err := url.Parse(b.URL); err != nil {
+				return fmt.Errorf("ldap[%s]: invalid url %q: %w", b.Name, b.URL, err)
+			}
+			if b.TLSMode != "" {
+				return fmt.Errorf("ldap[%s]: tls_mode is only valid with srv (the url scheme already selects TLS)", b.Name)
+			}
+		default: // b.SRV != nil
+			if err := validateLDAPSRV(b); err != nil {
+				return err
+			}
 		}
 		if b.UserBaseDN == "" {
 			return fmt.Errorf("ldap[%s]: user_base_dn is required", b.Name)
@@ -535,6 +566,67 @@ func (c *Config) validateLDAP() error {
 		}
 	}
 	return nil
+}
+
+// validateLDAPSRV checks an srv-discovery backend: a bare, whitespace-free
+// domain (the resolver adds the _service._proto prefix), label-safe
+// service/proto overrides, a bounded cache_ttl, and a required, known tls_mode.
+func validateLDAPSRV(b *LDAPBackend) error {
+	d := strings.TrimSpace(b.SRV.Domain)
+	if d == "" {
+		return fmt.Errorf("ldap[%s]: srv.domain is required", b.Name)
+	}
+	if d != b.SRV.Domain || strings.ContainsAny(d, " \t\r\n") {
+		return fmt.Errorf("ldap[%s]: srv.domain %q must not contain whitespace", b.Name, b.SRV.Domain)
+	}
+	if strings.Contains(d, "://") {
+		return fmt.Errorf("ldap[%s]: srv.domain %q must be a bare domain, not a URL", b.Name, b.SRV.Domain)
+	}
+	if strings.HasPrefix(d, "_") {
+		return fmt.Errorf("ldap[%s]: srv.domain %q must not start with '_'; the _service._proto prefix is added automatically", b.Name, b.SRV.Domain)
+	}
+	if b.SRV.Service != "" && !isDNSLabel(b.SRV.Service) {
+		return fmt.Errorf("ldap[%s]: srv.service %q must be a single DNS label", b.Name, b.SRV.Service)
+	}
+	if b.SRV.Proto != "" && !isDNSLabel(b.SRV.Proto) {
+		return fmt.Errorf("ldap[%s]: srv.proto %q must be a single DNS label", b.Name, b.SRV.Proto)
+	}
+	if b.SRV.CacheTTL < 0 {
+		return fmt.Errorf("ldap[%s]: srv.cache_ttl must not be negative, got %v", b.Name, b.SRV.CacheTTL)
+	}
+	if b.SRV.CacheTTL > ldapCacheTTLMax {
+		return fmt.Errorf("ldap[%s]: srv.cache_ttl %v exceeds maximum %v", b.Name, b.SRV.CacheTTL, ldapCacheTTLMax)
+	}
+	switch b.TLSMode {
+	case LDAPTLSModeLDAPS, LDAPTLSModeStartTLS, LDAPTLSModeNone:
+		return nil
+	case "":
+		return fmt.Errorf("ldap[%s]: tls_mode is required with srv (one of ldaps, starttls, none)", b.Name)
+	default:
+		return fmt.Errorf("ldap[%s]: invalid tls_mode %q (must be ldaps, starttls, or none)", b.Name, b.TLSMode)
+	}
+}
+
+// isDNSLabel reports whether s is a non-empty RFC 1035 label ([A-Za-z0-9-], not
+// starting or ending with '-'). The leading underscore of an SRV service/proto
+// token is added by the resolver and is therefore not part of the label.
+func isDNSLabel(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-':
+			if i == 0 || i == len(s)-1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateFlagExtensions rejects non-empty values on extensions/options that
