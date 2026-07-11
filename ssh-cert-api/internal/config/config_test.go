@@ -1235,6 +1235,45 @@ func TestApplyDefaults_LDAPKrb5ConfOnlyForGSSAPI(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_LDAPSRV(t *testing.T) {
+	c := &Config{LDAP: []LDAPBackend{{
+		Name: "corp", Realms: []string{"CORP.EXAMPLE.COM"},
+		SRV: &LDAPSRV{Domain: "corp.example.com"}, TLSMode: LDAPTLSModeStartTLS,
+	}}}
+	c.applyDefaults()
+	s := c.LDAP[0].SRV
+	if s.Service != "ldap" || s.Proto != "tcp" || s.CacheTTL != 30*time.Second {
+		t.Fatalf("srv defaults not applied: %+v", s)
+	}
+}
+
+func TestWarnings_LDAPTLSModeNone(t *testing.T) {
+	// Non-loopback domain + tls_mode:none -> warned.
+	c := &Config{LDAP: []LDAPBackend{{
+		Name: "corp", Realms: []string{"CORP.EXAMPLE.COM"},
+		SRV: &LDAPSRV{Domain: "corp.example.com"}, TLSMode: LDAPTLSModeNone,
+		UserBaseDN: "DC=corp,DC=example", UserFilter: "(uid=%s)",
+		Bind: LDAPBind{Method: LDAPBindAnonymous},
+	}}}
+	found := false
+	for _, w := range c.Warnings() {
+		if w.Kind == WarnLDAPTLSModeNone {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected WarnLDAPTLSModeNone for non-loopback tls_mode:none")
+	}
+
+	// Loopback domain -> not warned.
+	c.LDAP[0].SRV.Domain = "localhost"
+	for _, w := range c.Warnings() {
+		if w.Kind == WarnLDAPTLSModeNone {
+			t.Fatalf("did not expect WarnLDAPTLSModeNone for loopback domain")
+		}
+	}
+}
+
 func TestEnclaveMetricsInterval_Defaults(t *testing.T) {
 	// Cannot t.Parallel here: we mutate a process-global env var.
 	t.Setenv("ENCLAVE_METRICS_INTERVAL", "")

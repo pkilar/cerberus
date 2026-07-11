@@ -300,6 +300,17 @@ func (c *Config) applyDefaults() {
 		if b.Bind.Krb5ConfPath == "" && b.Bind.Method == LDAPBindGSSAPI {
 			b.Bind.Krb5ConfPath = "/etc/krb5.conf"
 		}
+		if b.SRV != nil {
+			if b.SRV.Service == "" {
+				b.SRV.Service = "ldap"
+			}
+			if b.SRV.Proto == "" {
+				b.SRV.Proto = "tcp"
+			}
+			if b.SRV.CacheTTL == 0 {
+				b.SRV.CacheTTL = 30 * time.Second
+			}
+		}
 	}
 	if c.OAuth.Enabled {
 		if c.OAuth.UsernameClaim == "" {
@@ -773,6 +784,7 @@ const (
 	WarnLDAPAnonymousNonLoopback     = "config.ldap.anonymous_non_loopback"
 	WarnLDAPCacheTTLLong             = "config.ldap.cache_ttl_long"
 	WarnLDAPRealmLowercase           = "config.ldap.realm_lowercase"
+	WarnLDAPTLSModeNone              = "config.ldap.tls_mode_none"
 	WarnStripRealmLowercase          = "config.strip_realm.lowercase"
 	WarnSelfPrincipalRealmLowercase  = "config.self_principal.realm_lowercase"
 	WarnOAuthIssuerNotHTTPS          = "config.oauth.issuer_not_https"
@@ -833,6 +845,13 @@ func (c *Config) Warnings() []Warning {
 				Kind:    WarnLDAPPlaintextURL,
 				Backend: b.Name,
 				Detail:  "url uses plaintext ldap:// against a non-loopback host; prefer ldaps://",
+			})
+		}
+		if b.SRV != nil && b.TLSMode == LDAPTLSModeNone && !isLoopbackHost(b.SRV.Domain) {
+			warns = append(warns, Warning{
+				Kind:    WarnLDAPTLSModeNone,
+				Backend: b.Name,
+				Detail:  "srv backend uses tls_mode: none; directory traffic including bind credentials is unencrypted",
 			})
 		}
 		if b.Bind.Method == LDAPBindAnonymous && !isLoopbackURL(b.URL) {
