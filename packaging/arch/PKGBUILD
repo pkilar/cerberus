@@ -22,7 +22,7 @@ pkgname=('cerberus-api' 'cerberus-signer' 'cerberus-client')
 if [[ -n "${CERBERUS_EIF_FILE:-}" ]]; then
     pkgname+=('cerberus-signer-eif')
 fi
-pkgver=0.8.0
+pkgver=0.9.0
 pkgrel=1
 pkgdesc="SSH Certificate Authority for AWS Nitro Enclaves"
 arch=('x86_64' 'aarch64')
