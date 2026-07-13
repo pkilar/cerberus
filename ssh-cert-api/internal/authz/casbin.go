@@ -274,6 +274,14 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 			return nil, nil, false
 		}
 		if resolved {
+			// The "match" half of LDAP debugging. dns are the user's group DNs
+			// straight from the directory; matching lowercases both sides
+			// (normalizeDN) and compares full DNs. If a user has DNs here but no
+			// ldap.binding.match line follows, the `ldap_groups:` config values
+			// do not equal any of these DNs — almost always because they were
+			// written as a bare CN (`rootusers`) instead of the full DN
+			// (`cn=rootusers,cn=groups,...`).
+			slog.Debug("authz.ldap.resolved", "principal", userPrincipal, "dn_count", len(dns), "dns", dns)
 			for groupName, boundDNs := range ca.ldapGroupBindings {
 				for _, dn := range dns {
 					if _, hit := boundDNs[normalizeDN(dn)]; hit {
@@ -281,6 +289,7 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 						if _, taken := sources[groupName]; !taken {
 							sources[groupName] = "ldap"
 						}
+						slog.Debug("authz.ldap.binding.match", "principal", userPrincipal, "group", groupName, "dn", dn)
 						break
 					}
 				}
