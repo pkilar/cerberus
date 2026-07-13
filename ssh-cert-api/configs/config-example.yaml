@@ -183,7 +183,12 @@ tls_key: ""
 #       dn: "CN=ssh-cert-api,OU=Service,DC=corp,DC=example"
 #       password_file: /etc/cerberus/ldap.pw    # mode 0600 / 0400 only
 #     user_base_dn: "DC=corp,DC=example"
-#     # Exactly one %s placeholder, LDAP-escaped at request time.
+#     # Exactly one %s placeholder, LDAP-escaped at request time. The attribute
+#     # MUST match the directory's schema: `sAMAccountName` for Active Directory,
+#     # `uid` for FreeIPA / 389-DS / OpenLDAP. A filter that matches nothing (e.g.
+#     # the AD `sAMAccountName` example pointed at a FreeIPA server) returns zero
+#     # entries, which is treated as "user has no groups" — a silent denial, not
+#     # an error. See the corp-openldap / FreeIPA examples below for `(uid=%s)`.
 #     user_filter: "(sAMAccountName=%s)"
 #     group_membership_attr: memberOf           # default
 #     tls:
@@ -317,9 +322,27 @@ groups:
   # in LDAP includes ANY of the DNs listed here. Cannot coexist with
   # `members:` in the same group.
   #
+  # IMPORTANT: ldap_groups entries are matched as FULL GROUP DNs, not bare
+  # group names. Matching lowercases both sides but does no CN extraction, so
+  # `ssh-admins` will NOT match a memberOf value of
+  # `cn=ssh-admins,ou=groups,dc=corp,dc=example` — you must list the whole DN
+  # exactly as the directory returns it. Confirm the real value with:
+  #   ldapsearch -x -H <url> -b <user_base_dn> '(<user_filter with uid>)' memberOf
+  #
+  # Active Directory:
   # ssh-admins:
   #   ldap_groups:
   #     - "CN=ssh-admins,OU=Groups,DC=corp,DC=example"
+  #   certificate_rules:
+  #     validity: "8h"
+  #     allowed_principals: ["root"]
+  #     permissions:
+  #       permit-pty: ""
+  #
+  # FreeIPA (note the cn=groups,cn=accounts container and the full DN):
+  # ssh-admins:
+  #   ldap_groups:
+  #     - "cn=ssh-admins,cn=groups,cn=accounts,dc=corp,dc=example"
   #   certificate_rules:
   #     validity: "8h"
   #     allowed_principals: ["root"]
