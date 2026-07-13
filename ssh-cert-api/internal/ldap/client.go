@@ -142,6 +142,19 @@ func (c *client) fetchUserGroups(ctx context.Context, shortUID string) ([]string
 	if err != nil {
 		return nil, err
 	}
+	// Log the exact search we are about to issue. This is the "query" half of
+	// LDAP debugging: the escaped filter (what SafeUserFilter produced from the
+	// uid), the base DN, and the membership attribute. A user_filter that does
+	// not match the directory's schema (e.g. the AD `sAMAccountName` example
+	// pointed at a FreeIPA server, whose users key on `uid`) shows up here as a
+	// filter that then returns zero entries below.
+	slog.Debug("ldap.query.request",
+		"backend", c.backend.Name,
+		"uid", shortUID,
+		"base_dn", c.backend.UserBaseDN,
+		"filter", filter,
+		"membership_attr", c.backend.GroupMembershipAttr)
+
 	req := goldap.NewSearchRequest(
 		c.backend.UserBaseDN,
 		goldap.ScopeWholeSubtree,
@@ -176,10 +189,17 @@ func (c *client) fetchUserGroups(ctx context.Context, shortUID string) ([]string
 		return nil, fmt.Errorf("user_filter matched more than one entry for uid %q; expected exactly one", shortUID)
 	}
 	groups := res.Entries[0].GetAttributeValues(c.backend.GroupMembershipAttr)
+	// group_count stays for cheap at-a-glance triage; the full DN list is the
+	// "response" half of LDAP debugging — it is what the authorizer compares
+	// against each group's `ldap_groups:` binding, so seeing the exact DNs here
+	// (e.g. `cn=rootusers,cn=groups,...`) is what reveals a binding written as a
+	// bare CN instead of a full DN. Guarded by DEBUG: these DNs expose directory
+	// structure and should not appear in production logs.
 	slog.Debug("ldap.query.success",
 		"backend", c.backend.Name,
 		"uid", shortUID,
-		"group_count", len(groups))
+		"group_count", len(groups),
+		"groups", groups)
 	return groups, nil
 }
 

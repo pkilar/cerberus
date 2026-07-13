@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/ldap"
@@ -48,6 +49,12 @@ func (r *ldapResolver) GroupsForPrincipal(ctx context.Context, userPrincipal str
 	}
 	backendName, covered := r.realmIndex[realm]
 	if !covered {
+		// No LDAP backend covers this realm, so the caller falls through to
+		// static-only authorization. This is silent by design (many realms are
+		// legitimately static-only), but at DEBUG it is the first thing to check
+		// when a user expects LDAP groups and gets none: the realm string must
+		// match a backend's `realms:` list exactly (case-sensitive).
+		slog.Debug("ldap.realm.uncovered", "realm", realm, "principal", userPrincipal)
 		return nil, false, nil
 	}
 	client, ok := r.backends[backendName]
