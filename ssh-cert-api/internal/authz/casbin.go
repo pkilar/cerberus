@@ -146,11 +146,24 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 }
 
 // Authorize checks if the user is allowed to sign for all requested SSH
-// principals. Per-group enforcement: all requested principals must be allowed
-// within a single group. The candidate set is the static-membership groups
-// plus — when an LDAP resolver is configured and matches — the LDAP-derived
-// groups; the first alphabetical Cerberus group name whose allowed_principals
-// cover the request wins.
+// principals. Per-group enforcement: every requested principal other than the
+// caller's own self-issuable uid must be allowed within a single group — a
+// request still cannot combine principals granted by two different groups.
+// The one exception is the caller's own uid when self_principal permits it
+// (see selfEligibleUID): it is treated as automatically satisfied by whatever
+// group is being evaluated, so self_principal — being independent of group
+// membership by design — is never the reason a mixed request like
+// ["root", "<own uid>"] gets denied just because no single group happens to
+// list the caller's own uid alongside root. A group only "wins" this way if
+// it genuinely covers at least one OTHER requested principal; a request for
+// solely the caller's own uid is NOT satisfied here (see below) — that solo
+// case is handled by the dedicated self-fallback in the API layer
+// (server.go), which uses self_principal's own CertificateRules rather than
+// attributing the grant to an unrelated group the caller happens to belong
+// to. The candidate set is the static-membership groups plus — when an LDAP
+// resolver is configured and matches — the LDAP-derived groups; the first
+// alphabetical Cerberus group name whose allowed_principals (plus the self
+// exception) cover the request wins.
 //
 // LDAP failure mode is fail-closed: if a resolver is configured AND it
 // returns an error for this principal, the request is denied without
@@ -188,9 +201,19 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 		return &AuthorizationResult{Allowed: false}, nil
 	}
 
+	selfUID, selfOK := ca.selfEligibleUID(userPrincipal)
+
 	for _, groupName := range candidates {
 		allAllowed := true
+		sawGroupCheckedPrincipal := false
 		for _, reqPrincipal := range reqPrincipals {
+			if selfOK && reqPrincipal == selfUID {
+				// The caller's own self-issuable uid rides along with
+				// whatever this group actually grants; it is never the
+				// reason a group fails to match.
+				continue
+			}
+			sawGroupCheckedPrincipal = true
 			allowed, err := ca.enforcer.Enforce(groupName, reqPrincipal, "sign")
 			if err != nil {
 				return nil, fmt.Errorf("casbin enforcement error: %w", err)
@@ -200,7 +223,11 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 				break
 			}
 		}
-		if allAllowed {
+		// sawGroupCheckedPrincipal guards against a solo self-uid request
+		// trivially "matching" the first candidate group purely because
+		// every requested principal was self-skipped — that case belongs to
+		// the dedicated self-fallback, not to an unrelated group's rules.
+		if allAllowed && sawGroupCheckedPrincipal {
 			return &AuthorizationResult{
 				Allowed:          true,
 				GroupName:        groupName,
@@ -337,31 +364,44 @@ func selfDenySet(deny []string) map[string]struct{} {
 	return m
 }
 
-// AuthorizeSelf implements the self-service path: userPrincipal may obtain a
-// certificate for its own short uid. It is independent of group membership —
-// it never consults Casbin or userGroups, so no group the caller belongs to
-// can block or shadow this path. Allowed=true only when self_principal is
-// enabled, the caller's realm is in the allowlist, and the short uid is
-// neither empty, "*", nor on the operator-configured denylist. On success the
-// caller issues a cert for the uid using the returned CertificateRules. ctx is
-// unused (no I/O) but kept for interface symmetry.
-func (ca *CasbinAuthorizer) AuthorizeSelf(_ context.Context, userPrincipal string) (*AuthorizationResult, error) {
+// selfEligibleUID extracts the short uid from userPrincipal and reports
+// whether self_principal currently permits that uid to be self-issued:
+// self_principal is enabled, the caller's realm is in the allowlist, and the
+// uid is neither empty, "*", nor on the operator-configured denylist. It
+// contains no group or Casbin logic — AuthorizeSelf and Authorize both call
+// this as the single source of self-eligibility, so a caller's own uid is
+// judged identically whether requested alone or alongside a group-granted
+// principal.
+func (ca *CasbinAuthorizer) selfEligibleUID(userPrincipal string) (uid string, ok bool) {
 	if !ca.selfOn {
-		return &AuthorizationResult{Allowed: false}, nil
+		return "", false
 	}
 	at := strings.LastIndex(userPrincipal, "@")
 	if at < 0 {
-		return &AuthorizationResult{Allowed: false}, nil
+		return "", false
 	}
-	uid := userPrincipal[:at]
+	uid = userPrincipal[:at]
 	realm := userPrincipal[at+1:]
 	if uid == "" || realm == "" || uid == "*" {
-		return &AuthorizationResult{Allowed: false}, nil
+		return "", false
 	}
 	if _, ok := ca.selfRealms[realm]; !ok {
-		return &AuthorizationResult{Allowed: false}, nil
+		return "", false
 	}
 	if _, denied := ca.selfDeny[uid]; denied {
+		return "", false
+	}
+	return uid, true
+}
+
+// AuthorizeSelf implements the self-service path: userPrincipal may obtain a
+// certificate for its own short uid. It is independent of group membership —
+// it never consults Casbin or userGroups, so no group the caller belongs to
+// can block or shadow this path. On success the caller issues a cert for the
+// uid using the returned CertificateRules. ctx is unused (no I/O) but kept
+// for interface symmetry.
+func (ca *CasbinAuthorizer) AuthorizeSelf(_ context.Context, userPrincipal string) (*AuthorizationResult, error) {
+	if _, ok := ca.selfEligibleUID(userPrincipal); !ok {
 		return &AuthorizationResult{Allowed: false}, nil
 	}
 	return &AuthorizationResult{
