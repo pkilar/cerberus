@@ -1046,6 +1046,94 @@ func TestAuthorizeSelf_DenylistOnlyGatesRequesterUID(t *testing.T) {
 	}
 }
 
+// TestAuthorize_SelfPrincipalAugmentsGroupGrantedRequest is a regression test
+// for a real-world report: pkilar is a member of a group that grants "root"
+// only (NOT his own uid), and self_principal is enabled and would grant his
+// own uid on its own. Requesting "root" alone works (group), requesting
+// "pkilar" alone works (self-fallback in server.go), but requesting BOTH in
+// one /sign call was wrongly denied — Authorize required every requested
+// principal, including the caller's own uid, to be covered by the SAME
+// group's allowed_principals, and self_principal was never consulted. Since
+// self_principal is independent of group membership by design, the caller's
+// own uid must ride along with whatever a matching group actually grants.
+func TestAuthorize_SelfPrincipalAugmentsGroupGrantedRequest(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"root-admins": {
+			Members: []string{"pkilar@W.PDTPARTNERS.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"}, // does NOT include "pkilar"
+			},
+		},
+	})
+	cfg.SelfPrincipal = config.SelfPrincipalConfig{
+		Enabled:          true,
+		Realms:           []string{"W.PDTPARTNERS.COM"},
+		CertificateRules: config.CertificateRules{Validity: "8h"},
+	}
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+
+	// Sanity: each principal individually succeeds.
+	if res, err := a.Authorize(t.Context(), "pkilar@W.PDTPARTNERS.COM", []string{"root"}); err != nil || !res.Allowed {
+		t.Fatalf("Authorize(root) = %+v, %v; want allowed", res, err)
+	}
+	if res, err := a.AuthorizeSelf(t.Context(), "pkilar@W.PDTPARTNERS.COM"); err != nil || !res.Allowed {
+		t.Fatalf("AuthorizeSelf = %+v, %v; want allowed", res, err)
+	}
+
+	// The combined request must also succeed, via the root-admins group
+	// augmented by self_principal covering "pkilar".
+	result, err := a.Authorize(t.Context(), "pkilar@W.PDTPARTNERS.COM", []string{"root", "pkilar"})
+	if err != nil {
+		t.Fatalf("Authorize(root,pkilar): %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected [root, pkilar] to be allowed: root via the group, pkilar via self_principal")
+	}
+	if result.GroupName != "root-admins" {
+		t.Errorf("GroupName = %q, want %q", result.GroupName, "root-admins")
+	}
+}
+
+// TestAuthorize_SoloSelfUIDNotSatisfiedByUnrelatedGroup verifies the
+// self-augmentation in Authorize does not let a solo request for the
+// caller's own uid trivially "match" a candidate group that grants nothing
+// relevant — that solo case must fall through to the dedicated self-fallback
+// (server.go), not be silently attributed to an unrelated group.
+func TestAuthorize_SoloSelfUIDNotSatisfiedByUnrelatedGroup(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"root-admins": {
+			Members: []string{"pkilar@W.PDTPARTNERS.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"root"},
+			},
+		},
+	})
+	cfg.SelfPrincipal = config.SelfPrincipalConfig{
+		Enabled:          true,
+		Realms:           []string{"W.PDTPARTNERS.COM"},
+		CertificateRules: config.CertificateRules{Validity: "1h"},
+	}
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+
+	result, err := a.Authorize(t.Context(), "pkilar@W.PDTPARTNERS.COM", []string{"pkilar"})
+	if err != nil {
+		t.Fatalf("Authorize(pkilar): %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("expected a solo self-uid request to NOT be satisfied by Authorize via an unrelated group; it belongs to the server.go self-fallback")
+	}
+}
+
 // --- OIDC oidc_groups authorization ---------------------------------------
 //
 // OIDC group membership is carried on the request context (WithAssertedGroups),

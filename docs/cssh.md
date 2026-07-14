@@ -222,6 +222,12 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
 - **`--self`** explicitly fetches a cert for your own uid and **requires
   `--sign-only`** (it means "hand me my cert", not "connect"). It is mutually
   exclusive with `--principals` and `--all-principals`.
+- **Combining with `--principals`.** Your own uid can also ride along inside an
+  explicit `--principals` list: `cssh --principals root,jsmith --sign-only`
+  (as `jsmith`) succeeds as long as some single group grants `root`, even if
+  that group doesn't list `jsmith` itself — `self_principal` supplies your own
+  uid for free. A principal that is neither your own uid nor covered by a
+  single group is still refused.
 - Either way the server enforces `self_principal`'s realm allowlist and
   operator-configured denylist (there is no hardcoded `root` floor — self
   issuance for `root` is allowed by default, since this path is how Cerberus
