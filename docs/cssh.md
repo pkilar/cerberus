@@ -222,10 +222,12 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
 - **`--self`** explicitly fetches a cert for your own uid and **requires
   `--sign-only`** (it means "hand me my cert", not "connect"). It is mutually
   exclusive with `--principals` and `--all-principals`.
-- Either way the server enforces `self_principal`'s realm allowlist and denylist
-  (which always includes `root`), and the issued cert only lets you into accounts
-  the server maps to your principal (the account named after your uid, or an
-  `AuthorizedPrincipalsFile` entry).
+- Either way the server enforces `self_principal`'s realm allowlist and
+  operator-configured denylist (there is no hardcoded `root` floor — self
+  issuance for `root` is allowed by default, since this path is how Cerberus
+  replaces static root SSH keys), and the issued cert only lets you into
+  accounts the server maps to your principal (the account named after your
+  uid, or an `AuthorizedPrincipalsFile` entry).
 
 ---
 

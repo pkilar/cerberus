@@ -391,7 +391,8 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			// host` connect succeed without group membership. The "request set is
 			// exactly [user.Username]" check IS the verification that the requested
 			// principal matches the authenticated user; AuthorizeSelf then applies
-			// the realm allowlist and the (root-floored) denylist.
+			// the realm allowlist and the operator-configured denylist (no
+			// hardcoded root floor).
 			reqDedup := slices.Clone(req.Principals)
 			slices.Sort(reqDedup)
 			reqDedup = slices.Compact(reqDedup)

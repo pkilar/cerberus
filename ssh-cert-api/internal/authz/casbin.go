@@ -55,7 +55,7 @@ type CasbinAuthorizer struct {
 
 	// Self-service issuance (self_principal). selfEnabled gates the whole path.
 	selfRealms map[string]struct{}      // realms allowed to self-issue
-	selfDeny   map[string]struct{}      // short uids that may never self-issue (always includes "root")
+	selfDeny   map[string]struct{}      // short uids that may never self-issue (operator-configured; "root" is NOT floored here)
 	selfRules  *config.CertificateRules // cert parameters for self-issued certs
 	selfOn     bool
 }
@@ -325,12 +325,12 @@ func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal stri
 	}, nil
 }
 
-// selfDenySet builds the self-issuance denylist. "root" is a hard floor that is
-// always present, so a user can never self-issue a cert for principal "root"
-// regardless of config — obtaining root requires a deliberate group with
-// allowed_principals: ["root"].
+// selfDenySet builds the self-issuance denylist from config. There is no
+// hardcoded floor: self_principal is how Cerberus replaces static root SSH
+// keys, so a caller's own uid — including "root" — is self-issuable unless an
+// operator explicitly lists it in self_principal.deny.
 func selfDenySet(deny []string) map[string]struct{} {
-	m := map[string]struct{}{"root": {}}
+	m := make(map[string]struct{}, len(deny))
 	for _, d := range deny {
 		m[d] = struct{}{}
 	}
@@ -338,12 +338,13 @@ func selfDenySet(deny []string) map[string]struct{} {
 }
 
 // AuthorizeSelf implements the self-service path: userPrincipal may obtain a
-// certificate for its own short uid. It is independent of group membership.
-// Allowed=true only when self_principal is enabled, the caller's realm is in the
-// allowlist, and the short uid is neither empty, "*", nor on the denylist (which
-// always includes "root"). On success the caller issues a cert for the uid using
-// the returned CertificateRules. ctx is unused (no I/O) but kept for interface
-// symmetry.
+// certificate for its own short uid. It is independent of group membership —
+// it never consults Casbin or userGroups, so no group the caller belongs to
+// can block or shadow this path. Allowed=true only when self_principal is
+// enabled, the caller's realm is in the allowlist, and the short uid is
+// neither empty, "*", nor on the operator-configured denylist. On success the
+// caller issues a cert for the uid using the returned CertificateRules. ctx is
+// unused (no I/O) but kept for interface symmetry.
 func (ca *CasbinAuthorizer) AuthorizeSelf(_ context.Context, userPrincipal string) (*AuthorizationResult, error) {
 	if !ca.selfOn {
 		return &AuthorizationResult{Allowed: false}, nil
