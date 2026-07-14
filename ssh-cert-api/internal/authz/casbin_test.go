@@ -952,16 +952,34 @@ func TestAuthorizeSelf_DenylistedUid(t *testing.T) {
 	}
 }
 
-func TestAuthorizeSelf_RootFloorAlwaysDenied(t *testing.T) {
+func TestAuthorizeSelf_RootAllowedByDefault(t *testing.T) {
 	t.Parallel()
-	// deny is empty, yet "root" must still be refused by the hard floor.
+	// deny is empty: "root" is self-issuable like any other uid, since
+	// self_principal is how Cerberus replaces static root SSH keys.
 	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, nil), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeSelf(t.Context(), "root@FOO.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeSelf: %v", err)
+	}
+	if !res.Allowed {
+		t.Fatal("expected 'root' to be self-issuable by default (no hardcoded floor)")
+	}
+}
+
+func TestAuthorizeSelf_RootDeniedWhenExplicitlyOnDenylist(t *testing.T) {
+	t.Parallel()
+	// An operator who still wants to block self-issued root certs can opt
+	// back in by listing "root" in self_principal.deny.
+	a, err := NewCasbinAuthorizer(selfCfg(true, []string{"FOO.COM"}, []string{"root"}), nil)
 	if err != nil {
 		t.Fatalf("NewCasbinAuthorizer: %v", err)
 	}
 	res, _ := a.AuthorizeSelf(t.Context(), "root@FOO.COM")
 	if res.Allowed {
-		t.Fatal("expected 'root' to be denied by the hard floor even with an empty deny list")
+		t.Fatal("expected 'root' to be denied when explicitly listed in self_principal.deny")
 	}
 }
 

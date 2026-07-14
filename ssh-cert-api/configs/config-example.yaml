@@ -88,8 +88,11 @@ tls_key: ""
 #     This blocks the cross-realm collision where jsmith@FOO.COM and
 #     jsmith@BAR.COM would both map onto local account "jsmith". Single-realm
 #     shops list their one realm.
-#   - `deny` lists short uids that may never be self-issued. "root" is ALWAYS
-#     denied (a hard floor you can't remove); add your shared/role accounts.
+#   - `deny` lists short uids that may never be self-issued. There is no
+#     hardcoded floor — "root" is self-issuable like any other uid, since this
+#     is the intended path for replacing static root SSH keys. Add "root" here
+#     yourself if you want to keep denying it; otherwise add shared/role
+#     accounts you don't want self-issued (e.g. deploy, postgres).
 #   - `certificate_rules` supplies validity/permissions/etc. for the issued cert;
 #     its `allowed_principals` is ignored (the principal is the caller's uid).
 #   - The issued cert only opens accounts sshd authorizes for that principal
@@ -100,7 +103,7 @@ tls_key: ""
 #   realms:
 #     - EXAMPLE.COM
 #   deny:
-#     - deploy          # 'root' is always denied regardless of this list
+#     - deploy          # add 'root' here too if you want to keep denying it
 #   certificate_rules:
 #     validity: "8h"
 #     permissions:

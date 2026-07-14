@@ -46,9 +46,13 @@ type Authorizer interface {
 
 	// AuthorizeSelf decides the self-service path: whether userPrincipal may
 	// obtain a certificate for its own short uid. It is independent of group
-	// membership and returns Allowed=true only when self_principal is enabled,
-	// the caller's realm is in the allowlist, and the uid is not on the denylist
-	// (which always includes "root"). On success CertificateRules carries the
+	// membership — no group the caller belongs to can block or override this
+	// decision — and returns Allowed=true only when self_principal is enabled,
+	// the caller's realm is in the allowlist, and the uid is not on the
+	// operator-configured denylist. There is no hardcoded floor on "root": this
+	// is the intended path for replacing static root SSH keys, so root
+	// self-issuance is allowed by default unless an operator opts it out via
+	// self_principal.deny. On success CertificateRules carries the
 	// self_principal cert parameters; the caller issues the cert for the uid.
 	AuthorizeSelf(ctx context.Context, userPrincipal string) (*AuthorizationResult, error)
 }

@@ -62,9 +62,10 @@ type Config struct {
 //   - Realms is an allowlist: only callers whose Kerberos realm is listed may
 //     self-issue. This blocks the cross-realm collision where jsmith@FOO.COM and
 //     jsmith@BAR.COM would both collapse onto local account "jsmith".
-//   - Deny lists short uids that may never be self-issued. The effective set
-//     always includes "root" (a hard floor the authorizer adds), so root can
-//     never be obtained via this path regardless of config.
+//   - Deny lists short uids that may never be self-issued. There is no
+//     hardcoded floor: self_principal is the intended replacement for static
+//     root SSH keys, so "root" is self-issuable like any other uid unless an
+//     operator explicitly adds it to Deny.
 //   - CertificateRules supplies the validity/permissions/extensions for the
 //     issued cert; its AllowedPrincipals is ignored (the principal is the uid).
 //

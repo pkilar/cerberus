@@ -206,7 +206,8 @@ groups:
 It is constrained so it stays safe:
 
 - **Realm allowlist** (`self_principal.realms`): only callers whose Kerberos realm is listed may self-issue. This blocks the cross-realm collision where `jsmith@FOO.COM` and `jsmith@BAR.COM` would both map onto local account `jsmith`. Single-realm shops list their one realm.
-- **Denylist** (`self_principal.deny`): short uids that may never be self-issued. **`root` is always denied** — a hard floor the code adds that config cannot remove; add your shared/role accounts (`deploy`, `postgres`, …). Obtaining `root` requires a deliberate group with `allowed_principals: ["root"]`.
+- **Denylist** (`self_principal.deny`): short uids that may never be self-issued. There is **no hardcoded floor on `root`** — self_principal is the intended replacement for static root SSH keys, so a caller whose own uid is `root` (e.g. a Kerberos principal `root@REALM` used for host-to-host automation) is self-issued a `root` cert like any other uid, as long as their realm is allowlisted. Add `root` to `deny` yourself if you want to keep blocking it; add your other shared/role accounts (`deploy`, `postgres`, …) either way.
+- **This path is independent of group membership.** `AuthorizeSelf` never consults Casbin or group config, so no group the caller belongs to — or doesn't belong to — can block or override a self-issuance decision; the realm allowlist and denylist above are the only gates.
 - **Cert parameters** come from `self_principal.certificate_rules` (validity, permissions, extensions); its `allowed_principals` is ignored (the principal is the uid).
 - **The server is still the final gate.** A self-issued `jsmith` cert only opens accounts sshd authorizes for principal `jsmith` (by default the local account named `jsmith`, or an [AuthorizedPrincipalsFile](#authorizedprincipalsfile-advanced-1-to-1-mapping) mapping). In a fleet where accounts are provisioned per-human with matching names, the blast radius is exactly the user's own account. Pair it with `AuthorizedPrincipalsFile` for explicit identity→account mapping.
 
@@ -216,7 +217,7 @@ Config:
 self_principal:
   enabled: true
   realms: [EXAMPLE.COM]        # allowlist; a caller's realm must be listed
-  deny: [deploy]               # 'root' is always denied regardless of this list
+  deny: [deploy]               # add 'root' here too if you want to keep denying it
   certificate_rules:
     validity: "8h"
     permissions:
