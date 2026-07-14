@@ -983,6 +983,69 @@ func TestAuthorizeSelf_RootDeniedWhenExplicitlyOnDenylist(t *testing.T) {
 	}
 }
 
+// TestAuthorizeSelf_DenylistOnlyGatesRequesterUID verifies self_principal.deny
+// is keyed on the REQUESTING caller's own uid, not on any principal name
+// appearing in a request. jsmith is a member of a group that grants "root"
+// (among others); even though "root" sits on self_principal.deny, that only
+// blocks a caller whose own uid is "root" from self-issuing — it must have no
+// effect on jsmith's ordinary group-granted Authorize() request for
+// ["jsmith", "root"].
+func TestAuthorizeSelf_DenylistOnlyGatesRequesterUID(t *testing.T) {
+	t.Parallel()
+	cfg := newTestConfig(map[string]config.Group{
+		"admins": {
+			Members: []string{"jsmith@FOO.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: []string{"jsmith", "root"},
+			},
+		},
+	})
+	cfg.SelfPrincipal = config.SelfPrincipalConfig{
+		Enabled:          true,
+		Realms:           []string{"FOO.COM"},
+		Deny:             []string{"root"},
+		CertificateRules: config.CertificateRules{Validity: "8h"},
+	}
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+
+	// jsmith's own self-issuance is unaffected (their uid is "jsmith", not
+	// on the denylist).
+	selfRes, err := a.AuthorizeSelf(t.Context(), "jsmith@FOO.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeSelf: %v", err)
+	}
+	if !selfRes.Allowed {
+		t.Fatal("expected jsmith's self-issuance to be allowed")
+	}
+
+	// jsmith requesting a cert covering both "jsmith" and "root" is decided
+	// entirely by group membership (Casbin), never by self_principal.deny.
+	result, err := a.Authorize(t.Context(), "jsmith@FOO.COM", []string{"jsmith", "root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("expected jsmith to be granted [jsmith, root] via the admins group despite 'root' being on self_principal.deny")
+	}
+	if result.GroupName != "admins" {
+		t.Errorf("GroupName = %q, want %q", result.GroupName, "admins")
+	}
+
+	// A caller whose own uid IS "root" is still blocked from self-issuing,
+	// confirming the denylist entry still does its job for its actual target.
+	rootSelfRes, err := a.AuthorizeSelf(t.Context(), "root@FOO.COM")
+	if err != nil {
+		t.Fatalf("AuthorizeSelf(root): %v", err)
+	}
+	if rootSelfRes.Allowed {
+		t.Fatal("expected root@FOO.COM's own self-issuance to remain denied")
+	}
+}
+
 // --- OIDC oidc_groups authorization ---------------------------------------
 //
 // OIDC group membership is carried on the request context (WithAssertedGroups),
