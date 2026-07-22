@@ -74,7 +74,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("vsockwatch/ebpf: attaching to syscalls:sys_enter_connect: %w", err)
 	}
-	defer tp.Close()
+	defer func() { _ = tp.Close() }()
 
 	eventsMap, ok := coll.Maps["events"]
 	if !ok {
@@ -85,7 +85,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("vsockwatch/ebpf: opening ring buffer reader: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	// ringbuf.Reader.Read blocks; unblock it on ctx cancellation by closing
 	// the reader from a side goroutine, matching cilium/ebpf's documented

@@ -250,7 +250,7 @@ func (w *AuditWatcher) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("vsockwatch: opening audit log %q: %w", w.Path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -277,7 +277,7 @@ func (w *AuditWatcher) Run(ctx context.Context) error {
 				continue
 			}
 			if rotated {
-				f.Close()
+				_ = f.Close()
 				f, reader = newF, newReader
 			}
 		}
@@ -306,12 +306,14 @@ func (w *AuditWatcher) handleLine(ctx context.Context, corr *correlator, line st
 }
 
 func openAtEnd(path string) (*os.File, *bufio.Reader, error) {
+	// #nosec G304 -- path is AuditWatcher.Path, operator configuration (a
+	// systemd EnvironmentFile or CLI flag), not untrusted input.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, nil, err
 	}
 	return f, bufio.NewReader(f), nil
@@ -330,6 +332,8 @@ func reopenIfRotated(path string, current *os.File) (rotated bool, f *os.File, r
 	if os.SameFile(curInfo, pathInfo) {
 		return false, nil, nil, nil
 	}
+	// #nosec G304 -- path is AuditWatcher.Path, operator configuration (a
+	// systemd EnvironmentFile or CLI flag), not untrusted input.
 	newF, err := os.Open(path)
 	if err != nil {
 		return false, nil, nil, err
