@@ -1,0 +1,35 @@
+# Configuration for cerberus-vsock-watch, the VSOCK-connect detective control
+# (docs/vsock-connect-detection.md). This file is sourced by systemd as an
+# EnvironmentFile; every setting below can equivalently be passed as a
+# command-line flag (see `cerberus-vsock-watch --help`) — the flag wins if
+# both are set.
+
+# Expected identity of the legitimate ssh-cert-api process. These three
+# should match the cerberus-api package's actual install: binary path, the
+# service account it runs as, and the systemd unit whose cgroup it's in.
+CERBERUS_VSOCK_WATCH_EXE_PATH=/usr/bin/ssh-cert-api
+CERBERUS_VSOCK_WATCH_USERNAME=cerberus
+CERBERUS_VSOCK_WATCH_UNIT=cerberus-api.service
+
+# Path to the auditd log this service tails for the auditd-based detector.
+CERBERUS_VSOCK_WATCH_AUDIT_LOG=/var/log/audit/audit.log
+
+# Out-of-band alert channel (PagerDuty/SNS/generic webhook), independent of
+# the log pipeline — strongly recommended in production. Uncomment and set:
+# CERBERUS_VSOCK_WATCH_WEBHOOK_URL=https://example.com/alerts/cerberus-vsock
+
+# External dead-man's-switch heartbeat: an endpoint this service pings
+# periodically, so a monitoring system NOT running on this host can alert if
+# the pings stop (see docs/vsock-connect-detection.md §4.4). Uncomment and set:
+# CERBERUS_VSOCK_WATCH_HEARTBEAT_URL=https://example.com/heartbeat/cerberus-vsock
+# CERBERUS_VSOCK_WATCH_HEARTBEAT_INTERVAL=60s
+
+# How often to verify the auditd rule (packaging/audit-rules/) is still
+# installed; a disappearance after having been observed present fires a
+# detector-tampering alert.
+CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL=30s
+
+# Set to true only on a host where the eBPF probe cannot load (see
+# docs/vsock-connect-detection.md §7) — this leaves ONLY the auditd detector
+# running, which is a meaningfully weaker posture (single detection path).
+# CERBERUS_VSOCK_WATCH_DISABLE_EBPF=false

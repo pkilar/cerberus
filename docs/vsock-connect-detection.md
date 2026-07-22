@@ -1,7 +1,19 @@
 # VSOCK-Connect Detection Design
 
-> **Status:** Draft — not yet implemented. Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
+> **Status:** Implemented (Option C — both detectors). Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
 > **Kind of control:** Detective, not preventive. See §7 for why no host-side control can fully prevent this.
+> **Code:** `vsockwatch/` (allowlist, alerting, auditd correlator, tamper watch, heartbeat) and
+> `vsockwatch/ebpf/` (the eBPF loader and probe), wired together in `cmd/cerberus-vsock-watch/main.go`.
+> Packaged as `cerberus-vsock-watch` (RPM/deb/Arch — see `packaging/`).
+>
+> **Read before deploying:** the eBPF probe (`vsockwatch/ebpf/src/vsock_connect.c`) was written, compiled, and
+> ELF-validated (`go test ./vsockwatch/ebpf/...`) in a development sandbox with no kernel BTF, no debugfs tracing
+> tree, and no privilege to load BPF programs. It has genuinely never been load-tested against a live kernel or
+> exercised against a real `connect(2)` syscall as part of this change — only its ELF structure (program/map/BTF
+> sections, ring buffer event decoding) has been verified. The auditd path, by contrast, HAS been exercised
+> end-to-end with the real compiled `cerberus-vsock-watch` binary against a synthetic audit log (§6) and is
+> covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
+> must complete the three verification steps in §6.
 
 ## 1. Problem statement
 
@@ -54,15 +66,27 @@ any other process (DNS lookups, LDAP binds, curl, etc.), so a consumer must post
 - **Cons:** noisy at the raw-rule level (needs a real post-filter); `auditd` is a userspace daemon a root
   attacker can stop.
 
-### Option B — eBPF (CO-RE, attached to `security_socket_connect` or `sys_enter_connect`)
+### Option B — eBPF, attached to `syscalls:sys_enter_connect`
 Decode `struct sockaddr_vm` **in-kernel**, filtering `svm_family == 40 && svm_cid == 16 && svm_port == 5000`
 before an event is even emitted — so only genuine vsock-to-enclave connects generate output, no post-filtering
 needed. Capture `{pid, tgid, uid, gid, comm, cgroup_id}` at the hook; resolve `/proc/<pid>/exe` in userspace at
 consume time.
 
 - **Pros:** precise signal, low overhead, single-purpose.
-- **Cons:** needs BTF/CO-RE (fine on Amazon Linux 2023; may need a backport on AL2), needs `CAP_BPF`/`CAP_PERFMON`
-  (or `CAP_SYS_ADMIN` on older kernels) for the loader — itself a capability to scope tightly (§4.3).
+- **Cons:** needs `CAP_BPF`/`CAP_PERFMON` (or `CAP_SYS_ADMIN` on older kernels) for the loader — itself a
+  capability to scope tightly (§4.3).
+
+**Implementation deviates from a CO-RE design on purpose.** The original draft of this section assumed CO-RE
+(`vmlinux.h` generated from the target kernel's BTF). The actual program
+(`vsockwatch/ebpf/src/vsock_connect.c`) reads no kernel-internal structure at all — only `struct sockaddr_vm`
+(a stable UAPI type, and it's the *caller's own userspace argument* to `connect()`, not kernel state) and the
+tracepoint's `trace_event_raw_sys_enter` argument struct, whose `{common_type, common_flags,
+common_preempt_count, common_pid, id, args[6]}` layout has been part of ftrace's stable ABI for well over a
+decade. That means the compiled object needs no kernel BTF/`vmlinux.h` to build or load, and — because eBPF
+bytecode is a fixed virtual ISA — the same compiled object is portable across both `x86_64` and `aarch64` without
+a separate per-arch build. The tradeoff: the object embedded via `go:embed` in the Go binary is a **checked-in,
+prebuilt artifact** (`vsockwatch/ebpf/src/vsock_connect.bpf.o`), not rebuilt from source at package-build time —
+see `make vsock-watch-bpf` (root `Makefile`) to regenerate it, and §6 for what must be re-verified after doing so.
 
 ### Option C — both (recommended)
 Run `auditd` (cheap, ubiquitous, independent code path) **and** the eBPF watcher (precise signal) side by side.
@@ -153,14 +177,46 @@ default trust model and should configure the watcher to match (documented operat
 
 ## 6. Testing plan
 
-- Unit test the BPF filter logic against synthetic `sockaddr_vm` values, including negative cases that must
-  *not* match (`cid=15`, `cid=17`, `port=5001`, `family=AF_INET`).
-- Integration test against a fake vsock listener (reusing the non-production loopback fallback already in
-  `internal/enclave/endpoint.go`): confirm `ssh-cert-api` connecting produces no alert, and a throwaway
-  root-run test binary connecting produces an alert with the correct pid/exe/uid.
-- Chaos test: restart `cerberus-api.service` mid-test, confirm no false positive during the MainPID transition.
-- Chaos test: `auditctl -D` / `systemctl stop cerberus-vsock-watch`, confirm the tampering meta-alert fires from
-  the surviving detector.
+**Done, as part of the implementation:**
+
+- Unit tests for `DecodeSockaddrVM`/`IsEnclaveTarget` (`vsockwatch/vsockaddr_test.go`) covering the negative cases
+  (`cid=17`, `port=5001`, `family=AF_INET`, etc.).
+- Unit tests for `Allowlist.Classify` (`vsockwatch/allowlist_test.go`) covering exe/uid/cgroup matches and
+  mismatches, uid-lookup failure (fail-secure → `Indeterminate`), and non-enclave traffic never alerting.
+- Unit tests for the auditd `SYSCALL`/`SOCKADDR` correlator, including out-of-order arrival and cross-`msgID`
+  isolation (`vsockwatch/audit_test.go`).
+- An in-process integration test (`TestAuditWatcher_Run_*`, same file) that runs the real `AuditWatcher.Run`
+  against a temp file being appended to concurrently — the closest thing to an end-to-end test this sandbox can
+  run without a real `auditd`.
+- A manual smoke test of the actual compiled `cerberus-vsock-watch` binary (not just `go test`): a synthetic
+  rogue `connect()` appended to a fake audit log produced a correct structured alert within ~1s; a legitimate
+  caller (with the fail-secure uid-lookup-failure path exercised, since this sandbox has no `cerberus` user)
+  correctly alerted rather than silently passing.
+- `TestEmbeddedObject_ParsesAsValidELF` (`vsockwatch/ebpf/loader_test.go`): loads the compiled
+  `vsock_connect.bpf.o` via `cilium/ebpf`'s `LoadCollectionSpecFromReader` and asserts the expected program
+  (correct type, correct tracepoint section name) and ring buffer map are present. This validates ELF/BTF
+  structure, NOT verifier acceptance or runtime correctness.
+- Running the real binary end-to-end: with no kernel privilege available, `vsockwatch/ebpf.Watcher.Run` reached
+  the kernel and failed with a genuine, specific error (`neither debugfs nor tracefs are mounted`), confirming
+  the loader/attach code path executes correctly up to the point this sandbox can't go further, and that the
+  failure degrades gracefully (auditd detector unaffected, no crash).
+- Unit tests for `TamperWatch`/`Heartbeat` (`vsockwatch/tamper_test.go`) with a faked `auditctl -l` output and a
+  faked HTTP client.
+
+**NOT done — required before production deploy, on a real target host:**
+
+- Confirm the live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c`:
+  `cat /sys/kernel/debug/tracing/events/syscalls/sys_enter_connect/format` (or the `tracefs` path).
+- Load the compiled object into a real kernel and confirm the BPF verifier accepts it
+  (`link.Tracepoint` succeeding, not erroring).
+- Drive an actual VSOCK connect (a throwaway test binary dialing the real or a loopback-substituted enclave CID)
+  and confirm the eBPF path emits an event with the expected pid/uid/comm — the eBPF equivalent of the auditd
+  smoke test already done.
+- Chaos test: restart `cerberus-api.service` mid-run, confirm no false positive during the MainPID/cgroup
+  transition on real systemd.
+- Chaos test: `auditctl -D` / `systemctl stop cerberus-vsock-watch` on a real host, confirm the tampering
+  meta-alert fires from the surviving detector and that `AmbientCapabilities` in the packaged unit are
+  sufficient (this sandbox cannot grant/verify `CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_PTRACE` end-to-end).
 
 ## 7. Why this is detection, not prevention
 

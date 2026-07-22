@@ -55,6 +55,37 @@ decrypts the CMS envelope to install the in-memory CA signer, and signs SSH
 certificates received over VSOCK.
 
 # ---------------------------------------------------------------------------
+# Subpackage: cerberus-vsock-watch
+#
+# The detective control from docs/vsock-connect-detection.md: alerts on any
+# AF_VSOCK connect() to the enclave from a process other than cerberus-api
+# itself (e.g. a root-level process bypassing Casbin authorization entirely —
+# see docs/THREAT-MODEL.md SIGN-1). Runs two independent detectors (an auditd
+# rule + an eBPF tracepoint probe) side by side. It does NOT authorize or
+# block signing requests; it only makes an out-of-band signing attempt
+# observable. Requires audit (auditctl) for the auditd-based detector; the
+# eBPF detector needs no additional package (the object is prebuilt and
+# embedded in the binary) but does need a 5.8+ kernel with BPF ring buffer
+# support and CAP_BPF/CAP_PERFMON (granted via the unit's
+# AmbientCapabilities, not requiring root).
+# ---------------------------------------------------------------------------
+%package vsock-watch
+Summary:        Cerberus VSOCK-connect detective control (out-of-band signing detection)
+Requires:       audit
+Requires(pre):  shadow-utils
+%{?systemd_requires}
+
+%description vsock-watch
+Detects an AF_VSOCK connect() to the Cerberus enclave from any process other
+than the legitimate cerberus-api — the signal that something on the host
+bypassed Casbin authorization and is attempting to mint SSH certificates
+directly against the enclave. Runs an auditd-based detector and an eBPF
+tracepoint probe independently, ships alerts to a structured log and,
+optionally, an external webhook, and pings an external heartbeat endpoint so
+tampering with the detectors themselves is also observable. This is a
+detective, not preventive, control — see docs/vsock-connect-detection.md.
+
+# ---------------------------------------------------------------------------
 # Subpackage: cerberus-client
 #
 # End-user workstation helper: the `cssh` shell function (bash + zsh) installed
@@ -139,6 +170,15 @@ cd ssh-cert-signer
 go build -ldflags="-s -w" -o ssh-cert-signer ./cmd/ssh-cert-signer
 cd ..
 
+# Build the vsock-watch detective control (root module — no cd needed). The
+# embedded eBPF object (vsockwatch/ebpf/src/vsock_connect.bpf.o) is prebuilt
+# and checked in rather than compiled here: it needs only clang -target bpf
+# against stable UAPI headers (no kernel BTF/vmlinux.h — see
+# vsockwatch/ebpf/src/vsock_connect.c's header comment), and eBPF bytecode is
+# architecture-portable, so one object serves both x86_64 and aarch64. Run
+# `make vsock-watch-bpf` to regenerate it from source if that file changes.
+go build -ldflags="-s -w" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+
 %install
 rm -rf %{buildroot}
 
@@ -187,6 +227,19 @@ install -D -m 0644 %{eif_file} \
     %{buildroot}%{_datadir}/cerberus/ssh-cert-signer.eif
 %endif
 
+# --- cerberus-vsock-watch ---
+install -D -m 0755 cerberus-vsock-watch \
+    %{buildroot}%{_bindir}/cerberus-vsock-watch
+
+install -D -m 0644 packaging/rpm/cerberus-vsock-watch.service \
+    %{buildroot}%{_unitdir}/cerberus-vsock-watch.service
+
+install -D -m 0640 packaging/rpm/cerberus-vsock-watch.sysconfig \
+    %{buildroot}%{_sysconfdir}/sysconfig/cerberus-vsock-watch
+
+install -D -m 0644 packaging/audit-rules/61-cerberus-vsock.rules \
+    %{buildroot}%{_sysconfdir}/audit/rules.d/61-cerberus-vsock.rules
+
 # --- cerberus-client ---
 # cssh.sh is plain code (replaced on upgrade so fixes always apply); site config
 # lives in the companion cerberus-env.sh, shipped %config(noreplace).
@@ -227,6 +280,28 @@ exit 0
 %systemd_postun_with_restart cerberus-signer.service
 
 # ---------------------------------------------------------------------------
+# cerberus-vsock-watch scriptlets
+# ---------------------------------------------------------------------------
+%pre vsock-watch
+# A DIFFERENT account than cerberus-api's own "cerberus" user (see %pre api
+# above): a compromise of the cerberus account alone must not also blind this
+# watcher. See docs/vsock-connect-detection.md §4.3.
+getent group cerberus-audit >/dev/null || groupadd -r cerberus-audit
+getent passwd cerberus-audit >/dev/null || \
+    useradd -r -g cerberus-audit -d /etc/cerberus -s /sbin/nologin \
+    -c "Cerberus VSOCK-watch detective control" cerberus-audit
+exit 0
+
+%post vsock-watch
+%systemd_post cerberus-vsock-watch.service
+
+%preun vsock-watch
+%systemd_preun cerberus-vsock-watch.service
+
+%postun vsock-watch
+%systemd_postun_with_restart cerberus-vsock-watch.service
+
+# ---------------------------------------------------------------------------
 # File lists
 # ---------------------------------------------------------------------------
 %files api
@@ -252,6 +327,14 @@ exit 0
 %dir %{_datadir}/cerberus
 %{_datadir}/cerberus/Dockerfile
 
+%files vsock-watch
+%license LICENSE
+%doc docs/vsock-connect-detection.md
+%{_bindir}/cerberus-vsock-watch
+%{_unitdir}/cerberus-vsock-watch.service
+%config(noreplace) %attr(0640,root,cerberus-audit) %{_sysconfdir}/sysconfig/cerberus-vsock-watch
+%config(noreplace) %{_sysconfdir}/audit/rules.d/61-cerberus-vsock.rules
+
 %files client
 %license LICENSE
 %doc docs/cssh.md
@@ -270,6 +353,24 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Wed Jul 22 2026 Paul Kilar <pkilar@gmail.com> - 0.10.0-1
+- New cerberus-vsock-watch subpackage: a detective control for SIGN-1
+  (docs/THREAT-MODEL.md) — a compromised host with root access can dial the
+  enclave's VSOCK listener directly, bypassing ssh-cert-api's Casbin
+  authorization entirely, and mint certificates for arbitrary principals.
+  This does not close that gap (no host-side control fully can — see
+  docs/vsock-connect-detection.md §7) but makes exploitation observable:
+  two independent detectors (an auditd rule correlating SYSCALL/SOCKADDR
+  records, and an eBPF probe on the syscalls:sys_enter_connect tracepoint)
+  each classify every AF_VSOCK connect to the enclave against an allowlist
+  of the known-good ssh-cert-api process (exe path, service-account uid,
+  and — best-effort — cgroup), and ship a critical alert for anything else.
+  Also watches for the auditd rule itself disappearing (a
+  "detector tampering" meta-alert) and can ping an external heartbeat
+  endpoint so a monitoring system outside this host notices if the watcher
+  goes silent. Runs as its own cerberus-audit service account, distinct
+  from cerberus-api's, so compromising the API service alone does not also
+  blind the watcher. See docs/vsock-connect-detection.md.
 * Fri Jul 10 2026 Paul Kilar <pkilar@gmail.com> - 0.9.0-1
 - LDAP backends can now discover servers via DNS SRV records (srv: block with
   tls_mode) and fail over across them per RFC 2782, in addition to a fixed

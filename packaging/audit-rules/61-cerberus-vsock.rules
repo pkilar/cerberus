@@ -1,0 +1,23 @@
+# auditd rule for the Cerberus VSOCK-connect detective control
+# (docs/vsock-connect-detection.md, Option A). Install to
+# /etc/audit/rules.d/61-cerberus-vsock.rules (the numeric prefix follows
+# auditd's convention of loading rules.d files in lexical order; 61 places it
+# after the distro-default rule files, which is not load-bearing here but
+# keeps it out of the way of any numbering convention already in use).
+#
+# This rule alone is intentionally coarse: it logs every connect(2) from any
+# process OTHER than the packaged ssh-cert-api binary. auditd cannot filter on
+# socket address family in the rule itself, so cerberus-vsock-watch's auditd
+# path (vsockwatch/audit.go) does the real filtering — decoding each
+# correlated SYSCALL+SOCKADDR pair and only alerting on a genuine
+# AF_VSOCK connect to the enclave's (CID, port). A misconfigured or absent
+# rule degrades to "cerberus-vsock-watch has fewer audit log lines to parse",
+# not a silent gap in the eBPF detector, which is independent of this rule.
+#
+# After editing rule files, reload with: augenrules --load (or
+# `service auditd restart` on distros without augenrules). Verify with:
+#   auditctl -l | grep cerberus_vsock_watch
+# cerberus-vsock-watch's TamperWatch (vsockwatch/tamper.go) periodically runs
+# this same check and alerts if a previously-observed rule disappears.
+-a always,exit -F arch=b64 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch
+-a always,exit -F arch=b32 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch

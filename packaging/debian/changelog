@@ -1,3 +1,14 @@
+cerberus (0.10.0) unstable; urgency=medium
+
+  * New cerberus-vsock-watch package: a detective control for SIGN-1
+    (docs/THREAT-MODEL.md) — alerts on any AF_VSOCK connect() to the enclave
+    from a process other than cerberus-api, via two independent detectors
+    (an auditd rule and an eBPF tracepoint probe). Does not close the
+    underlying gap; makes exploitation observable. See
+    docs/vsock-connect-detection.md.
+
+ -- Paul Kilar <pkilar@gmail.com>  Wed, 22 Jul 2026 09:50:00 -0400
+
 cerberus (0.9.0) unstable; urgency=medium
 
   * LDAP backends can now discover servers via DNS SRV records (srv: block with

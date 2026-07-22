@@ -488,6 +488,10 @@ When installed via RPM, files are placed at standard FHS paths:
 | Dockerfile            | `/usr/share/cerberus/Dockerfile`                  | For building EIFs                                        |
 | EIF                   | `/usr/share/cerberus/ssh-cert-signer.eif`         | Operator copies post-install, **or** shipped by the optional `cerberus-signer-eif` package |
 | Log directory         | `/var/log/cerberus/`                              | Owned by `cerberus` user                                 |
+| vsock-watch binary    | `/usr/bin/cerberus-vsock-watch`                   | Optional — `docs/vsock-connect-detection.md`             |
+| vsock-watch unit      | `/usr/lib/systemd/system/cerberus-vsock-watch.service` | Optional, own `cerberus-audit` service account       |
+| vsock-watch sysconfig | `/etc/sysconfig/cerberus-vsock-watch`             | `%config(noreplace)`                                      |
+| vsock-watch auditd rule | `/etc/audit/rules.d/61-cerberus-vsock.rules`    | `%config(noreplace)` — reload with `augenrules --load`    |
 
 ### Post-Install Setup (RPM)
 
@@ -516,6 +520,12 @@ When installed via RPM, files are placed at standard FHS paths:
    sudo systemctl enable --now cerberus-signer
    sudo systemctl enable --now cerberus-api
    ```
+6. **Optional but recommended:** install and enable `cerberus-vsock-watch` (see [Security Considerations](#security-considerations)):
+   ```bash
+   sudo dnf install cerberus-vsock-watch-*.rpm
+   sudo augenrules --load   # picks up the packaged auditd rule
+   sudo systemctl enable --now cerberus-vsock-watch
+   ```
 
 ### Managing Services (RPM Install)
 
@@ -540,6 +550,8 @@ Environment variables are managed via sysconfig files rather than inline in the 
 **`/etc/sysconfig/cerberus-api`**: `CONFIG_PATH`, `AWS_REGION`, `CERBERUS_SIGNER_ENDPOINT` (optional), `DEBUG` (the keytab path is set in `config.yaml` via `keytab_path`, not here)
 
 **`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
+
+**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL`, `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF` — see `docs/vsock-connect-detection.md`
 
 ### Versioning
 
@@ -1066,6 +1078,19 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - `critical_options` like `source-address` can restrict certificate use to specific networks.
 
 > **Enclave trust model:** the enclave validates structural properties of every signing request it receives over VSOCK (key algorithm and minimum strength, validity bound, principal count, empty/`"*"` principals, extension/critical-option key collisions) as defense-in-depth, but it does **not** re-run the host's authorization policy. The host API (`ssh-cert-api`) remains the authority for *which* principals, permissions, and critical options a given user may obtain. A compromise of the host process is therefore in scope for cert misuse (the CA key itself stays protected by the enclave + KMS PCR policy); protect the host accordingly.
+
+**Detecting a bypass of the above.** Since the enclave can't tell `ssh-cert-api` apart from any other process on
+the host, anything with root on the EC2 host can dial the enclave's VSOCK listener directly and mint a cert for
+arbitrary principals — entirely bypassing the Casbin authorization described in this section. This is documented
+as `SIGN-1` in `docs/THREAT-MODEL.md` and is an accepted architectural residual of the host-mediated design, not
+fixable from the host side alone. The optional **`cerberus-vsock-watch`** package (`docs/vsock-connect-detection.md`)
+is a detective control for exactly this: it runs two independent detectors (an `auditd` rule and an eBPF probe)
+that alert whenever a process other than the legitimate `ssh-cert-api` connects to the enclave. It does not
+prevent the bypass — nothing running on the host can — but it makes exploitation observable, including tampering
+with the detectors themselves. Install and enable it alongside `cerberus-api`:
+```sh
+sudo systemctl enable --now cerberus-vsock-watch
+```
 
 ### Credential Handling
 

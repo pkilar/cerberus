@@ -1,0 +1,6 @@
+# Cerberus system user for the vsock-watch detective control (installed to
+# /usr/lib/sysusers.d/cerberus-vsock-watch.conf; systemd-sysusers creates the
+# user/group via pacman's hook on install/upgrade). A DIFFERENT account than
+# cerberus-api's "cerberus" user — see docs/vsock-connect-detection.md §4.3.
+#Type Name           ID GECOS                                     Home          Shell
+u     cerberus-audit -  "Cerberus VSOCK-watch detective control" /etc/cerberus /usr/bin/nologin

@@ -12,6 +12,7 @@ metadata are Debian-specific.
 | --------------------- | ------------------------------------------------------------------------------ | ------------ |
 | `cerberus-api`        | `ssh-cert-api` binary, systemd unit, `config.yaml.example`, sysusers/tmpfiles  | amd64/arm64  |
 | `cerberus-signer`     | `ssh-cert-signer` binary, systemd unit, `run-enclave.sh`, `Dockerfile`         | amd64/arm64  |
+| `cerberus-vsock-watch`| VSOCK-connect detective control (`docs/vsock-connect-detection.md`): binary, systemd unit, auditd rule, sysusers | amd64/arm64  |
 | `cerberus-client`     | the `cssh` shell wrapper (`/etc/profile.d/`)                                    | all          |
 | `cerberus-signer-eif` | **opt-in**, prebuilt EIF — carries per-deployment CA key material              | amd64/arm64  |
 

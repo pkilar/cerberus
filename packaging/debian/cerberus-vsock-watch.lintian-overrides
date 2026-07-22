@@ -1,0 +1,8 @@
+# cerberus-vsock-watch is a position-independent EXECUTABLE (built with
+# -buildmode=pie), so it is ET_DYN and lintian misclassifies it as a shared
+# library. It is a program, not a library: no SONAME, no library prerequisites.
+cerberus-vsock-watch: shared-library-lacks-prerequisites [usr/bin/cerberus-vsock-watch]
+
+# The service env file is shipped 0640 (not world-readable) on purpose,
+# matching the RPM/Arch packaging; systemd reads the EnvironmentFile as root.
+cerberus-vsock-watch: non-standard-file-perm 0640 != 0644 [etc/default/cerberus-vsock-watch]
