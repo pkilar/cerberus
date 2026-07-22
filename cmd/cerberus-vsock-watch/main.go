@@ -99,7 +99,8 @@ func run() int {
 	username := flag.String("username", envDefault("CERBERUS_VSOCK_WATCH_USERNAME", "cerberus"), "expected service account ssh-cert-api runs as")
 	unit := flag.String("unit", envDefault("CERBERUS_VSOCK_WATCH_UNIT", "cerberus-api.service"), "systemd unit whose cgroup ssh-cert-api runs under (best-effort check)")
 	auditLogPath := flag.String("audit-log", envDefault("CERBERUS_VSOCK_WATCH_AUDIT_LOG", "/var/log/audit/audit.log"), "path to the auditd log to tail")
-	webhookURL := flag.String("webhook-url", envDefault("CERBERUS_VSOCK_WATCH_WEBHOOK_URL", ""), "out-of-band alert webhook URL (independent of the log pipeline)")
+	webhookURL := flag.String("webhook-url", envDefault("CERBERUS_VSOCK_WATCH_WEBHOOK_URL", ""), "out-of-band alert webhook URL (independent of the log pipeline); Slack Incoming Webhook URLs (hooks.slack.com) are auto-detected and formatted correctly")
+	webhookFormat := flag.String("webhook-format", envDefault("CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT", ""), `webhook payload format: "" (auto-detect from URL, default), "slack" (force Slack's {"text": ...} shape — use for a Slack-compatible receiver whose URL isn't hooks.slack.com, e.g. Mattermost), or "generic" (force the raw Alert JSON)`)
 	heartbeatURL := flag.String("heartbeat-url", envDefault("CERBERUS_VSOCK_WATCH_HEARTBEAT_URL", ""), "external dead-man's-switch heartbeat endpoint")
 	heartbeatInterval := flag.Duration("heartbeat-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_HEARTBEAT_INTERVAL", 60*time.Second), "how often to ping heartbeat-url")
 	tamperCheckInterval := flag.Duration("tamper-check-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL", 30*time.Second), "how often to verify the auditd rule is still installed")
@@ -108,9 +109,15 @@ func run() int {
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
 
+	format, err := parseWebhookFormat(*webhookFormat)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
 	shippers := vsockwatch.Shippers{vsockwatch.LogShipper{}}
 	if *webhookURL != "" {
-		shippers = append(shippers, vsockwatch.WebhookShipper{URL: *webhookURL})
+		shippers = append(shippers, vsockwatch.WebhookShipper{URL: *webhookURL, Format: format})
 	}
 
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -217,6 +224,19 @@ func run() int {
 	<-ctx.Done()
 	slog.Info("vsockwatch.shutting_down")
 	return exitCode
+}
+
+// parseWebhookFormat validates the --webhook-format/CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT
+// value. Rejecting an unrecognized value at startup (rather than silently
+// falling back to auto-detect) catches a typo like "slcak" before it causes
+// alerts to go out malformed.
+func parseWebhookFormat(v string) (vsockwatch.WebhookFormat, error) {
+	switch vsockwatch.WebhookFormat(v) {
+	case vsockwatch.WebhookFormatAuto, vsockwatch.WebhookFormatSlack, vsockwatch.WebhookFormatGeneric:
+		return vsockwatch.WebhookFormat(v), nil
+	default:
+		return "", fmt.Errorf("vsockwatch: invalid --webhook-format %q (want \"\", \"slack\", or \"generic\")", v)
+	}
 }
 
 func envDefault(key, fallback string) string {

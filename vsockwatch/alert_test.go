@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,6 +110,103 @@ func TestWebhookShipper_NonSuccessStatus(t *testing.T) {
 	shipper := WebhookShipper{URL: srv.URL}
 	if err := shipper.Ship(context.Background(), Alert{}); err == nil {
 		t.Fatal("expected an error for a 500 response")
+	}
+}
+
+func TestIsSlackWebhookURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"https://hooks.slack.com/services/T00/B00/xxxx", true},
+		{"http://hooks.slack.com/services/T00/B00/xxxx", true},
+		{"https://example.com/webhook", false},
+		{"https://not-hooks.slack.com.evil.example/x", false},
+		{"https://evil.example/hooks.slack.com", false},
+		{"not a url at all \x7f", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isSlackWebhookURL(tt.url); got != tt.want {
+			t.Errorf("isSlackWebhookURL(%q) = %v, want %v", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestSlackPayload_Shape(t *testing.T) {
+	ev := Event{PID: 42, UID: 0, GID: 0, Comm: "evil", Exe: "/tmp/evil", Source: SourceEBPF}
+	a := NewAnomalyAlert(ev, Classification{Verdict: Anomalous, Reason: "exe mismatch"})
+	payload := slackPayload(a)
+
+	for _, want := range []string{"CRITICAL", string(KindVSockAnomaly), "exe mismatch", "42", "/tmp/evil", "evil"} {
+		if !strings.Contains(payload.Text, want) {
+			t.Errorf("slack text %q missing expected substring %q", payload.Text, want)
+		}
+	}
+}
+
+func TestSlackPayload_EscapesUntrustedFields(t *testing.T) {
+	ev := Event{Comm: "<b>&pwn</b>", Exe: "/tmp/<script>evil</script>", Source: SourceEBPF}
+	a := NewAnomalyAlert(ev, Classification{Verdict: Anomalous, Reason: "exe <injected> & broken"})
+	payload := slackPayload(a)
+
+	for _, bad := range []string{"<b>", "<script>", "<injected>"} {
+		if strings.Contains(payload.Text, bad) {
+			t.Errorf("slack text contains unescaped markup %q: %s", bad, payload.Text)
+		}
+	}
+	for _, want := range []string{"&lt;b&gt;", "&amp;pwn", "&lt;script&gt;", "&lt;injected&gt;", "&amp; broken"} {
+		if !strings.Contains(payload.Text, want) {
+			t.Errorf("slack text missing escaped form %q: %s", want, payload.Text)
+		}
+	}
+}
+
+func TestWebhookShipper_SlackFormat_SendsTextPayload(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	shipper := WebhookShipper{URL: srv.URL, Format: WebhookFormatSlack}
+	alert := NewAnomalyAlert(Event{PID: 42, Exe: "/tmp/evil"}, Classification{Verdict: Anomalous, Reason: "test"})
+	if err := shipper.Ship(context.Background(), alert); err != nil {
+		t.Fatalf("Ship: %v", err)
+	}
+
+	text, ok := raw["text"].(string)
+	if !ok || text == "" {
+		t.Fatalf("expected a non-empty top-level \"text\" field (Slack's required contract), got %+v", raw)
+	}
+	if _, hasPID := raw["pid"]; hasPID {
+		t.Errorf("Slack payload should not carry the raw Alert's fields directly, got %+v", raw)
+	}
+}
+
+func TestWebhookShipper_ExplicitGenericFormatOverridesSlackURL(t *testing.T) {
+	// Even a URL that WOULD auto-detect as Slack must respect an explicit
+	// Format override — an operator proxying/relaying through a
+	// hooks.slack.com-named endpoint that actually expects the raw JSON.
+	var gotBody Alert
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	shipper := WebhookShipper{URL: srv.URL, Format: WebhookFormatGeneric}
+	alert := NewAnomalyAlert(Event{PID: 7}, Classification{Verdict: Anomalous, Reason: "test"})
+	if err := shipper.Ship(context.Background(), alert); err != nil {
+		t.Fatalf("Ship: %v", err)
+	}
+	if gotBody.PID != 7 {
+		t.Errorf("got %+v, want the raw Alert JSON despite the URL", gotBody)
 	}
 }
 

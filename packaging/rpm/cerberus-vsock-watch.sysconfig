@@ -14,9 +14,18 @@ CERBERUS_VSOCK_WATCH_UNIT=cerberus-api.service
 # Path to the auditd log this service tails for the auditd-based detector.
 CERBERUS_VSOCK_WATCH_AUDIT_LOG=/var/log/audit/audit.log
 
-# Out-of-band alert channel (PagerDuty/SNS/generic webhook), independent of
-# the log pipeline — strongly recommended in production. Uncomment and set:
-# CERBERUS_VSOCK_WATCH_WEBHOOK_URL=https://example.com/alerts/cerberus-vsock
+# Out-of-band alert channel (Slack, PagerDuty, SNS, a generic webhook),
+# independent of the log pipeline — strongly recommended in production.
+# A Slack Incoming Webhook URL (https://hooks.slack.com/services/...) is
+# auto-detected and posted in Slack's required {"text": ...} shape; anything
+# else gets the raw Alert JSON. Uncomment and set:
+# CERBERUS_VSOCK_WATCH_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/xxxxxxxxxxxxxxxxxxxxxxxx
+#
+# Force the payload shape instead of auto-detecting — e.g. "slack" for a
+# Slack-compatible receiver (Mattermost, an internal relay) whose URL isn't
+# literally hooks.slack.com, or "generic" to force raw JSON even against a
+# hooks.slack.com URL:
+# CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT=slack
 
 # External dead-man's-switch heartbeat: an endpoint this service pings
 # periodically, so a monitoring system NOT running on this host can alert if

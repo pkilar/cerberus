@@ -125,9 +125,14 @@ PID transition.
 4. **Alerting:** on an anomalous classification, both detectors (a) write a structured JSON log line
    (matching Cerberus's existing `LOG_FORMAT=json` convention) and (b) forward it synchronously to the external
    log aggregator (already a trusted component per `docs/THREAT-MODEL.md` Appendix A) **before** local
-   acknowledgment. In parallel, fire directly to an out-of-band alert channel (PagerDuty/SNS/webhook) from the
-   watch daemon itself, independent of the logging pipeline — so a host that kills the log forwarder mid-attack
-   still gets one alert out first.
+   acknowledgment. In parallel, fire directly to an out-of-band alert channel (`CERBERUS_VSOCK_WATCH_WEBHOOK_URL`
+   — Slack, PagerDuty, SNS, or a generic webhook) from the watch daemon itself, independent of the logging
+   pipeline — so a host that kills the log forwarder mid-attack still gets one alert out first. Slack's Incoming
+   Webhook contract requires a `{"text": ...}` payload rather than arbitrary JSON; a `hooks.slack.com` URL is
+   auto-detected and formatted accordingly (`CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT` overrides the detection for a
+   Slack-compatible receiver on a different host, or to force the raw JSON shape). Untrusted fields (the
+   anomalous process's `comm`/`exe`, which it fully controls) are Slack-mrkdwn-escaped before being embedded, so
+   a hostile process can't inject formatting or break the alert message.
 5. *(Phase 2, not in this design):* snapshot `/proc/<pid>/maps`, open FDs, and cmdline on anomaly detection for
    forensics. Adds complexity and its own risk surface; flagged as a follow-up, not required for v1.
 
@@ -216,7 +221,10 @@ default trust model and should configure the watcher to match (documented operat
   transition on real systemd.
 - Chaos test: `auditctl -D` / `systemctl stop cerberus-vsock-watch` on a real host, confirm the tampering
   meta-alert fires from the surviving detector and that `AmbientCapabilities` in the packaged unit are
-  sufficient (this sandbox cannot grant/verify `CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_PTRACE` end-to-end).
+  sufficient (this sandbox cannot grant/verify `CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_PTRACE`/`CAP_DAC_READ_SEARCH`
+  end-to-end). `CAP_DAC_READ_SEARCH` in paticular lets the de-privileged `cerberus-audit` account read the
+  root-owned `/var/log/audit/audit.log` (0600) and the tracefs tracepoint-id file; without it, both detectors
+  fail at startup with `permission denied` and the process exits (`all_detectors_down`).
 
 ## 7. Why this is detection, not prevention
 

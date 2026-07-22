@@ -30,8 +30,19 @@ LimitNOFILE=65536
 # CAP_AUDIT_CONTROL: run `auditctl -l` to verify the auditd rule is still
 # installed (tamper.go's AuditRulePresent) — without it every check errors
 # and the audit-rule-removal tamper alert can never fire.
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL
+# CAP_DAC_READ_SEARCH: this account (cerberus-audit) (cerberus-audit) runs in no supplementary
+# groups, yet BOTH detectors must READ root-owned paths that no other cap here
+# bypasses - DAC read checks are bypassed only by this cap (or the broader
+# CAP_DAC_OVERRIDE, which also grants write and is not needed):
+#   - the auditd path tails /var/log/audit/audit.log, which auditd keeps
+#     0600 root:root (audit.go's openAtEnd), and
+#   - the eBPF loader reads the tracepoint id under the root-owned tracefs
+#     tree, /sys/kernel/tracing/events/syscalls/sys_enter_connect/id
+#     (cilium/ebpf's link.Tracepoint).
+# Note CAP_SYS_ADMIN does NOT bypass DAC; without CAP_DAC_READ_SEARCH both
+# detectors die at startup with EACCES and the process exits (all detectors down).
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH
 
 # Security hardening. NoNewPrivileges is intentionally NOT set: the ambient
 # capabilities above must survive exec, which NoNewPrivileges would strip.

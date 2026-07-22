@@ -551,7 +551,7 @@ Environment variables are managed via sysconfig files rather than inline in the 
 
 **`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
 
-**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL`, `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF` — see `docs/vsock-connect-detection.md`
+**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL` (a Slack Incoming Webhook URL is auto-detected and formatted correctly), `_WEBHOOK_FORMAT` (force `slack` or `generic`), `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF` — see `docs/vsock-connect-detection.md`
 
 ### Versioning
 

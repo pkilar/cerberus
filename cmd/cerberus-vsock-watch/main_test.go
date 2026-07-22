@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pkilar/cerberus/vsockwatch"
+)
 
 // TestRecoverDetector_SwallowsPanic verifies a panic inside a detector
 // goroutine does not propagate past recoverDetector. Without this, a bug in
@@ -52,5 +56,28 @@ func TestDetectorHealth_AllDown_AuditdOnlyWhenEBPFDisabled(t *testing.T) {
 	h.markAuditdDown()
 	if !h.allDown() {
 		t.Fatal("allDown() = false once the only enabled detector (auditd) is down")
+	}
+}
+
+func TestParseWebhookFormat(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    vsockwatch.WebhookFormat
+		wantErr bool
+	}{
+		{"", vsockwatch.WebhookFormatAuto, false},
+		{"slack", vsockwatch.WebhookFormatSlack, false},
+		{"generic", vsockwatch.WebhookFormatGeneric, false},
+		{"slcak", "", true},
+	}
+	for _, tt := range tests {
+		got, err := parseWebhookFormat(tt.in)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseWebhookFormat(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			continue
+		}
+		if err == nil && got != tt.want {
+			t.Errorf("parseWebhookFormat(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -129,15 +131,43 @@ func (l LogShipper) Ship(_ context.Context, a Alert) error {
 	return nil
 }
 
-// WebhookShipper POSTs the Alert as JSON to URL — intended for an external,
-// out-of-band alert channel (PagerDuty/SNS/generic webhook) that does not sit
-// behind the same local log pipeline a host-resident attacker might also
-// control. Per docs/vsock-connect-detection.md §4.2, this is fired in
-// parallel with (not instead of) the log channel, and should be attempted
-// before local acknowledgment.
+// WebhookFormat selects the JSON shape WebhookShipper sends. Slack's
+// Incoming Webhooks API (and Slack-compatible receivers, e.g. Mattermost)
+// reject the raw Alert JSON — they require a payload with a "text" field —
+// so posting an Alert unmodified to a Slack webhook URL fails outright
+// (Slack returns a 400 "no_text" body), silently dropping every alert.
+type WebhookFormat string
+
+const (
+	// WebhookFormatAuto detects the shape from URL: a hooks.slack.com URL
+	// gets WebhookFormatSlack, anything else gets WebhookFormatGeneric. The
+	// zero value, so existing configuration (URL only, no Format) keeps
+	// working exactly as before for non-Slack receivers.
+	WebhookFormatAuto WebhookFormat = ""
+	// WebhookFormatSlack sends {"text": "..."}, Slack's Incoming Webhook
+	// contract. Also selected automatically for hooks.slack.com URLs.
+	WebhookFormatSlack WebhookFormat = "slack"
+	// WebhookFormatGeneric sends the Alert struct as JSON (PagerDuty/SNS/a
+	// custom receiver).
+	WebhookFormatGeneric WebhookFormat = "generic"
+)
+
+// WebhookShipper POSTs the Alert to URL — intended for an external,
+// out-of-band alert channel (Slack, PagerDuty, SNS, a generic webhook) that
+// does not sit behind the same local log pipeline a host-resident attacker
+// might also control. Per docs/vsock-connect-detection.md §4.2, this is
+// fired in parallel with (not instead of) the log channel, and should be
+// attempted before local acknowledgment.
 type WebhookShipper struct {
 	URL    string
 	Client *http.Client
+	// Format overrides auto-detection — set WebhookFormatSlack for a
+	// Slack-compatible receiver whose URL isn't literally hooks.slack.com
+	// (e.g. a Mattermost incoming webhook, or an internal relay in front of
+	// Slack), or WebhookFormatGeneric to force the raw Alert JSON even
+	// against a hooks.slack.com URL. Leave as WebhookFormatAuto (the zero
+	// value) for the common case.
+	Format WebhookFormat
 }
 
 // webhookTimeout bounds the default client's request when Client is nil. Both
@@ -151,7 +181,20 @@ func (w WebhookShipper) Ship(ctx context.Context, a Alert) error {
 	if w.URL == "" {
 		return fmt.Errorf("vsockwatch: WebhookShipper has no URL configured")
 	}
-	body, err := json.Marshal(a)
+
+	format := w.Format
+	if format == WebhookFormatAuto {
+		format = WebhookFormatGeneric
+		if isSlackWebhookURL(w.URL) {
+			format = WebhookFormatSlack
+		}
+	}
+
+	var payload any = a
+	if format == WebhookFormatSlack {
+		payload = slackPayload(a)
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("vsockwatch: marshal alert: %w", err)
 	}
@@ -174,4 +217,59 @@ func (w WebhookShipper) Ship(ctx context.Context, a Alert) error {
 		return fmt.Errorf("vsockwatch: webhook returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// isSlackWebhookURL reports whether rawURL's host is Slack's Incoming
+// Webhook endpoint. An unparseable URL is treated as not-Slack; WebhookShipper
+// will still attempt delivery and let the HTTP client surface the real error.
+func isSlackWebhookURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Hostname() == "hooks.slack.com"
+}
+
+// slackWebhookPayload is Slack's Incoming Webhook message contract: a "text"
+// field is required (mrkdwn formatting is on by default for incoming
+// webhooks), everything else is optional and not needed here.
+type slackWebhookPayload struct {
+	Text string `json:"text"`
+}
+
+// slackPayload renders a as a Slack mrkdwn message. Fields that can contain
+// attacker-influenced content (Reason, Comm, Exe — an Anomalous event's exe
+// path or TASK_COMM come directly from the misbehaving process) are escaped
+// per Slack's formatting rules before being embedded, so a hostile process
+// can't inject Slack markup or break the message structure.
+func slackPayload(a Alert) slackWebhookPayload {
+	var b strings.Builder
+	fmt.Fprintf(&b, ":rotating_light: *%s* — `%s`\n", strings.ToUpper(a.Severity), a.Kind)
+	fmt.Fprintf(&b, "*Reason:* %s\n", slackEscape(a.Reason))
+	if a.Detector != "" {
+		fmt.Fprintf(&b, "*Detector:* %s\n", a.Detector)
+	}
+	if a.PID != 0 || a.UID != 0 || a.GID != 0 {
+		fmt.Fprintf(&b, "*PID:* %d  *UID:* %d  *GID:* %d\n", a.PID, a.UID, a.GID)
+	}
+	if a.Comm != "" {
+		fmt.Fprintf(&b, "*Comm:* `%s`\n", slackEscape(a.Comm))
+	}
+	if a.Exe != "" {
+		fmt.Fprintf(&b, "*Exe:* `%s`\n", slackEscape(a.Exe))
+	}
+	if a.CgroupID != 0 {
+		fmt.Fprintf(&b, "*Cgroup ID:* %d\n", a.CgroupID)
+	}
+	fmt.Fprintf(&b, "*Time:* %s", a.Time.Format(time.RFC3339))
+	return slackWebhookPayload{Text: b.String()}
+}
+
+// slackEscape applies Slack's required mrkdwn escaping
+// (https://api.slack.com/reference/surfaces/formatting#escaping) so
+// untrusted text can't break the message structure or be mistaken for
+// Slack markup.
+func slackEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
