@@ -144,6 +144,9 @@ func run() int {
 		fatalOnce.Do(func() {
 			slog.Error("vsockwatch.all_detectors_down",
 				"hint", "no vsock-connect detection remains active; exiting for the process supervisor to restart")
+			//nolint:contextcheck // ctx is being torn down right here (cancel() below); the
+			// shutdown alert deliberately uses an independent context so it still has a
+			// chance to ship instead of being killed by the same cancellation it's reporting.
 			_ = shippers.Ship(context.Background(), vsockwatch.NewTamperAlert("",
 				"all configured vsock-connect detectors (auditd, eBPF) have stopped; no detection is active"))
 			exitCode = 1
