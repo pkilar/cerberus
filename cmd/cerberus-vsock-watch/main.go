@@ -16,9 +16,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -27,6 +29,21 @@ import (
 	"github.com/pkilar/cerberus/vsockwatch"
 	vsockebpf "github.com/pkilar/cerberus/vsockwatch/ebpf"
 )
+
+// recoverDetector logs and swallows a panic from a detector goroutine so a
+// bug in one detector cannot silently take down the whole process — and with
+// it, the other, deliberately independent detectors (see
+// docs/vsock-connect-detection.md §4.4). Without this, an unrecovered panic
+// anywhere in the call graph is indistinguishable, from the outside, from an
+// attacker successfully disabling every detector at once.
+func recoverDetector(name string) {
+	if r := recover(); r != nil {
+		slog.Error("vsockwatch.detector.panic",
+			"detector", name,
+			"panic", fmt.Sprintf("%v", r),
+			"stack", string(debug.Stack()))
+	}
+}
 
 // Every flag below can also be set via the correspondingly-named
 // CERBERUS_VSOCK_WATCH_* environment variable (flag wins if both are set),
@@ -67,6 +84,7 @@ func main() {
 		Shipper:   shippers,
 	}
 	go func() {
+		defer recoverDetector("auditd")
 		if err := auditWatcher.Run(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.auditd.stopped", "error", err)
 		}
@@ -79,6 +97,7 @@ func main() {
 	if !*disableEBPF {
 		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: shippers}
 		go func() {
+			defer recoverDetector("ebpf")
 			if err := ebpfWatcher.Run(ctx); err != nil && ctx.Err() == nil {
 				slog.Error("vsockwatch.ebpf.stopped", "error", err,
 					"hint", "the auditd detector is still running; see docs/vsock-connect-detection.md §7")
@@ -88,6 +107,7 @@ func main() {
 
 	tamperWatch := &vsockwatch.TamperWatch{Shipper: shippers, Interval: *tamperCheckInterval}
 	go func() {
+		defer recoverDetector("tamperwatch")
 		if err := tamperWatch.RunAuditRuleCheck(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.tamperwatch.stopped", "error", err)
 		}
@@ -96,6 +116,7 @@ func main() {
 	if *heartbeatURL != "" {
 		hb := &vsockwatch.Heartbeat{URL: *heartbeatURL, Interval: *heartbeatInterval}
 		go func() {
+			defer recoverDetector("heartbeat")
 			err := hb.Run(ctx, func(err error) {
 				slog.Warn("vsockwatch.heartbeat.failed", "error", err)
 			})

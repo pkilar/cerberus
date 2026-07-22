@@ -128,6 +128,48 @@ func TestClassify_NotEnclaveTarget_NeverAlerts(t *testing.T) {
 	}
 }
 
+func TestAllowlist_LookupDoesNotBlockOtherCachedReads(t *testing.T) {
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	a := &Allowlist{
+		ExePath:  "/usr/bin/ssh-cert-api",
+		Username: "cerberus",
+		lookupUID: func(string) (uint32, error) {
+			close(started)
+			<-unblock // simulates a slow/hung NSS- or LDAP-backed lookup
+			return 999, nil
+		},
+		statCgroupID: func(string) (uint64, error) {
+			t.Error("statCgroupID must not be called: cgroupID()'s cache is pre-warmed and valid")
+			return 0, errors.New("unexpected call")
+		},
+		cacheTTL: time.Minute,
+		// Pre-warm the cgroup cache so cgroupID() below takes the cached
+		// fast path instead of calling statCgroupID.
+		cachedCG:   777,
+		cgResolved: true,
+		cgAt:       time.Now(),
+	}
+
+	go func() { _, _ = a.uid() }() // blocks in lookupUID, unlocked
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		if _, err := a.cgroupID(); err != nil {
+			t.Errorf("cgroupID(): %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cgroupID() blocked while uid()'s lookupUID was in flight — I/O must not run under a.mu")
+	}
+	close(unblock)
+}
+
 func TestAllowlist_UIDCache(t *testing.T) {
 	calls := 0
 	a := &Allowlist{

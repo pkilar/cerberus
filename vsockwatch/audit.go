@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -255,6 +256,23 @@ func (w *AuditWatcher) Run(ctx context.Context) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// pending holds a line fragment read without its trailing '\n' — the
+	// tail of a write this poll tick caught mid-append. ReadString only
+	// returns a non-nil error when it stops without finding the delimiter, so
+	// on that path the bytes it did return must be carried over rather than
+	// handled as a complete record; otherwise a record that straddles two
+	// poll ticks is split, and its second half (which no longer starts with
+	// "type=") is silently rejected by parseAuditLine on the next tick —
+	// losing exactly the record that might have been alert-worthy.
+	var pending strings.Builder
+
+	// lastReopenErr de-dupes reopenIfRotated logging so a persistent failure
+	// (permissions changed, path removed, disk issue) is reported instead of
+	// spinning silently forever — indistinguishable from a healthy idle
+	// watcher — while a merely transient one (e.g. logrotate mid-swap) isn't
+	// logged on every tick.
+	var lastReopenErr string
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -262,23 +280,35 @@ func (w *AuditWatcher) Run(ctx context.Context) error {
 		case <-ticker.C:
 			for {
 				line, readErr := reader.ReadString('\n')
+				if readErr == nil {
+					w.handleLine(ctx, corr, pending.String()+line)
+					pending.Reset()
+					continue
+				}
 				if line != "" {
-					w.handleLine(ctx, corr, line)
+					pending.WriteString(line)
 				}
-				if readErr != nil {
-					break
-				}
+				break
 			}
 
 			rotated, newF, newReader, err := reopenIfRotated(w.Path, f)
 			if err != nil {
-				// Transient stat errors (e.g. logrotate mid-swap) are not
-				// fatal; retry next tick rather than aborting the watcher.
+				if msg := err.Error(); msg != lastReopenErr {
+					slog.Warn("vsockwatch.audit.reopen_failed", "path", w.Path, "error", err)
+					lastReopenErr = msg
+				}
 				continue
+			}
+			if lastReopenErr != "" {
+				slog.Info("vsockwatch.audit.reopen_recovered", "path", w.Path)
+				lastReopenErr = ""
 			}
 			if rotated {
 				_ = f.Close()
 				f, reader = newF, newReader
+				// The old file is gone; any unterminated fragment from it
+				// will never be completed.
+				pending.Reset()
 			}
 		}
 	}

@@ -125,32 +125,55 @@ func cgroupSuffix(ev Event) string {
 	return ""
 }
 
+// uid resolves and caches the expected uid. The resolver call itself (real
+// impl: os/user.Lookup, which may be NSS/LDAP-backed and hence network-bound)
+// runs unlocked: a.mu is only held to read/write the cache, never across the
+// lookup itself. This Allowlist is shared between the auditd and eBPF
+// watcher goroutines (see cmd/cerberus-vsock-watch/main.go), so holding the
+// lock across a slow or hung lookup would delay classification of both
+// detectors' events for its duration. A cache miss may race a handful of
+// redundant concurrent lookups; that's cheaper than serializing I/O behind
+// the mutex.
 func (a *Allowlist) uid() (uint32, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.uidResolved && time.Since(a.uidAt) < a.cacheTTL {
-		return a.cachedUID, nil
+		cached := a.cachedUID
+		a.mu.Unlock()
+		return cached, nil
 	}
+	a.mu.Unlock()
+
 	uid, err := a.lookupUID(a.Username)
 	if err != nil {
 		return 0, err
 	}
+
+	a.mu.Lock()
 	a.cachedUID, a.uidResolved, a.uidAt = uid, true, time.Now()
+	a.mu.Unlock()
 	return uid, nil
 }
 
+// cgroupID resolves and caches the expected cgroup inode. See uid's doc
+// comment: the resolver call (os.Stat) runs unlocked for the same reason.
 func (a *Allowlist) cgroupID() (uint64, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.cgResolved && time.Since(a.cgAt) < a.cacheTTL {
-		return a.cachedCG, nil
+		cached := a.cachedCG
+		a.mu.Unlock()
+		return cached, nil
 	}
+	a.mu.Unlock()
+
 	path := a.CgroupRoot + "/system.slice/" + a.Unit
 	cg, err := a.statCgroupID(path)
 	if err != nil {
 		return 0, err
 	}
+
+	a.mu.Lock()
 	a.cachedCG, a.cgResolved, a.cgAt = cg, true, time.Now()
+	a.mu.Unlock()
 	return cg, nil
 }
 

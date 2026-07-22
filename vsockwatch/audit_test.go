@@ -183,6 +183,66 @@ func TestAuditWatcher_Run_AlertsOnAnomalousConnect(t *testing.T) {
 	}
 }
 
+func TestAuditWatcher_Run_LineSplitAcrossPollTicks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	shipper := &fakeShipper{}
+	allow := testAllowlist(999, nil, 0, errors.New("no cgroup"))
+	w := &AuditWatcher{
+		Path:         path,
+		PollInterval: 10 * time.Millisecond,
+		Allowlist:    allow,
+		Shipper:      shipper,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+	time.Sleep(30 * time.Millisecond)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	defer f.Close()
+
+	// Split the SYSCALL line mid-field (inside the pid value, before any
+	// space or '=' completes it) and let a poll tick observe it with no
+	// trailing newline yet, then append the rest. A tailer that treats the
+	// no-delimiter read as a complete line would record pid=6 (truncated)
+	// and lose uid/gid/comm/exe entirely, since the completing half doesn't
+	// start with "type=" and gets rejected as its own line.
+	first := `type=SYSCALL msg=audit(5.000:5): pid=6`
+	if _, err := f.WriteString(first); err != nil {
+		t.Fatalf("append first half: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond) // let a poll tick observe the partial line
+
+	rest := `66 uid=0 gid=0 comm="evil" exe="/tmp/evil"` + "\n" +
+		`type=SOCKADDR msg=audit(5.000:5): saddr=` + sockaddrVMHex(40, 5000, 16) + "\n"
+	if _, err := f.WriteString(rest); err != nil {
+		t.Fatalf("append rest: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for shipper.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if shipper.count() != 1 {
+		t.Fatalf("got %d alerts, want 1 (the split line must still be reassembled and classified)", shipper.count())
+	}
+	if shipper.alerts[0].PID != 666 {
+		t.Errorf("alert PID = %d, want 666 (line split across ticks must be reassembled, not truncated)", shipper.alerts[0].PID)
+	}
+	if shipper.alerts[0].Exe != "/tmp/evil" {
+		t.Errorf("alert exe = %q, want /tmp/evil (line split across ticks must be reassembled, not dropped)", shipper.alerts[0].Exe)
+	}
+}
+
 func TestAuditWatcher_Run_NoAlertForExpectedCaller(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")

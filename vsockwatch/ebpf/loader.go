@@ -103,8 +103,8 @@ func (w *Watcher) Run(ctx context.Context) error {
 	for {
 		record, err := reader.Read()
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
 			}
 			return fmt.Errorf("vsockwatch/ebpf: reading ring buffer: %w", err)
 		}
