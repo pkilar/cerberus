@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestNewAnomalyAlert(t *testing.T) {
@@ -108,5 +109,35 @@ func TestWebhookShipper_NonSuccessStatus(t *testing.T) {
 	shipper := WebhookShipper{URL: srv.URL}
 	if err := shipper.Ship(context.Background(), Alert{}); err == nil {
 		t.Fatal("expected an error for a 500 response")
+	}
+}
+
+// TestWebhookShipper_StalledServerDoesNotBlockForever verifies the default
+// client (Client left nil) is bounded by webhookTimeout: both detector loops
+// call Ship synchronously, so a webhook peer that accepts a connection but
+// never responds must not be able to block a detector from consuming any
+// further events indefinitely.
+func TestWebhookShipper_StalledServerDoesNotBlockForever(t *testing.T) {
+	orig := webhookTimeout
+	webhookTimeout = 50 * time.Millisecond
+	defer func() { webhookTimeout = orig }()
+
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never respond until the test unblocks it
+	}))
+	defer srv.Close()  // must run after close(block) below (LIFO) or Close hangs
+	defer close(block) // registered last -> runs first, unblocking the handler
+
+	shipper := WebhookShipper{URL: srv.URL}
+	start := time.Now()
+	err := shipper.Ship(context.Background(), Alert{Kind: KindVSockAnomaly})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from a webhook peer that never responds")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Ship took %v to return, want it bounded by webhookTimeout (~%v)", elapsed, webhookTimeout)
 	}
 }

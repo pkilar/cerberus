@@ -27,8 +27,11 @@ LimitNOFILE=65536
 # different uid than this service (allowlist.go's Event.Exe resolution) —
 # without it, readlink(/proc/<pid>/exe) for another user's process fails and
 # every event classifies as Indeterminate (fail-secure, but noisy).
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
+# CAP_AUDIT_CONTROL: run `auditctl -l` to verify the auditd rule is still
+# installed (tamper.go's AuditRulePresent) — without it every check errors
+# and the audit-rule-removal tamper alert can never fire.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL
 
 # Security hardening. NoNewPrivileges is intentionally NOT set: the ambient
 # capabilities above must survive exec, which NoNewPrivileges would strip.

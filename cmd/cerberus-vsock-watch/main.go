@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,14 +36,52 @@ import (
 // it, the other, deliberately independent detectors (see
 // docs/vsock-connect-detection.md §4.4). Without this, an unrecovered panic
 // anywhere in the call graph is indistinguishable, from the outside, from an
-// attacker successfully disabling every detector at once.
-func recoverDetector(name string) {
+// attacker successfully disabling every detector at once. onPanic, if
+// non-nil, runs after logging — auditd/eBPF pass a callback that marks the
+// detector down and checks whether every detector is now gone.
+func recoverDetector(name string, onPanic func()) {
 	if r := recover(); r != nil {
 		slog.Error("vsockwatch.detector.panic",
 			"detector", name,
 			"panic", fmt.Sprintf("%v", r),
 			"stack", string(debug.Stack()))
+		if onPanic != nil {
+			onPanic()
+		}
 	}
+}
+
+// detectorHealth tracks whether the two independent vsock-connect detectors
+// are still running. A process that keeps running (and heartbeating) after
+// every detector has stopped is providing no detection at all while
+// reporting itself healthy — see run()'s use of allDown to fail loudly
+// instead.
+type detectorHealth struct {
+	mu       sync.Mutex
+	auditd   bool
+	ebpf     bool
+	ebpfUsed bool // false when started with --disable-ebpf: eBPF was never a detector to lose.
+}
+
+func (h *detectorHealth) markAuditdDown() {
+	h.mu.Lock()
+	h.auditd = true
+	h.mu.Unlock()
+}
+
+func (h *detectorHealth) markEBPFDown() {
+	h.mu.Lock()
+	h.ebpf = true
+	h.mu.Unlock()
+}
+
+func (h *detectorHealth) allDown() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ebpfUsed {
+		return h.auditd && h.ebpf
+	}
+	return h.auditd
 }
 
 // Every flag below can also be set via the correspondingly-named
@@ -52,6 +91,10 @@ func recoverDetector(name string) {
 // same way cerberus-api.sysconfig / cerberus-signer.sysconfig do, without
 // editing ExecStart.
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	exePath := flag.String("exe-path", envDefault("CERBERUS_VSOCK_WATCH_EXE_PATH", "/usr/bin/ssh-cert-api"), "expected absolute path of the legitimate ssh-cert-api binary")
 	username := flag.String("username", envDefault("CERBERUS_VSOCK_WATCH_USERNAME", "cerberus"), "expected service account ssh-cert-api runs as")
 	unit := flag.String("unit", envDefault("CERBERUS_VSOCK_WATCH_UNIT", "cerberus-api.service"), "systemd unit whose cgroup ssh-cert-api runs under (best-effort check)")
@@ -70,13 +113,43 @@ func main() {
 		shippers = append(shippers, vsockwatch.WebhookShipper{URL: *webhookURL})
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	// A separately cancelable child of the signal context: fatalShutdown
+	// below triggers the same shutdown path a SIGTERM would, from inside a
+	// detector goroutine, once every detector has stopped.
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	slog.Info("vsockwatch.starting",
 		"exe_path", *exePath, "username", *username, "unit", *unit,
 		"audit_log", *auditLogPath, "webhook_configured", *webhookURL != "",
 		"heartbeat_configured", *heartbeatURL != "", "ebpf_enabled", !*disableEBPF)
+
+	health := &detectorHealth{ebpfUsed: !*disableEBPF}
+	exitCode := 0
+	var fatalOnce sync.Once
+
+	// fatalShutdown fires once every configured detector has stopped: this
+	// process would otherwise keep running — and keep heartbeating — while
+	// providing no detection at all, which is indistinguishable from an
+	// attacker having successfully blinded the system. Shipping the alert
+	// before cancel() gives it a chance to actually go out (bounded by
+	// WebhookShipper's client timeout) before shutdown proceeds; the
+	// packaged unit's Restart=on-failure brings the process back.
+	fatalShutdown := func() {
+		if ctx.Err() != nil || !health.allDown() {
+			return
+		}
+		fatalOnce.Do(func() {
+			slog.Error("vsockwatch.all_detectors_down",
+				"hint", "no vsock-connect detection remains active; exiting for the process supervisor to restart")
+			_ = shippers.Ship(context.Background(), vsockwatch.NewTamperAlert("",
+				"all configured vsock-connect detectors (auditd, eBPF) have stopped; no detection is active"))
+			exitCode = 1
+			cancel()
+		})
+	}
 
 	auditWatcher := &vsockwatch.AuditWatcher{
 		Path:      *auditLogPath,
@@ -84,30 +157,41 @@ func main() {
 		Shipper:   shippers,
 	}
 	go func() {
-		defer recoverDetector("auditd")
+		defer recoverDetector("auditd", func() {
+			health.markAuditdDown()
+			fatalShutdown()
+		})
 		if err := auditWatcher.Run(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.auditd.stopped", "error", err)
 		}
+		health.markAuditdDown()
+		fatalShutdown()
 	}()
 
 	// The eBPF detector runs independently: a failure to load/attach (e.g. an
 	// unsupported kernel, or missing privilege) is logged but does not stop
 	// the auditd detector — see vsockwatch/ebpf.Watcher.Run's doc comment on
-	// why this is surfaced as an error rather than a panic.
+	// why this is surfaced as an error rather than a panic. If auditd is (or
+	// later becomes) down too, fatalShutdown treats the pair as exhausted.
 	if !*disableEBPF {
 		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: shippers}
 		go func() {
-			defer recoverDetector("ebpf")
+			defer recoverDetector("ebpf", func() {
+				health.markEBPFDown()
+				fatalShutdown()
+			})
 			if err := ebpfWatcher.Run(ctx); err != nil && ctx.Err() == nil {
 				slog.Error("vsockwatch.ebpf.stopped", "error", err,
 					"hint", "the auditd detector is still running; see docs/vsock-connect-detection.md §7")
 			}
+			health.markEBPFDown()
+			fatalShutdown()
 		}()
 	}
 
 	tamperWatch := &vsockwatch.TamperWatch{Shipper: shippers, Interval: *tamperCheckInterval}
 	go func() {
-		defer recoverDetector("tamperwatch")
+		defer recoverDetector("tamperwatch", nil)
 		if err := tamperWatch.RunAuditRuleCheck(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.tamperwatch.stopped", "error", err)
 		}
@@ -116,7 +200,7 @@ func main() {
 	if *heartbeatURL != "" {
 		hb := &vsockwatch.Heartbeat{URL: *heartbeatURL, Interval: *heartbeatInterval}
 		go func() {
-			defer recoverDetector("heartbeat")
+			defer recoverDetector("heartbeat", nil)
 			err := hb.Run(ctx, func(err error) {
 				slog.Warn("vsockwatch.heartbeat.failed", "error", err)
 			})
@@ -128,6 +212,7 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("vsockwatch.shutting_down")
+	return exitCode
 }
 
 func envDefault(key, fallback string) string {

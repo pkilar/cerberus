@@ -140,6 +140,13 @@ type WebhookShipper struct {
 	Client *http.Client
 }
 
+// webhookTimeout bounds the default client's request when Client is nil. Both
+// detector loops call Ship synchronously for every alert-worthy event, so a
+// webhook peer that accepts a connection but never responds must not be able
+// to block a detector from consuming any further events indefinitely. A var,
+// not a const, so tests can shorten it rather than waiting out the default.
+var webhookTimeout = 10 * time.Second
+
 func (w WebhookShipper) Ship(ctx context.Context, a Alert) error {
 	if w.URL == "" {
 		return fmt.Errorf("vsockwatch: WebhookShipper has no URL configured")
@@ -156,7 +163,7 @@ func (w WebhookShipper) Ship(ctx context.Context, a Alert) error {
 
 	client := w.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: webhookTimeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
