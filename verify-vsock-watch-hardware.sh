@@ -77,6 +77,52 @@ unit_installed() {
     systemctl list-unit-files "$1" >/dev/null 2>&1 && systemctl list-unit-files "$1" | grep -q "$1"
 }
 
+# --- Item 0: is the installed binary actually built from this checkout? ---
+# This script never rebuilds or reinstalls cerberus-vsock-watch itself (only
+# cerberus-stress, as a disposable test client) -- it only drives whatever is
+# already installed. If you pulled a fix but didn't rebuild+reinstall the
+# package, the Go-code-dependent checks below (api-restart, in particular)
+# will keep failing identically, which looks exactly like "the fix didn't
+# work" even though it was never actually deployed. This is a heuristic
+# (binary mtime vs. latest relevant commit time), not a guarantee.
+check_deployment_freshness() {
+    echo
+    echo "=== 0. Confirm the installed cerberus-vsock-watch reflects this checkout ==="
+    if ! unit_installed cerberus-vsock-watch.service; then
+        print_skip "cerberus-vsock-watch.service not installed -- skipping"
+        record deployment_freshness SKIP
+        return 2
+    fi
+    if [ ! -x /usr/bin/cerberus-vsock-watch ]; then
+        print_warning "no binary at /usr/bin/cerberus-vsock-watch -- skipping freshness check"
+        record deployment_freshness SKIP
+        return 2
+    fi
+    if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        print_warning "not running from a git checkout -- can't compare against source; skipping freshness check"
+        record deployment_freshness SKIP
+        return 2
+    fi
+
+    local installed_mtime latest_commit_time
+    installed_mtime=$(stat -c %Y /usr/bin/cerberus-vsock-watch 2>/dev/null)
+    latest_commit_time=$(git log -1 --format=%ct -- vsockwatch cmd/cerberus-vsock-watch 2>/dev/null)
+    if [ -z "$installed_mtime" ] || [ -z "$latest_commit_time" ]; then
+        print_warning "could not compare binary mtime against the latest relevant commit -- skipping freshness check"
+        record deployment_freshness SKIP
+        return 2
+    fi
+
+    if [ "$installed_mtime" -lt "$latest_commit_time" ]; then
+        print_error "the installed /usr/bin/cerberus-vsock-watch ($(date -d "@$installed_mtime" '+%Y-%m-%d %H:%M:%S')) predates the latest commit touching vsockwatch/cmd/cerberus-vsock-watch ($(date -d "@$latest_commit_time" '+%Y-%m-%d %H:%M:%S'))"
+        print_error "rebuild and reinstall the package (or at least the binary + restart the service) before trusting api-restart's result -- an identical failure across re-runs usually means the fix was never actually deployed, not that it didn't work"
+        record deployment_freshness FAIL
+    else
+        print_status "installed binary is not older than the latest relevant commit (heuristic only, not a guarantee -- a rebuild with no source changes also passes this)"
+        record deployment_freshness PASS
+    fi
+}
+
 # --- Item 1: tracepoint format matches vsock_connect.c's assumptions ---
 check_tracepoint_format() {
     echo
@@ -287,7 +333,21 @@ check_tamper_alert() {
         print_status "tampering meta-alert fired after audit rule removal"
         record tamper_alert PASS
     else
-        print_error "no detector_tampering alert within 45s -- confirm CAP_AUDIT_CONTROL lets cerberus-audit run 'auditctl -l': try 'sudo -u cerberus-audit auditctl -l'"
+        print_error "no detector_tampering alert within 45s"
+        print_error "self-diagnosing: does cerberus-audit (the de-privileged service account) actually get to run auditctl -l?"
+        local cerberus_audit_out
+        if cerberus_audit_out=$(sudo -u cerberus-audit auditctl -l 2>&1); then
+            print_warning "sudo -u cerberus-audit auditctl -l succeeded (output: '${cerberus_audit_out:-<empty>}') -- CAP_AUDIT_CONTROL itself isn't the problem; check for a TamperWatch-specific issue instead (journalctl -u cerberus-vsock-watch --since '-1 minute')"
+        else
+            print_error "sudo -u cerberus-audit auditctl -l FAILED: ${cerberus_audit_out}"
+            local selinux_mode
+            selinux_mode=$(getenforce 2>/dev/null || echo "unknown (getenforce unavailable)")
+            print_error "SELinux mode: ${selinux_mode}"
+            if [ "$selinux_mode" = "Enforcing" ]; then
+                print_error "SELinux is enforcing and may be denying cerberus-audit's audit-control actions independently of the Linux capability grant -- check for AVC denials:"
+                (ausearch -m avc -ts recent 2>&1 || journalctl -k --since '-2 minutes' 2>&1 | grep -i avc) | tail -20
+            fi
+        fi
         record tamper_alert FAIL
     fi
 
@@ -418,9 +478,10 @@ print_summary() {
 
 usage() {
     cat <<'EOF'
-Usage: sudo ./verify-vsock-watch-hardware.sh [--yes] {all|tracepoint|ebpf|api-restart|tamper|block|notify}
+Usage: sudo ./verify-vsock-watch-hardware.sh [--yes] {all|freshness|tracepoint|ebpf|api-restart|tamper|block|notify}
 
   all           run every check in sequence (default if no argument given)
+  freshness     item 0: the installed binary isn't older than this checkout's latest relevant commit
   tracepoint    item 1: tracepoint format matches vsock_connect.c
   ebpf          items 2+3: BPF verifier acceptance + a real connect emits an event
   api-restart   item 4: cerberus-api restart does not cause a false positive
@@ -457,6 +518,7 @@ main() {
     for target in "${targets[@]}"; do
         case "$target" in
             all)
+                check_deployment_freshness
                 check_tracepoint_format
                 check_ebpf_live
                 check_api_restart_chaos
@@ -464,6 +526,7 @@ main() {
                 check_block_cap_kill
                 check_systemd_notify_ordering
                 ;;
+            freshness) check_deployment_freshness ;;
             tracepoint) check_tracepoint_format ;;
             ebpf) check_ebpf_live ;;
             api-restart) check_api_restart_chaos ;;

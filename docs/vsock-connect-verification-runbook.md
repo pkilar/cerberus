@@ -46,12 +46,36 @@ sudo ./verify-vsock-watch-hardware.sh --yes all
 Or run one check at a time while iterating:
 
 ```bash
+sudo ./verify-vsock-watch-hardware.sh --yes freshness
 sudo ./verify-vsock-watch-hardware.sh --yes tracepoint
 sudo ./verify-vsock-watch-hardware.sh --yes ebpf
 sudo ./verify-vsock-watch-hardware.sh --yes api-restart
 sudo ./verify-vsock-watch-hardware.sh --yes tamper
 sudo ./verify-vsock-watch-hardware.sh --yes block
 sudo ./verify-vsock-watch-hardware.sh --yes notify
+```
+
+## Redeploying after a code fix, before re-testing
+
+**This script never rebuilds or reinstalls `cerberus-vsock-watch` itself** — it only builds the disposable
+`cerberus-stress` test client, and otherwise drives whatever is already installed as
+`cerberus-vsock-watch.service`. If a fix landed in this repo (e.g. an `Allowlist.Classify` change) and you `git
+pull` the updated script but don't rebuild and reinstall the actual package, the running service is still the
+*old* binary — re-running the script will reproduce the exact same failure the fix was supposed to close, which
+looks identical to "the fix didn't work." The `freshness` check (item 0, included in `all`) catches this heuristically
+by comparing the installed binary's mtime against the latest commit touching `vsockwatch`/`cmd/cerberus-vsock-watch`
+— if it fails, redeploy before trusting anything else in the run.
+
+To redeploy after pulling a fix:
+
+```bash
+# Rebuild just the binary and restart the service in place (fastest iteration loop):
+go build -o /tmp/cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+sudo cp /tmp/cerberus-vsock-watch /usr/bin/cerberus-vsock-watch
+sudo systemctl restart cerberus-vsock-watch.service
+
+# Or rebuild and reinstall the actual package (matches how it'll really ship):
+# packaging/rpm/build-rpm.sh (see CLAUDE.md's Packaging section for the other formats)
 ```
 
 Each check prints `[PASS]`/`[FAIL]`/`[WARN]`/`[SKIP]` lines as it goes and a final summary table. A few steps
