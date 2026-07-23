@@ -1,9 +1,11 @@
 # VSOCK-Connect Detection Design
 
-> **Status:** Implemented (Option C — both detectors). Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
+> **Status:** Implemented (Option C — both detectors), plus an opt-in reactive-kill response (§4.5; default off).
+> Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
 > **Kind of control:** Detective, not preventive. See §7 for why no host-side control can fully prevent this.
-> **Code:** `vsockwatch/` (allowlist, alerting, auditd correlator, tamper watch, heartbeat) and
-> `vsockwatch/ebpf/` (the eBPF loader and probe), wired together in `cmd/cerberus-vsock-watch/main.go`.
+> The opt-in reactive kill in §4.5 is a mitigation response, not prevention either — see that section.
+> **Code:** `vsockwatch/` (allowlist, alerting, auditd correlator, tamper watch, heartbeat, reactive-kill blocker)
+> and `vsockwatch/ebpf/` (the eBPF loader and probe), wired together in `cmd/cerberus-vsock-watch/main.go`.
 > Packaged as `cerberus-vsock-watch` (RPM/deb/Arch — see `packaging/`).
 >
 > **Read before deploying:** the eBPF probe (`vsockwatch/ebpf/src/vsock_connect.c`) was written, compiled, and
@@ -45,7 +47,8 @@ This design adds a **detective** control: alert, in near-real-time, whenever a p
 
 **Non-goals**
 - Not a prevention barrier. A sufficiently patient root attacker can eventually disable any host-side agent —
-  see §7 for the honest accounting of that limit, in the same spirit as the existing `KMS-1` writeup.
+  see §7 for the honest accounting of that limit, in the same spirit as the existing `KMS-1` writeup. (An opt-in
+  reactive-kill response exists — §4.5 — but it is a mitigation, not prevention: see that section for why.)
 - Does not replace or interact with Casbin/rate-limiting (different layer).
 - Does not decode the *contents* of a rogue request (i.e., which principals it asked for). That would require
   either enclave-side logging changes or a payload-capture layer — out of scope here, noted in §8.
@@ -164,6 +167,40 @@ An opportunistic or semi-automated attacker (a compromised dependency, an SSRF-t
 to know to disable a bespoke, non-obvious watcher than to just run their exploit — so this meaningfully raises
 the bar even though it cannot stop a fully-informed, patient human attacker.
 
+### 4.5 Reactive blocking (opt-in, default off)
+
+`CERBERUS_VSOCK_WATCH_BLOCK=true` (or `--block`) turns on a best-effort mitigation: on a confirmed `Anomalous`
+classification (`vsockwatch/block.go`'s `ProcessKiller`), the watcher sends `SIGKILL` to the offending PID. This
+is deliberately **not** the same thing as prevention:
+
+- Neither detector can block the `connect()` itself. The auditd path only sees the syscall after auditd has
+  already logged it; the eBPF path is attached to the `sys_enter_connect` **tracepoint**, which has no return
+  value the kernel acts on to deny a syscall. By the time either detector's userspace consumer classifies the
+  event and a `Blocker` runs, the `connect()` — and any `EnclaveSigningRequest` the offending process already
+  sent to the enclave over it — may have already completed.
+- Its actual value is cutting off a persistent attacker's ability to *retry* (e.g. a shell loop dialing the
+  enclave repeatedly), not stopping the first attempt.
+- Only `Verdict.Anomalous` triggers a kill — never `Verdict.Indeterminate`. Indeterminate means the allowlist
+  itself couldn't be resolved (e.g. a transient uid-lookup failure against NSS/LDAP), which says nothing about
+  whether the *connecting* process's identity actually mismatches. Treating Indeterminate as block-worthy would
+  risk `SIGKILL`-ing the legitimate `ssh-cert-api` process on a transient hiccup — a materially worse outcome
+  than the noisy-but-safe alert Indeterminate already produces. (See `Verdict.Blockworthy()` in `event.go`.)
+- PID reuse between observation and the kill is a known, small residual risk (Linux avoids fast PID reuse but
+  doesn't guarantee it), inherent to any PID-based response.
+- Requires `CAP_KILL` (packaged unconditionally in `cerberus-vsock-watch.service`, alongside the other
+  capabilities in §4.3) since `cerberus-audit` runs as a different account than the process being killed.
+- Wired independently into both detectors (`AuditWatcher.Blocker`, `ebpf.Watcher.Blocker`) so either one can
+  trigger it; a real connect is expected to be observed by both, making a redundant, harmless second `SIGKILL`
+  to an already-dead PID the common case rather than the exception.
+
+**Not attempted here — true kernel-level prevention.** Actually denying a non-allowlisted `connect()` before it
+succeeds would require a BPF program attached to the `security_socket_connect` **LSM** hook (not a tracepoint),
+which can return a nonzero value the kernel treats as a deny. That's a materially larger and riskier change: it
+needs `CONFIG_BPF_LSM=y` and `bpf` in the kernel's `lsm=` boot parameter, a new `CAP_MAC_ADMIN` grant, and — like
+the existing tracepoint probe (see this doc's top-of-file status note) — cannot be load-tested in this sandbox;
+a bug in an LSM hook has a much larger blast radius than a bug here, since it can block *all* `connect()` calls
+on the host, not just fail to alert on one. Tracked as a follow-up in §8, not built as part of this change.
+
 ## 5. False-positive inventory
 
 Every legitimate call site that reaches `CID 16, port 5000` today, all from the same exe/uid/cgroup so the
@@ -246,3 +283,9 @@ PCR0-measured image) — a materially larger project, tracked separately.
   system already watching `/health` behind the LB, but that's a separate piece of infrastructure to stand up.
 - Enclave-side authorization (the actual fix for `SIGN-1`, not just detection of its exploitation) is tracked as
   a separate, larger design.
+- True kernel-level prevention (§4.5): an LSM BPF hook on `security_socket_connect` that actually denies a
+  non-allowlisted connect before it succeeds, rather than reacting after the fact. Requires `CONFIG_BPF_LSM`, a
+  new `CAP_MAC_ADMIN` grant, a new BPF program (this package's tracepoint object can't be reused — LSM programs
+  attach differently and have stricter verifier constraints), and real-hardware load-testing this sandbox can't
+  provide. Turns this control from detective into (also) preventive, which would also need updates to
+  `docs/THREAT-MODEL.md`'s `SIGN-1` writeup. Tracked separately, not built as part of this change.

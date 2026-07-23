@@ -135,6 +135,26 @@ func (f *fakeShipper) count() int {
 	return len(f.alerts)
 }
 
+// fakeBlocker records every Event it's asked to block, safe for concurrent use.
+type fakeBlocker struct {
+	mu     sync.Mutex
+	events []Event
+	err    error
+}
+
+func (f *fakeBlocker) Block(_ context.Context, ev Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, ev)
+	return f.err
+}
+
+func (f *fakeBlocker) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.events)
+}
+
 func TestAuditWatcher_Run_AlertsOnAnomalousConnect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
@@ -279,5 +299,103 @@ func TestAuditWatcher_Run_NoAlertForExpectedCaller(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if shipper.count() != 0 {
 		t.Fatalf("got %d alerts, want 0 for the expected caller", shipper.count())
+	}
+}
+
+func TestAuditWatcher_Run_BlocksOnAnomalousConnect(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	shipper := &fakeShipper{}
+	blocker := &fakeBlocker{}
+	allow := testAllowlist(999, nil, 0, errors.New("no cgroup"))
+	w := &AuditWatcher{
+		Path:         path,
+		PollInterval: 10 * time.Millisecond,
+		Allowlist:    allow,
+		Shipper:      shipper,
+		Blocker:      blocker,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+	time.Sleep(30 * time.Millisecond)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	lines := "" +
+		`type=SYSCALL msg=audit(6.000:6): pid=777 uid=0 gid=0 comm="evil" exe="/tmp/evil"` + "\n" +
+		`type=SOCKADDR msg=audit(6.000:6): saddr=` + sockaddrVMHex(40, 5000, 16) + "\n"
+	if _, err := f.WriteString(lines); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	f.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for blocker.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if blocker.count() != 1 {
+		t.Fatalf("got %d Block calls, want 1 for an Anomalous classification", blocker.count())
+	}
+	if blocker.events[0].PID != 777 {
+		t.Errorf("blocked pid = %d, want 777", blocker.events[0].PID)
+	}
+}
+
+func TestAuditWatcher_Run_DoesNotBlockOnIndeterminate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	shipper := &fakeShipper{}
+	blocker := &fakeBlocker{}
+	allow := testAllowlist(999, nil, 0, errors.New("no cgroup"))
+	w := &AuditWatcher{
+		Path:         path,
+		PollInterval: 10 * time.Millisecond,
+		Allowlist:    allow,
+		Shipper:      shipper,
+		Blocker:      blocker,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+	time.Sleep(30 * time.Millisecond)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	// No exe= field at all -> Classify sees ev.Exe == "" -> Indeterminate,
+	// which must still alert but must never block (Verdict.Blockworthy's doc
+	// comment: an unresolvable allowlist says nothing about ev's own
+	// identity, so blocking here risks killing the legitimate process).
+	lines := "" +
+		`type=SYSCALL msg=audit(7.000:7): pid=888 uid=0 gid=0 comm="evil"` + "\n" +
+		`type=SOCKADDR msg=audit(7.000:7): saddr=` + sockaddrVMHex(40, 5000, 16) + "\n"
+	if _, err := f.WriteString(lines); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	f.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for shipper.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if shipper.count() != 1 {
+		t.Fatalf("got %d alerts, want 1 (Indeterminate must still alert)", shipper.count())
+	}
+	if blocker.count() != 0 {
+		t.Fatalf("got %d Block calls, want 0 (Indeterminate must never block)", blocker.count())
 	}
 }

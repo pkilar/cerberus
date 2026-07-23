@@ -41,8 +41,15 @@ LimitNOFILE=65536
 #     (cilium/ebpf's link.Tracepoint).
 # Note CAP_SYS_ADMIN does NOT bypass DAC; without CAP_DAC_READ_SEARCH both
 # detectors die at startup with EACCES and the process exits (all detectors down).
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH
+# CAP_KILL: send SIGKILL to the offending process when the opt-in reactive
+# block (CERBERUS_VSOCK_WATCH_BLOCK=true, docs/vsock-connect-detection.md
+# §4.5) fires. Needed because cerberus-audit runs as a different account than
+# the process being killed (see the User=/Group= note above). Granted
+# unconditionally since blocking defaults to off and is toggled at runtime,
+# not at install time — matching how CAP_BPF/CAP_PERFMON are granted even
+# though --disable-ebpf can turn off eBPF.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
 
 # Security hardening. NoNewPrivileges is intentionally NOT set: the ambient
 # capabilities above must survive exec, which NoNewPrivileges would strip.

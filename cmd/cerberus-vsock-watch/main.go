@@ -105,6 +105,7 @@ func run() int {
 	heartbeatInterval := flag.Duration("heartbeat-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_HEARTBEAT_INTERVAL", 60*time.Second), "how often to ping heartbeat-url")
 	tamperCheckInterval := flag.Duration("tamper-check-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL", 30*time.Second), "how often to verify the auditd rule is still installed")
 	disableEBPF := flag.Bool("disable-ebpf", envBoolDefault("CERBERUS_VSOCK_WATCH_DISABLE_EBPF", false), "run only the auditd detector (for hosts where the eBPF probe can't load — see docs/vsock-connect-detection.md §7)")
+	block := flag.Bool("block", envBoolDefault("CERBERUS_VSOCK_WATCH_BLOCK", false), "opt-in: best-effort SIGKILL the offending process on a confirmed Anomalous classification (NOT true prevention — see docs/vsock-connect-detection.md §4.5/§7; requires CAP_KILL)")
 	flag.Parse()
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
@@ -131,7 +132,17 @@ func run() int {
 	slog.Info("vsockwatch.starting",
 		"exe_path", *exePath, "username", *username, "unit", *unit,
 		"audit_log", *auditLogPath, "webhook_configured", *webhookURL != "",
-		"heartbeat_configured", *heartbeatURL != "", "ebpf_enabled", !*disableEBPF)
+		"heartbeat_configured", *heartbeatURL != "", "ebpf_enabled", !*disableEBPF,
+		"block_enabled", *block)
+
+	// blocker stays nil (the interface zero value) when --block is unset, so
+	// AuditWatcher/ebpf.Watcher's "if w.Blocker != nil" checks disable the
+	// reactive-kill response by default. See docs/vsock-connect-detection.md
+	// §4.5 for why this is opt-in and not true prevention.
+	var blocker vsockwatch.Blocker
+	if *block {
+		blocker = vsockwatch.ProcessKiller{}
+	}
 
 	health := &detectorHealth{ebpfUsed: !*disableEBPF}
 	exitCode := 0
@@ -166,6 +177,7 @@ func run() int {
 		Path:      *auditLogPath,
 		Allowlist: allow,
 		Shipper:   shippers,
+		Blocker:   blocker,
 	}
 	go func() {
 		defer recoverDetector("auditd", func() {
@@ -185,7 +197,7 @@ func run() int {
 	// why this is surfaced as an error rather than a panic. If auditd is (or
 	// later becomes) down too, fatalShutdown treats the pair as exhausted.
 	if !*disableEBPF {
-		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: shippers}
+		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: shippers, Blocker: blocker}
 		go func() {
 			defer recoverDetector("ebpf", func() {
 				health.markEBPFDown()

@@ -2,10 +2,14 @@ package ebpf
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	cilium "github.com/cilium/ebpf"
+
+	"github.com/pkilar/cerberus/vsockwatch"
 )
 
 // TestEmbeddedObject_ParsesAsValidELF verifies the embedded vsock_connect.bpf.o
@@ -115,5 +119,61 @@ func TestDecodeEvent_MatchesCStructLayout(t *testing.T) {
 func TestDecodeEvent_RejectsShortRecord(t *testing.T) {
 	if _, err := decodeEvent(make([]byte, eventSize-1)); err == nil {
 		t.Fatal("expected an error for a too-short record")
+	}
+}
+
+// fakeBlocker records every Event it's asked to block, safe for concurrent use.
+type fakeBlocker struct {
+	mu     sync.Mutex
+	events []vsockwatch.Event
+}
+
+func (f *fakeBlocker) Block(_ context.Context, ev vsockwatch.Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, ev)
+	return nil
+}
+
+func (f *fakeBlocker) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.events)
+}
+
+// TestDecodeEvent_BlockworthyWiring is a narrow unit check that decodeEvent's
+// output, when classified Anomalous, is exactly what Watcher.Run would pass
+// to a configured Blocker — Run itself requires a live kernel to exercise
+// end-to-end (see this file's and loader.go's doc comments on what this
+// sandbox cannot verify), so this only confirms the decoded Event carries the
+// PID a Blocker needs.
+func TestDecodeEvent_BlockworthyWiring(t *testing.T) {
+	origResolveExe := resolveExe
+	resolveExe = func(uint32) (string, error) { return "/tmp/evil", nil }
+	t.Cleanup(func() { resolveExe = origResolveExe })
+
+	raw := make([]byte, eventSize)
+	binary.NativeEndian.PutUint32(raw[4:8], 4242) // tgid / userspace pid
+	binary.NativeEndian.PutUint32(raw[8:12], 0)   // uid
+	copy(raw[24:40], "evil\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+
+	ev, err := decodeEvent(raw)
+	if err != nil {
+		t.Fatalf("decodeEvent: %v", err)
+	}
+
+	allow := &vsockwatch.Allowlist{ExePath: "/usr/bin/ssh-cert-api"}
+	blocker := &fakeBlocker{}
+	w := &Watcher{Allowlist: allow, Blocker: blocker}
+
+	cls := w.Allowlist.Classify(ev)
+	if !cls.Verdict.Blockworthy() {
+		t.Fatalf("Verdict = %v, want Anomalous (Blockworthy) for a mismatched exe", cls.Verdict)
+	}
+	if err := w.Blocker.Block(context.Background(), ev); err != nil {
+		t.Fatalf("Block: %v", err)
+	}
+	if blocker.count() != 1 || blocker.events[0].PID != 4242 {
+		t.Fatalf("blocker recorded %+v, want one event with PID 4242", blocker.events)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 
 	"context"
+	"log/slog"
 
 	"github.com/pkilar/cerberus/vsockwatch"
 )
@@ -44,6 +45,10 @@ const eventSize = 40
 type Watcher struct {
 	Allowlist *vsockwatch.Allowlist
 	Shipper   vsockwatch.Shipper
+	// Blocker, if set, is invoked for Verdict.Blockworthy() events (the
+	// opt-in reactive-kill response; see vsockwatch/block.go). Nil disables
+	// blocking, the default.
+	Blocker vsockwatch.Blocker
 }
 
 // Run loads and attaches the program, then blocks reading ring buffer events
@@ -122,6 +127,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 		if w.Shipper != nil {
 			_ = w.Shipper.Ship(ctx, vsockwatch.NewAnomalyAlert(ev, cls))
+		}
+		if w.Blocker != nil && cls.Verdict.Blockworthy() {
+			if err := w.Blocker.Block(ctx, ev); err != nil {
+				slog.Warn("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
+			} else {
+				slog.Warn("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
+			}
 		}
 	}
 }

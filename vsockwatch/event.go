@@ -75,3 +75,13 @@ func (v Verdict) String() string {
 // Alertworthy reports whether v should trigger an alert (everything except a
 // confirmed match against the allowlist).
 func (v Verdict) Alertworthy() bool { return v != Expected }
+
+// Blockworthy reports whether v should trigger the opt-in reactive-kill
+// response (see block.go). Deliberately narrower than Alertworthy:
+// Indeterminate means the allowlist itself could not be resolved (e.g. a
+// transient uid-lookup failure) — it says nothing about whether ev's own
+// identity actually mismatches. Treating Indeterminate as block-worthy would
+// risk killing the legitimate ssh-cert-api process on a transient hiccup, a
+// materially worse outcome than the noisy-but-safe alert Indeterminate
+// already produces. Only a confirmed Anomalous classification blocks.
+func (v Verdict) Blockworthy() bool { return v == Anomalous }

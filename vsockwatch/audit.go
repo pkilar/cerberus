@@ -234,6 +234,10 @@ type AuditWatcher struct {
 	PollInterval time.Duration
 	Allowlist    *Allowlist
 	Shipper      Shipper
+	// Blocker, if set, is invoked for Verdict.Blockworthy() events (the
+	// opt-in reactive-kill response; see block.go). Nil disables blocking,
+	// the default.
+	Blocker Blocker
 }
 
 // Run tails Path from EOF (not from the beginning of an existing file — we
@@ -332,6 +336,13 @@ func (w *AuditWatcher) handleLine(ctx context.Context, corr *correlator, line st
 	}
 	if w.Shipper != nil {
 		_ = w.Shipper.Ship(ctx, NewAnomalyAlert(ev, cls))
+	}
+	if w.Blocker != nil && cls.Verdict.Blockworthy() {
+		if err := w.Blocker.Block(ctx, ev); err != nil {
+			slog.Warn("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
+		} else {
+			slog.Warn("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
+		}
 	}
 }
 
