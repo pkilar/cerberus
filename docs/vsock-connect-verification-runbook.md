@@ -57,29 +57,33 @@ sudo ./verify-vsock-watch-hardware.sh --yes notify
 
 ## Redeploying after a code fix, before re-testing
 
-**This script never rebuilds or reinstalls `cerberus-vsock-watch` itself** — it only builds the disposable
-`cerberus-stress` test client, and otherwise drives whatever is already installed as
-`cerberus-vsock-watch.service`. If a fix landed in this repo (e.g. an `Allowlist.Classify` change) and you `git
-pull` the updated script but don't rebuild and reinstall the actual package, the running service is still the
-*old* binary — re-running the script will reproduce the exact same failure the fix was supposed to close, which
-looks identical to "the fix didn't work." The `freshness` check (item 0, included in `all`) catches this heuristically
-by comparing the installed binary's mtime against the latest commit touching `vsockwatch`/`cmd/cerberus-vsock-watch`
-— if it fails, redeploy before trusting anything else in the run.
+**This script never rebuilds or reinstalls `cerberus-vsock-watch`/`ssh-cert-api` itself** — it only builds the
+disposable `cerberus-stress` test client, and otherwise drives whatever is already installed as
+`cerberus-vsock-watch.service`/`cerberus-api.service`. If a fix landed in this repo (e.g. an `Allowlist.Classify`
+change) and you `git pull` the updated script but don't rebuild and reinstall the actual package, the running
+service is still the *old* binary — re-running the script will reproduce the exact same failure the fix was
+supposed to close, which looks identical to "the fix didn't work." The `freshness` check (item 0, included in
+`all`) catches this by running `-V` on every installed cerberus binary (`cerberus-vsock-watch`, `ssh-cert-api`,
+and `ssh-cert-signer` if present on this host) and comparing the reported version against this checkout's
+top-level `VERSION` file — an exact match/mismatch, not a timestamp heuristic. If it fails, redeploy before
+trusting anything else in the run.
 
-**Why this heuristic works even though file timestamps on an RPM install look "wrong"**: if you `rpm -qi` or
-`stat` files from a packaged install (as opposed to the `go build`+`cp` fast path above) and notice every file
-dated to the spec's `%changelog` entry rather than "whenever the build actually ran" — that's expected, not a bug
-(see the comment above `git archive` in `packaging/rpm/build-rpm.sh` for the full mechanism: Fedora/RHEL's
-reproducible-builds tooling clamps installed file mtimes to a `SOURCE_DATE_EPOCH` derived from that changelog
-date). This actually makes the `freshness` heuristic *more* reliable on an RPM install, not less — both sides of
-the comparison end up anchored to source-derived timestamps rather than wall-clock build time.
+Every binary's `-V` output is stamped at build time from `VERSION` via `-ldflags -X` (see `version/version.go`
+and each Makefile/packaging build step) — so a mismatch means precisely what it says: the installed binary was
+built from a different `VERSION` than the checkout you're running the script from. This also sidesteps the file
+timestamp weirdness you'll see on an RPM install (see the comment above `git archive` in
+`packaging/rpm/build-rpm.sh`: Fedora/RHEL's reproducible-builds tooling clamps installed file mtimes to a
+`SOURCE_DATE_EPOCH` derived from the spec's `%changelog` date) — version strings don't have that problem.
 
 To redeploy after pulling a fix:
 
 ```bash
-# Rebuild just the binary and restart the service in place (fastest iteration loop):
-go build -o /tmp/cerberus-vsock-watch ./cmd/cerberus-vsock-watch
-sudo cp /tmp/cerberus-vsock-watch /usr/bin/cerberus-vsock-watch
+# Rebuild just the binary and restart the service in place (fastest iteration loop).
+# Use `make vsock-watch` (not a bare `go build`), which stamps VERSION into the
+# binary via -ldflags -X -- a bare `go build` reports "dev" and will fail the
+# `freshness` check even though the fix is genuinely deployed.
+make vsock-watch
+sudo cp bin/cerberus-vsock-watch /usr/bin/cerberus-vsock-watch
 sudo systemctl restart cerberus-vsock-watch.service
 
 # Or rebuild and reinstall the actual package (matches how it'll really ship):
