@@ -3,6 +3,7 @@ package vsockwatch
 import (
 	"context"
 	"fmt"
+	"math"
 	"syscall"
 )
 
@@ -44,6 +45,18 @@ var killProcess = func(pid int, sig syscall.Signal) error {
 // docs/vsock-connect-detection.md §4.3).
 type ProcessKiller struct{}
 
+// maxKillablePID bounds ev.PID before it is narrowed to int for killProcess.
+// Linux's own pid_max tops out at 4,194,304 (2^22) even on its most
+// permissive configuration, so any value anywhere near this bound is already
+// not a real PID — but the check exists for the conversion itself, not just
+// plausibility: int is 32 bits on a 32-bit build, and POSIX kill(2) treats a
+// *negative* pid as "send to that process group" instead of one process. An
+// unchecked uint32-to-int conversion could turn a corrupted or wildly wrong
+// PID into a negative int on such a build, silently escalating a targeted
+// kill into a process-group-wide one. Capped at math.MaxInt32 so the
+// conversion is provably safe on both 32- and 64-bit int.
+const maxKillablePID = math.MaxInt32
+
 // Block sends SIGKILL to ev.PID. PID reuse between observation and this call
 // is a known, small residual risk: Linux avoids fast PID reuse but does not
 // guarantee it never happens. Event.PID's doc comment already establishes
@@ -53,6 +66,9 @@ type ProcessKiller struct{}
 func (ProcessKiller) Block(_ context.Context, ev Event) error {
 	if ev.PID == 0 {
 		return fmt.Errorf("vsockwatch: refusing to block: event has no pid")
+	}
+	if ev.PID > maxKillablePID {
+		return fmt.Errorf("vsockwatch: refusing to block: pid %d exceeds a valid process id", ev.PID)
 	}
 	if err := killProcess(int(ev.PID), syscall.SIGKILL); err != nil {
 		return fmt.Errorf("vsockwatch: killing pid %d: %w", ev.PID, err)
