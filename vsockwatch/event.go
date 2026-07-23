@@ -52,10 +52,14 @@ const (
 	Expected Verdict = iota
 	// Anomalous: the event does NOT match — an alert-worthy connection.
 	Anomalous
-	// Indeterminate: the allowlist itself could not be resolved (e.g. the
-	// expected service unit isn't running, or /proc/<pid>/exe already
-	// vanished). Fail-secure: treated as alert-worthy, same severity as
-	// Anomalous, rather than silently passed through. See Allowlist.Classify.
+	// Indeterminate: either the allowlist itself could not be resolved (e.g.
+	// the expected service unit isn't running, or /proc/<pid>/exe already
+	// vanished), or exe/uid matched but cgroup didn't even after a fresh
+	// recheck (which can happen across a legitimate cerberus-api.service
+	// restart, racing systemd's own cgroup settling — see Allowlist.Classify).
+	// Fail-secure: treated as alert-worthy, same severity as Anomalous,
+	// rather than silently passed through — but see Blockworthy for why it's
+	// deliberately not treated the same as Anomalous everywhere.
 	Indeterminate
 )
 
@@ -78,10 +82,14 @@ func (v Verdict) Alertworthy() bool { return v != Expected }
 
 // Blockworthy reports whether v should trigger the opt-in reactive-kill
 // response (see block.go). Deliberately narrower than Alertworthy:
-// Indeterminate means the allowlist itself could not be resolved (e.g. a
-// transient uid-lookup failure) — it says nothing about whether ev's own
-// identity actually mismatches. Treating Indeterminate as block-worthy would
-// risk killing the legitimate ssh-cert-api process on a transient hiccup, a
-// materially worse outcome than the noisy-but-safe alert Indeterminate
-// already produces. Only a confirmed Anomalous classification blocks.
+// Indeterminate covers two cases where the evidence doesn't clearly
+// implicate ev's own identity — the allowlist itself being unresolvable
+// (e.g. a transient uid-lookup failure), and exe/uid already matching while
+// only cgroup disagrees (which can happen on a legitimate cerberus-api
+// restart racing systemd's cgroup settling, not just an attacker). Treating
+// Indeterminate as block-worthy would risk killing the legitimate
+// ssh-cert-api process on either kind of false positive, a materially worse
+// outcome than the noisy-but-safe alert Indeterminate already produces.
+// Only a confirmed Anomalous classification (wrong exe, or wrong uid even
+// after a fresh recheck) blocks.
 func (v Verdict) Blockworthy() bool { return v == Anomalous }

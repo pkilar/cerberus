@@ -1,3 +1,18 @@
+cerberus (0.10.3) unstable; urgency=medium
+
+  * Fix a second round of a real false-positive in cerberus-vsock-watch,
+    found via a second real cerberus-api.service restart chaos test on a
+    real RHEL 10 host: 0.10.2's uncached recheck reduced but did not
+    fully close a cgroup-mismatch false positive, since a single
+    immediate recheck can still race systemd's own cgroup settling
+    during a restart. Allowlist.Classify now downgrades a cgroup
+    mismatch that survives the recheck to Indeterminate (alerts, never
+    auto-kills) instead of trying to outrun the timing race. Applies to
+    this Debian package the same as RPM and Arch. See
+    docs/vsock-connect-detection.md §4.1.
+
+ -- Paul Kilar <pkilar@gmail.com>  Thu, 23 Jul 2026 16:00:00 -0400
+
 cerberus (0.10.2) unstable; urgency=medium
 
   * Fix a real false-positive in cerberus-vsock-watch found via a live

@@ -84,13 +84,21 @@ func TestClassify_UIDLookupFails_Indeterminate(t *testing.T) {
 	}
 }
 
-func TestClassify_CgroupMismatch_Anomalous(t *testing.T) {
+func TestClassify_CgroupMismatch_Indeterminate(t *testing.T) {
+	// exe and uid already matched, so a cgroup mismatch that persists even
+	// after a fresh recheck (same resolver both times, so this isn't just a
+	// stale cache) is Indeterminate, not Anomalous -- alert-worthy but never
+	// Blockworthy, since even a fresh recheck can race systemd's own cgroup
+	// settling around a legitimate restart (see Classify's doc comment).
 	a := testAllowlist(999, nil, 777, nil)
 	ev := baseEvent()
-	ev.CgroupID = 111 // does not match the resolved 777, even after a fresh re-check (same resolver)
+	ev.CgroupID = 111 // does not match the resolved 777, even after a fresh re-check
 	cls := a.Classify(ev)
-	if cls.Verdict != Anomalous {
-		t.Fatalf("Verdict = %v, want Anomalous (cgroup mismatch)", cls.Verdict)
+	if cls.Verdict != Indeterminate {
+		t.Fatalf("Verdict = %v, want Indeterminate (cgroup mismatch persists after revalidation)", cls.Verdict)
+	}
+	if cls.Verdict.Blockworthy() {
+		t.Error("Indeterminate must never be Blockworthy -- a cgroup-settling race must not let --block kill a legitimate process")
 	}
 }
 

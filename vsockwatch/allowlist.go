@@ -119,21 +119,31 @@ func (a *Allowlist) Classify(ev Event) Classification {
 		cg, err := a.cgroupID()
 		if err == nil && cg != 0 && ev.CgroupID != cg {
 			// The cached expected cgroup may be stale: systemd can
-			// rmdir+recreate a unit's cgroup across a restart (e.g. once it
-			// briefly becomes empty between stop and start), which changes
-			// the inode. Without a fresh re-check here, every vsock connect
-			// from the just-restarted, perfectly legitimate ssh-cert-api
-			// process is misclassified Anomalous -- and, with --block
-			// enabled, killed outright -- for up to cacheTTL after every
-			// single restart, purely from cache timing rather than any real
-			// mismatch. Confirmed against a real cerberus-api.service
-			// restart via verify-vsock-watch-hardware.sh's api-restart
-			// chaos test. A genuinely wrong cgroup still mismatches on the
-			// fresh lookup, so this doesn't weaken the actual check.
+			// rmdir+recreate a unit's cgroup across a restart, which changes
+			// the inode. A fresh, uncached re-check resolves the common case
+			// (the cache was simply a few seconds old).
 			fresh, ferr := a.refreshCgroupID()
-			if ferr != nil || fresh == 0 || ev.CgroupID != fresh {
-				return Classification{Verdict: Anomalous, Reason: fmt.Sprintf("cgroup id %d != expected %d (%s)", ev.CgroupID, cg, a.Unit)}
+			if ferr == nil && fresh != 0 && ev.CgroupID == fresh {
+				return Classification{Verdict: Expected, Reason: "matches exe/uid/cgroup"}
 			}
+			// Even a fresh recheck can still race systemd's own cgroup
+			// settling: on a real cerberus-api.service restart (confirmed
+			// via verify-vsock-watch-hardware.sh's api-restart chaos test),
+			// the kernel can assign the new process to its new cgroup before
+			// the well-known system.slice/<unit> path stat()s to that same
+			// inode -- a single immediate recheck isn't guaranteed to win
+			// that race, and retrying with a sleep here would block the hot
+			// classification path for every event (the same problem
+			// AsyncShipper exists to avoid on the delivery side). exe and
+			// uid already matched by this point, so this is not "any random
+			// process" -- Indeterminate still alerts at the same critical
+			// severity as Anomalous, but is deliberately never Blockworthy
+			// (see that method), so --block cannot SIGKILL the legitimate,
+			// freshly-restarted ssh-cert-api over a cgroup-settling false
+			// positive. A genuine attacker satisfying this narrower bar
+			// (same exe, same uid, wrong cgroup) is still loudly alerted on
+			// every time, just not auto-killed by this signal alone.
+			return Classification{Verdict: Indeterminate, Reason: fmt.Sprintf("cgroup id %d != expected %d (%s)", ev.CgroupID, cg, a.Unit)}
 		}
 	}
 

@@ -150,3 +150,15 @@ host/kernel version they were verified against).
 - **`block` failed on a script bug, not a real problem**: the check compared `systemctl show`'s `AmbientCapabilities`
   output against uppercase `CAP_KILL`, but systemd renders capability names lowercase (`cap_kill`) in that
   output — the capability was actually present the whole time. Fixed to match case-insensitively.
+
+**RHEL 10, 2026-07-23 (re-run, same host)** — confirmed `tamper` and `block` both genuinely pass now (0.10.2's
+fixes were correct). `api-restart` still failed, but with only **one** false-positive alert instead of four —
+progress, not a full fix:
+
+- The round-1 "uncached recheck" fix (0.10.2) helped but didn't fully close the gap: a single immediate recheck
+  isn't guaranteed to win the race against systemd's own cgroup settling during a restart — the kernel can place
+  the new process into its new cgroup before the well-known `system.slice/<unit>` path `stat()`s to that same
+  inode. Fixed (0.10.3) by downgrading a cgroup mismatch that survives the recheck to `Indeterminate` (alerts,
+  never auto-kills) instead of trying to outrun the timing race with retries/sleeps in the hot classification
+  path. See `docs/vsock-connect-detection.md` §4.1. **Needs a third re-run to confirm** — if you're seeing
+  `api-restart` fail, check your build includes this fix (0.10.3+) before re-reporting it as a new issue.

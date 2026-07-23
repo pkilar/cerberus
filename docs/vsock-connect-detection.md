@@ -124,10 +124,26 @@ may `rmdir`+recreate a unit's cgroup once it briefly becomes empty between stop 
 inode — so the cache can be stale for up to `DefaultCacheTTL` immediately after a legitimate restart. Rather than
 alerting (and, with `--block` enabled, killing) the just-restarted, perfectly legitimate `ssh-cert-api` process
 for the length of that window, `Classify` does one uncached re-check (`refreshUID`/`refreshCgroupID`) before
-declaring a uid or cgroup mismatch `Anomalous`. This costs a single extra lookup and only runs on the mismatch
-path, never on every event, and a genuinely wrong uid/cgroup still mismatches on the fresh lookup — it doesn't
-weaken the check, it only closes a false-positive window caused purely by cache timing. Found via a real
-`cerberus-api.service` restart during `verify-vsock-watch-hardware.sh`'s `api-restart` chaos test (§6).
+declaring a uid or cgroup mismatch. This costs a single extra lookup and only runs on the mismatch path, never on
+every event, and resolves the common case (the cache was simply a few seconds old) back to `Expected`.
+
+**Why a cgroup mismatch downgrades to `Indeterminate`, not `Anomalous`, even after that recheck**: a single
+immediate recheck isn't actually guaranteed to win the race against systemd's *own* cgroup settling — on a real
+restart, the kernel can assign the new process to its new cgroup before the well-known `system.slice/<unit>` path
+`stat()`s to that same inode, and retrying with a sleep here would block the hot classification path for every
+event (the same problem `AsyncShipper`, §4.2, exists to avoid on the delivery side). So a uid mismatch that
+survives a fresh recheck is still `Anomalous` (uid is a static `/etc/passwd` entry, not a per-restart kernel
+object — a real mismatch there isn't a timing artifact), but a cgroup mismatch that survives it is
+`Indeterminate`: `exe` and `uid` already matched by this point, so this isn't "any random process" the way an exe
+or uid mismatch is. `Indeterminate` still alerts at the same `critical` severity as `Anomalous` (§4.2), but is
+deliberately never `Blockworthy` (`event.go`), so `--block` cannot `SIGKILL` the legitimate, freshly-restarted
+`ssh-cert-api` over a cgroup-settling false positive. A genuine attacker satisfying this narrower bar (same exe,
+same uid, wrong cgroup — a copied binary running under the right account but outside `cerberus-api.service`) is
+still loudly alerted on every time, just not auto-killed by this signal alone. Found via two rounds of a real
+`cerberus-api.service` restart during `verify-vsock-watch-hardware.sh`'s `api-restart` chaos test (§6): the first
+round showed the raw cache-staleness false positive; the fix above closed most of it but one restart still
+produced a false `Anomalous` (not just a slower-to-resolve `Expected`), which is what led to the `Indeterminate`
+downgrade instead of trying to win the timing race outright.
 
 ### 4.2 Event pipeline
 
@@ -283,7 +299,7 @@ default trust model and should configure the watcher to match (documented operat
 - Unit tests for `TamperWatch`/`Heartbeat` (`vsockwatch/tamper_test.go`) with a faked `auditctl -l` output and a
   faked HTTP client.
 
-**Verified on real hardware** (RHEL 10, 2026-07-23, via `verify-vsock-watch-hardware.sh`; see
+**Verified on real hardware** (RHEL 10, 2026-07-23, via `verify-vsock-watch-hardware.sh`, two runs; see
 `docs/vsock-connect-verification-runbook.md`):
 
 - Live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c` — `uservaddr` (the
@@ -293,31 +309,25 @@ default trust model and should configure the watcher to match (documented operat
   `ebpf`-sourced anomaly event.
 - `cerberus-api.service` genuinely waits on `cerberus-vsock-watch`'s `Type=notify` `READY=1`, not just its process
   start (§4.3).
+- Chaos test (audit-rule removal → tampering meta-alert): on the re-run, the `detector_tampering` alert fired
+  correctly after the rule was removed. (The first run's "audit support not in kernel" failure was specific to
+  that boot/session on this host, not a Cerberus issue — see the runbook's known-findings log.)
+- `--block` + `CAP_KILL`: end-to-end confirmed on the re-run — a `cerberus-stress` process running as a different
+  uid than `cerberus-audit` was genuinely `SIGKILL`ed, confirming cross-uid signaling actually works, not just
+  that the capability string is present.
 
-**Found and fixed by this same run** — real gaps the chaos tests were specifically designed to catch:
+**Found and fixed across two rounds of the `api-restart` chaos test** — this one caught a real gap the check was
+specifically designed to catch, and took two fix attempts to fully close:
 
-- Chaos test (`cerberus-api.service` restart mid-run) caught a genuine false-positive: `Allowlist`'s cached
-  cgroup inode went stale across a restart that changed the unit's cgroup, misclassifying the newly-restarted,
-  perfectly legitimate `ssh-cert-api` as `Anomalous` for the length of the 5s cache window (and would have been
-  killed outright with `--block` enabled). Fixed in `Allowlist.Classify` — see §4.1's "Revalidation on a
-  cache-derived mismatch". **Needs a re-run to confirm the fix**, since the fix landed after this test run.
-- The `--block`/`CAP_KILL` check in `verify-vsock-watch-hardware.sh` itself had a case-sensitivity bug (matched
-  uppercase `CAP_KILL` against `systemctl show`'s lowercase `cap_kill` output) that produced a false FAIL even
-  though the capability was genuinely present. Fixed in the script. **Needs a re-run** to get an actual
-  end-to-end confirmation that `--block` SIGKILLs a cross-uid process (that part of the check never ran, since
-  the script bailed out on the false capability-check failure first).
-
-**Blocked on this specific host, not a Cerberus bug:**
-
-- Chaos test (audit-rule removal → tampering meta-alert): this RHEL 10 host's kernel has no audit netlink
-  support at all (`auditctl -s` itself fails with "Error - audit support not in kernel" / "Cannot open netlink
-  audit socket"), so no audit rule can ever actually load — independent of the `audit`/`audit-rules` packaging
-  fix. `TamperWatch` correctly never alerts in this state (per its "never observed present" fail-quiet design,
-  §4.4) — this needs a host with a kernel that actually has `CONFIG_AUDIT` built in (check `cat /proc/cmdline`
-  for `audit=0` and the kernel config) before it can be verified. `verify-vsock-watch-hardware.sh` now probes for
-  this with `auditctl -s` and fails fast with this diagnosis instead of burning 40s on a doomed wait.
-- `CAP_DAC_READ_SEARCH` sufficiency for reading `/var/log/audit/audit.log` and the tracefs tracepoint-id file —
-  moot on this host until audit netlink itself works, but not yet independently confirmed either way.
+- Round 1: `Allowlist`'s cached cgroup inode went stale across a restart that changed the unit's cgroup,
+  misclassifying the newly-restarted, perfectly legitimate `ssh-cert-api` as `Anomalous` (and, with `--block`
+  enabled, would have been killed outright) for the length of the 5s cache window. Fixed with an uncached
+  recheck before declaring a mismatch.
+- Round 2: the recheck fix reduced the false positives (four alerts down to one) but didn't fully close it — a
+  single immediate recheck isn't guaranteed to win the race against systemd's own cgroup settling during a
+  restart. Fixed by downgrading a cgroup mismatch that survives the recheck to `Indeterminate` (alerts, never
+  auto-kills) rather than trying to outrun the timing race — see §4.1's "Why a cgroup mismatch downgrades to
+  `Indeterminate`". **Needs a third re-run to confirm**, since this fix landed after the second test run.
 
 **Still not done:**
 

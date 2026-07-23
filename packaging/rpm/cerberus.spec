@@ -365,6 +365,22 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.3-1
+- Fix a second round of a real false-positive in cerberus-vsock-watch,
+  found via a second real cerberus-api.service restart chaos test on a
+  real RHEL 10 host (verify-vsock-watch-hardware.sh): 0.10.2's uncached
+  recheck reduced but did not fully close a cgroup-mismatch false
+  positive, because a single immediate recheck can still race systemd's
+  own cgroup settling during a restart. Allowlist.Classify now
+  downgrades a cgroup mismatch that survives the recheck to
+  Indeterminate (exe/uid already matched, so this isn't "any random
+  process") rather than Anomalous -- it still alerts at critical
+  severity, but is deliberately never Blockworthy, so --block cannot
+  SIGKILL the legitimate, freshly-restarted ssh-cert-api over a
+  cgroup-settling timing race. A genuine attacker satisfying the same
+  narrow bar (matching exe and uid, wrong cgroup) is still loudly
+  alerted on, just not auto-killed by this signal alone. See
+  docs/vsock-connect-detection.md §4.1.
 * Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.2-1
 - Fix a real false-positive in cerberus-vsock-watch found via a live
   cerberus-api.service restart chaos test on a real RHEL 10 host
