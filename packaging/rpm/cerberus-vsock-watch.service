@@ -1,0 +1,74 @@
+[Unit]
+Description=Cerberus VSOCK-connect detective control (docs/vsock-connect-detection.md)
+Documentation=https://github.com/pkilar/cerberus
+# Must be up before cerberus-api starts dialing the enclave, so there is no
+# boot-time window where the API is signing but this watcher isn't yet
+# watching. See docs/vsock-connect-detection.md §4.3.
+Before=cerberus-api.service
+After=auditd.service
+Wants=auditd.service
+
+[Service]
+# Type=notify (not Type=simple): systemd only considers this unit "active"
+# once it sends READY=1 over $NOTIFY_SOCKET (cmd/cerberus-vsock-watch/sdnotify.go),
+# which happens after a detector has actually initialized (the audit log is
+# open, or the eBPF program is attached) -- not merely once the process has
+# forked. Under Type=simple, cerberus-api.service (ordered After= this unit,
+# see cerberus-api.service) could start dialing the enclave during the
+# window while detection was still initializing or had failed outright.
+Type=notify
+NotifyAccess=main
+# Deliberately a DIFFERENT service account than cerberus-api's (see
+# packaging/rpm/cerberus-api.service, User=cerberus): a compromise of the
+# cerberus account alone must not also blind this watcher.
+User=cerberus-audit
+Group=cerberus-audit
+EnvironmentFile=-/etc/sysconfig/cerberus-vsock-watch
+ExecStart=/usr/bin/cerberus-vsock-watch
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# CAP_BPF/CAP_PERFMON: load and attach the eBPF probe (falls back to
+# CAP_SYS_ADMIN on kernels without the split BPF capabilities, pre-5.8).
+# CAP_SYS_PTRACE: resolve /proc/<pid>/exe for a pid running under a
+# different uid than this service (allowlist.go's Event.Exe resolution) —
+# without it, readlink(/proc/<pid>/exe) for another user's process fails and
+# every event classifies as Indeterminate (fail-secure, but noisy).
+# CAP_AUDIT_CONTROL: run `auditctl -l` to verify the auditd rule is still
+# installed (tamper.go's AuditRulePresent) — without it every check errors
+# and the audit-rule-removal tamper alert can never fire.
+# CAP_DAC_READ_SEARCH: this account (cerberus-audit) (cerberus-audit) runs in no supplementary
+# groups, yet BOTH detectors must READ root-owned paths that no other cap here
+# bypasses - DAC read checks are bypassed only by this cap (or the broader
+# CAP_DAC_OVERRIDE, which also grants write and is not needed):
+#   - the auditd path tails /var/log/audit/audit.log, which auditd keeps
+#     0600 root:root (audit.go's openAtEnd), and
+#   - the eBPF loader reads the tracepoint id under the root-owned tracefs
+#     tree, /sys/kernel/tracing/events/syscalls/sys_enter_connect/id
+#     (cilium/ebpf's link.Tracepoint).
+# Note CAP_SYS_ADMIN does NOT bypass DAC; without CAP_DAC_READ_SEARCH both
+# detectors die at startup with EACCES and the process exits (all detectors down).
+# CAP_KILL: send SIGKILL to the offending process when the opt-in reactive
+# block (CERBERUS_VSOCK_WATCH_BLOCK=true, docs/vsock-connect-detection.md
+# §4.5) fires. Needed because cerberus-audit runs as a different account than
+# the process being killed (see the User=/Group= note above). Granted
+# unconditionally since blocking defaults to off and is toggled at runtime,
+# not at install time — matching how CAP_BPF/CAP_PERFMON are granted even
+# though --disable-ebpf can turn off eBPF.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
+
+# Security hardening. NoNewPrivileges is intentionally NOT set: the ambient
+# capabilities above must survive exec, which NoNewPrivileges would strip.
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/log/audit
+PrivateTmp=yes
+ProtectKernelTunables=yes
+# Read-only (not hidden) — this unit only os.Stat()s cgroup paths to resolve
+# ssh-cert-api's cgroup id (allowlist.go), never writes to the cgroup tree.
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

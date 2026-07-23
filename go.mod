@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	github.com/cilium/ebpf v0.22.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mdlayher/vsock v1.3.0
 	golang.org/x/crypto v0.54.0

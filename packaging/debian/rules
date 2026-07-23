@@ -23,6 +23,9 @@ endif
 override_dh_auto_build-arch:
 	cd ssh-cert-api    && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-api    ./cmd/ssh-cert-api
 	cd ssh-cert-signer && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-signer ./cmd/ssh-cert-signer
+	# Root module — no cd needed. See packaging/rpm/cerberus.spec's build step
+	# for why the embedded eBPF object is prebuilt rather than compiled here.
+	go build -buildmode=pie -ldflags="-s -w" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 
 # The cssh client (Architecture: all) is shell — nothing to compile. Splitting
 # the build override keeps an indep-only build (dpkg-buildpackage -A) from
@@ -34,7 +37,7 @@ override_dh_auto_test:
 
 override_dh_auto_clean:
 	rm -rf _build
-	rm -f ssh-cert-api/ssh-cert-api ssh-cert-signer/ssh-cert-signer
+	rm -f ssh-cert-api/ssh-cert-api ssh-cert-signer/ssh-cert-signer cerberus-vsock-watch
 
 # Architecture-dependent packages (api, signer, and the opt-in eif). Installed
 # with explicit modes to mirror the RPM/Arch packaging; files under /etc become
@@ -55,6 +58,12 @@ override_dh_auto_install-arch:
 		debian/cerberus-signer/usr/lib/cerberus/run-enclave.sh
 	install -D -m 0644 ssh-cert-signer/Dockerfile \
 		debian/cerberus-signer/usr/share/cerberus/Dockerfile
+	install -D -m 0755 cerberus-vsock-watch \
+		debian/cerberus-vsock-watch/usr/bin/cerberus-vsock-watch
+	install -D -m 0640 packaging/rpm/cerberus-vsock-watch.sysconfig \
+		debian/cerberus-vsock-watch/etc/default/cerberus-vsock-watch
+	install -D -m 0644 packaging/audit-rules/61-cerberus-vsock.rules \
+		debian/cerberus-vsock-watch/etc/audit/rules.d/61-cerberus-vsock.rules
 ifneq (,$(filter pkg.cerberus.eif,$(DEB_BUILD_PROFILES)))
 	install -D -m 0644 "$(CERBERUS_EIF_FILE)" \
 		debian/cerberus-signer-eif/usr/share/cerberus/ssh-cert-signer.eif
@@ -74,7 +83,7 @@ override_dh_auto_install-indep:
 # to 0644. These files carry no secrets, but the not-world-readable intent is
 # kept; systemd reads the EnvironmentFiles as root regardless.
 override_dh_fixperms:
-	dh_fixperms -Xetc/default/cerberus-api -Xetc/default/cerberus-signer -Xetc/cerberus/config.yaml.example
+	dh_fixperms -Xetc/default/cerberus-api -Xetc/default/cerberus-signer -Xetc/default/cerberus-vsock-watch -Xetc/cerberus/config.yaml.example
 
 # Go static binaries carry no DWARF for dwz and are already stripped (-s -w);
 # skip dwz and the automatic -dbgsym package.

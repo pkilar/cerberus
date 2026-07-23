@@ -47,6 +47,23 @@ Description: SSH certificate signer that runs inside an AWS Nitro Enclave
  and a Nitro-enabled EC2 host; the EIF itself is per-deployment and not
  shipped here (see cerberus-signer-eif).
 
+Package: cerberus-vsock-watch
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, audit
+Description: VSOCK-connect detective control for the Cerberus enclave boundary
+ Detects an AF_VSOCK connect() to the Cerberus enclave from any process other
+ than the legitimate cerberus-api — the signal that something on the host
+ bypassed Casbin authorization and is attempting to mint SSH certificates
+ directly against the enclave (docs/THREAT-MODEL.md SIGN-1). Runs an
+ auditd-based detector and an eBPF tracepoint probe independently, ships
+ alerts to a structured log and, optionally, an external webhook, and pings
+ an external heartbeat endpoint so tampering with the detectors themselves is
+ also observable.
+ .
+ This is a detective, not preventive, control: no host-side mechanism can
+ fully prevent a process with host root from dialing the enclave directly.
+ See docs/vsock-connect-detection.md.
+
 Package: cerberus-client
 Architecture: all
 Depends: ${misc:Depends}, openssh-client, curl, jq, krb5-user

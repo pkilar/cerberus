@@ -1,0 +1,8 @@
+# Cerberus system user for the vsock-watch detective control. A DIFFERENT
+# account than cerberus-api's "cerberus" user — see
+# docs/vsock-connect-detection.md §4.3: a compromise of the cerberus account
+# alone must not also blind this watcher. dh_installsysusers installs this to
+# /usr/lib/sysusers.d/cerberus-vsock-watch.conf and invokes systemd-sysusers
+# from the postinst.
+#Type Name           ID GECOS                             Home          Shell
+u     cerberus-audit -  "Cerberus VSOCK-watch detective control" /etc/cerberus /usr/sbin/nologin

@@ -1,0 +1,24 @@
+# pacman scriptlet for cerberus-vsock-watch. The cerberus-audit user/group is
+# created by systemd-sysusers via pacman's own hook, and daemon-reload is
+# handled by the systemd hook — this scriptlet only prints operator guidance.
+
+post_install() {
+    cat <<'MSG'
+==> cerberus-vsock-watch installed.
+    This is a DETECTIVE control (docs/vsock-connect-detection.md) — it does
+    not authorize or block signing requests; it alerts when something other
+    than cerberus-api itself connects to the enclave over VSOCK.
+    1. Review /etc/conf.d/cerberus-vsock-watch (exe path, expected username/
+       unit, webhook/heartbeat URLs if you have them).
+    2. Reload the auditd rule installed at /etc/audit/rules.d/61-cerberus-vsock.rules:
+         augenrules --load   (or: systemctl restart auditd)
+    3. Enable the service:
+         systemctl enable --now cerberus-vsock-watch
+    Note: the eBPF probe needs a 5.8+ kernel; if it can't load, the service
+    still runs the auditd detector alone (see docs/vsock-connect-detection.md §7).
+MSG
+}
+
+post_upgrade() {
+    :
+}

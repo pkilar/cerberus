@@ -11,6 +11,7 @@ files); only the systemd units and the packaging metadata are Arch-specific.
 | --------------------- | ------------------------------------------------------------------------ | ------------- |
 | `cerberus-api`        | `ssh-cert-api` binary, systemd unit, `config.yaml.example`, sysusers/tmpfiles | x86_64/aarch64 |
 | `cerberus-signer`     | `ssh-cert-signer` binary, systemd unit, `run-enclave.sh`, `Dockerfile`   | x86_64/aarch64 |
+| `cerberus-vsock-watch`| VSOCK-connect detective control (`docs/vsock-connect-detection.md`): binary, systemd unit, auditd rule, sysusers | x86_64/aarch64 |
 | `cerberus-client`     | the `cssh` shell wrapper (`/etc/profile.d/`)                             | any           |
 | `cerberus-signer-eif` | **opt-in**, prebuilt EIF — carries per-deployment CA key material         | x86_64/aarch64 |
 

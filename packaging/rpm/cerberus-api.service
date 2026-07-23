@@ -3,6 +3,17 @@ Description=Cerberus SSH Certificate API
 Documentation=https://github.com/pkilar/cerberus
 After=network-online.target nitro-enclaves-allocator.service
 Wants=network-online.target
+# Soft dependency (Wants=, not Requires=): the vsock-connect detective
+# control (docs/vsock-connect-detection.md) is a separate, optional package.
+# When it IS installed and enabled, cerberus-vsock-watch.service's
+# Type=notify means "active" only once a detector has actually initialized
+# (see that unit's own comment) -- so ordering After= it here closes the
+# boot-time window where this service could start dialing the enclave before
+# detection is watching. When cerberus-vsock-watch isn't installed at all,
+# Wants=/After= on a nonexistent unit is a silent no-op and this service
+# starts exactly as it does today.
+After=cerberus-vsock-watch.service
+Wants=cerberus-vsock-watch.service
 
 [Service]
 Type=simple

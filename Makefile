@@ -22,6 +22,32 @@ stress:
 	go build -o bin/cerberus-stress ./cmd/cerberus-stress
 	@echo "  -> bin/cerberus-stress"
 
+# Build the vsock-connect detective control (docs/vsock-connect-detection.md).
+# CGO_ENABLED=0: the eBPF object is a prebuilt, architecture-portable blob
+# embedded via go:embed (vsockwatch/ebpf/src/vsock_connect.bpf.o) — see
+# vsock-watch-bpf below to regenerate it from source.
+vsock-watch:
+	@echo "Building cerberus-vsock-watch..."
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -o bin/cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+	@echo "  -> bin/cerberus-vsock-watch"
+
+# Regenerate vsockwatch/ebpf/src/vsock_connect.bpf.o from source. Requires
+# clang with a BPF target (any recent clang) and the host's C library UAPI
+# headers (linux/bpf.h, linux/types.h, linux/vm_sockets.h) — no libbpf-dev,
+# no kernel BTF/vmlinux.h, no bpftool: see vsock_connect.c's header comment
+# for why this program deliberately avoids CO-RE. The resulting object is
+# eBPF bytecode (a virtual ISA), so it is portable across host architectures
+# (x86_64/aarch64) without a separate build per arch — but it has NOT been
+# load-tested against a live kernel as part of this change; see
+# docs/vsock-connect-detection.md §6 before deploying a regenerated object.
+vsock-watch-bpf:
+	@echo "Regenerating vsockwatch/ebpf/src/vsock_connect.bpf.o..."
+	cd vsockwatch/ebpf/src && clang -target bpf -O2 -g -Wall -Wextra \
+		$$(test -d /usr/include/$$(uname -m)-linux-gnu && echo -I/usr/include/$$(uname -m)-linux-gnu) \
+		-c vsock_connect.c -o vsock_connect.bpf.o
+	@echo "  -> vsockwatch/ebpf/src/vsock_connect.bpf.o (verify with: go test ./vsockwatch/ebpf/...)"
+
 # Run all tests
 test:
 	@echo "Running tests for ssh-cert-api..."
