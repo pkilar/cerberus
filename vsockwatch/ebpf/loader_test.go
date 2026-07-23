@@ -146,7 +146,9 @@ func (f *fakeBlocker) count() int {
 // to a configured Blocker — Run itself requires a live kernel to exercise
 // end-to-end (see this file's and loader.go's doc comments on what this
 // sandbox cannot verify), so this only confirms the decoded Event carries the
-// PID a Blocker needs.
+// PID a Blocker needs. Add Blocker wiring to docs/vsock-connect-detection.md
+// §6's real-hardware verification list alongside the existing eBPF items,
+// once a maintainer has a privileged host to run Watcher.Run end-to-end.
 func TestDecodeEvent_BlockworthyWiring(t *testing.T) {
 	origResolveExe := resolveExe
 	resolveExe = func(uint32) (string, error) { return "/tmp/evil", nil }
@@ -170,7 +172,7 @@ func TestDecodeEvent_BlockworthyWiring(t *testing.T) {
 	if !cls.Verdict.Blockworthy() {
 		t.Fatalf("Verdict = %v, want Anomalous (Blockworthy) for a mismatched exe", cls.Verdict)
 	}
-	if err := w.Blocker.Block(context.Background(), ev); err != nil {
+	if err := w.Blocker.Block(t.Context(), ev); err != nil {
 		t.Fatalf("Block: %v", err)
 	}
 	if blocker.count() != 1 || blocker.events[0].PID != 4242 {

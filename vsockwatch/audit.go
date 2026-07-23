@@ -339,9 +339,9 @@ func (w *AuditWatcher) handleLine(ctx context.Context, corr *correlator, line st
 	}
 	if w.Blocker != nil && cls.Verdict.Blockworthy() {
 		if err := w.Blocker.Block(ctx, ev); err != nil {
-			slog.Warn("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
+			slog.Error("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
 		} else {
-			slog.Warn("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
+			slog.Error("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
 		}
 	}
 }

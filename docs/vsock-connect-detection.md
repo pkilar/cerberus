@@ -262,6 +262,12 @@ default trust model and should configure the watcher to match (documented operat
   end-to-end). `CAP_DAC_READ_SEARCH` in paticular lets the de-privileged `cerberus-audit` account read the
   root-owned `/var/log/audit/audit.log` (0600) and the tracefs tracepoint-id file; without it, both detectors
   fail at startup with `permission denied` and the process exits (`all_detectors_down`).
+- With `--block` enabled, confirm `ebpf.Watcher.Run` actually invokes `Blocker.Block` end-to-end on a real
+  anomalous connect (the auditd path already has this coverage via `TestAuditWatcher_Run_BlocksOnAnomalousConnect`;
+  the eBPF equivalent, `TestDecodeEvent_BlockworthyWiring`, only checks that a decoded event's classification and
+  PID compose correctly with a `Blocker` — it doesn't drive `Run` itself, since that needs the same real-kernel
+  privilege as the rest of this section). Also confirm `CAP_KILL` is sufficient for `cerberus-audit` to signal a
+  process it doesn't own.
 
 ## 7. Why this is detection, not prevention
 

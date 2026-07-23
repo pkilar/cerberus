@@ -45,6 +45,8 @@ var killProcess = func(pid int, sig syscall.Signal) error {
 // docs/vsock-connect-detection.md §4.3).
 type ProcessKiller struct{}
 
+var _ Blocker = ProcessKiller{}
+
 // maxKillablePID bounds ev.PID before it is narrowed to int for killProcess.
 // Linux's own pid_max tops out at 4,194,304 (2^22) even on its most
 // permissive configuration, so any value anywhere near this bound is already
