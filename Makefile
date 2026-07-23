@@ -5,6 +5,11 @@
 # when adding a new go.mod.
 GO_MODULES := . ssh-cert-api ssh-cert-signer
 
+# Version stamped into each binary's -V flag output; single source of truth is
+# the top-level VERSION file.
+VERSION := $(shell cat VERSION)
+LDFLAGS_VERSION = -ldflags="-X github.com/pkilar/cerberus/version.Version=$(VERSION)"
+
 # Default target
 all: build
 
@@ -19,7 +24,7 @@ build:
 stress:
 	@echo "Building cerberus-stress..."
 	@mkdir -p bin
-	go build -o bin/cerberus-stress ./cmd/cerberus-stress
+	go build $(LDFLAGS_VERSION) -o bin/cerberus-stress ./cmd/cerberus-stress
 	@echo "  -> bin/cerberus-stress"
 
 # Build the vsock-connect detective control (docs/vsock-connect-detection.md).
@@ -29,7 +34,7 @@ stress:
 vsock-watch:
 	@echo "Building cerberus-vsock-watch..."
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -o bin/cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+	CGO_ENABLED=0 go build $(LDFLAGS_VERSION) -o bin/cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 	@echo "  -> bin/cerberus-vsock-watch"
 
 # Regenerate vsockwatch/ebpf/src/vsock_connect.bpf.o from source. Requires
