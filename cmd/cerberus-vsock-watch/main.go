@@ -129,6 +129,17 @@ func run() int {
 	ctx, cancel := context.WithCancel(sigCtx)
 	defer cancel()
 
+	// shipperCtx is deliberately separate from ctx and canceled strictly
+	// AFTER every producer goroutine (auditd, eBPF, tamperwatch, heartbeat --
+	// tracked by producersWG below) has fully returned. AsyncShipper.Run's
+	// shutdown drain (ship_async.go) is only race-free if nothing can enqueue
+	// a new alert while it's deciding the queue is empty; phasing shutdown
+	// this way -- producers join first, only then is the shipper told to
+	// stop -- guarantees that, rather than the shipper racing producers that
+	// observe the same cancellation at the same time.
+	shipperCtx, cancelShipper := context.WithCancel(context.Background())
+	defer cancelShipper()
+
 	slog.Info("vsockwatch.starting",
 		"exe_path", *exePath, "username", *username, "unit", *unit,
 		"audit_log", *auditLogPath, "webhook_configured", *webhookURL != "",
@@ -143,6 +154,56 @@ func run() int {
 	if *block {
 		blocker = vsockwatch.ProcessKiller{}
 	}
+
+	// asyncShipper decouples every per-event Ship call (auditd, eBPF,
+	// tamperwatch) from actual delivery, so a slow or hung webhook peer can
+	// never stall the goroutine reading events -- for the eBPF path, that
+	// stall would otherwise let the kernel-side ring buffer silently drop
+	// events with no consumer draining it. See vsockwatch/ship_async.go.
+	// fatalShutdown's own final alert deliberately bypasses this queue (see
+	// below) for an immediate, synchronous best-effort delivery attempt at
+	// the moment of process death, not one that could still be sitting
+	// queued behind whatever asyncShipper.Run is concurrently tearing down.
+	// Runs on shipperCtx (not ctx) and is joined via shipperWG, both for the
+	// phased-shutdown reason explained at shipperCtx's declaration above.
+	// recoverDetector's onPanic is deliberately nil, unlike auditd/eBPF: a
+	// dead shipper means alerts stop being delivered, not that detection
+	// itself has stopped, so it does not feed detectorHealth/fatalShutdown.
+	// Each detector's own Ship() call still logs a queue-full error once the
+	// dead shipper's queue backs up (vsockwatch/ship_async.go), so this
+	// degrades to "alerts silently pile up and get individually logged as
+	// dropped," not a fully silent failure -- but there is no equivalent of
+	// "all detectors down" for "delivery is down" today.
+	asyncShipper := vsockwatch.NewAsyncShipper(shippers, 0)
+	var shipperWG sync.WaitGroup
+	shipperWG.Go(func() {
+		defer recoverDetector("shipper", nil)
+		_ = asyncShipper.Run(shipperCtx)
+	})
+
+	// onReady fires the systemd sd_notify READY=1 signal (Type=notify, see
+	// packaging/*/cerberus-vsock-watch.service) the first time EITHER
+	// enabled detector reports its own successful startup -- deliberately OR
+	// semantics, mirroring detectorHealth.allDown()'s existing policy that
+	// single-detector operation is acceptable rather than fatal. Waiting for
+	// BOTH would mean a host where eBPF can never attach (unsupported
+	// kernel, no BPF LSM) and --disable-ebpf wasn't set would never signal
+	// ready at all, potentially blocking cerberus-api.service from starting
+	// forever if it's ordered After= this unit -- a materially worse outcome
+	// than today's graceful auditd-only degradation. readyGate (unlike a
+	// sync.Once) retries on a later call if an earlier one's notify() failed
+	// transiently -- see readyNotifier's doc comment.
+	readyGate := &readyNotifier{}
+	onReady := func() { readyGate.tryNotify(sdNotifyReady) }
+
+	// producersWG tracks every detector/monitor goroutine below (auditd,
+	// eBPF, tamperwatch, heartbeat) -- NOT the shipper, which has its own
+	// shipperWG and later lifecycle. run() waits for producersWG before
+	// telling the shipper to stop, and waits for shipperWG before returning,
+	// so os.Exit (main()'s caller) never fires while either is still
+	// mid-flight -- see shipperCtx's doc comment for why the ordering
+	// between the two matters.
+	var producersWG sync.WaitGroup
 
 	health := &detectorHealth{ebpfUsed: !*disableEBPF}
 	exitCode := 0
@@ -176,20 +237,20 @@ func run() int {
 	auditWatcher := &vsockwatch.AuditWatcher{
 		Path:      *auditLogPath,
 		Allowlist: allow,
-		Shipper:   shippers,
+		Shipper:   asyncShipper,
 		Blocker:   blocker,
 	}
-	go func() {
+	producersWG.Go(func() {
 		defer recoverDetector("auditd", func() {
 			health.markAuditdDown()
 			fatalShutdown()
 		})
-		if err := auditWatcher.Run(ctx); err != nil && ctx.Err() == nil {
+		if err := auditWatcher.Run(ctx, onReady); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.auditd.stopped", "error", err)
 		}
 		health.markAuditdDown()
 		fatalShutdown()
-	}()
+	})
 
 	// The eBPF detector runs independently: a failure to load/attach (e.g. an
 	// unsupported kernel, or missing privilege) is logged but does not stop
@@ -197,32 +258,32 @@ func run() int {
 	// why this is surfaced as an error rather than a panic. If auditd is (or
 	// later becomes) down too, fatalShutdown treats the pair as exhausted.
 	if !*disableEBPF {
-		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: shippers, Blocker: blocker}
-		go func() {
+		ebpfWatcher := &vsockebpf.Watcher{Allowlist: allow, Shipper: asyncShipper, Blocker: blocker}
+		producersWG.Go(func() {
 			defer recoverDetector("ebpf", func() {
 				health.markEBPFDown()
 				fatalShutdown()
 			})
-			if err := ebpfWatcher.Run(ctx); err != nil && ctx.Err() == nil {
+			if err := ebpfWatcher.Run(ctx, onReady); err != nil && ctx.Err() == nil {
 				slog.Error("vsockwatch.ebpf.stopped", "error", err,
 					"hint", "the auditd detector is still running; see docs/vsock-connect-detection.md §7")
 			}
 			health.markEBPFDown()
 			fatalShutdown()
-		}()
+		})
 	}
 
-	tamperWatch := &vsockwatch.TamperWatch{Shipper: shippers, Interval: *tamperCheckInterval}
-	go func() {
+	tamperWatch := &vsockwatch.TamperWatch{Shipper: asyncShipper, Interval: *tamperCheckInterval}
+	producersWG.Go(func() {
 		defer recoverDetector("tamperwatch", nil)
 		if err := tamperWatch.RunAuditRuleCheck(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("vsockwatch.tamperwatch.stopped", "error", err)
 		}
-	}()
+	})
 
 	if *heartbeatURL != "" {
 		hb := &vsockwatch.Heartbeat{URL: *heartbeatURL, Interval: *heartbeatInterval}
-		go func() {
+		producersWG.Go(func() {
 			defer recoverDetector("heartbeat", nil)
 			err := hb.Run(ctx, func(err error) {
 				slog.Warn("vsockwatch.heartbeat.failed", "error", err)
@@ -230,11 +291,18 @@ func run() int {
 			if err != nil && ctx.Err() == nil {
 				slog.Error("vsockwatch.heartbeat.stopped", "error", err)
 			}
-		}()
+		})
 	}
 
 	<-ctx.Done()
 	slog.Info("vsockwatch.shutting_down")
+	// Phased shutdown: wait for every producer to fully return (so nothing
+	// can call Ship() again), only THEN tell the shipper to stop and wait
+	// for it -- see shipperCtx's doc comment above for why this ordering is
+	// what makes AsyncShipper's shutdown drain race-free.
+	producersWG.Wait()
+	cancelShipper()
+	shipperWG.Wait()
 	return exitCode
 }
 

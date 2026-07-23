@@ -57,12 +57,16 @@ This design adds a **detective** control: alert, in near-real-time, whenever a p
 
 ### Option A — `auditd` syscall rule
 ```
-auditctl -a always,exit -F arch=b64 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch
+auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch
 ```
-`auditd` can't filter on socket address family in the rule itself — `-F exe!=` matches *every* `connect()` from
-any other process (DNS lookups, LDAP binds, curl, etc.), so a consumer must post-process the audit log: parse the
-`SOCKADDR` record's `saddr=` hex field, decode `sa_family` (bytes 0-1, little-endian; `AF_VSOCK` = 40) and, for a
-`sockaddr_vm`, the CID and port fields, and keep only `cid=16, port=5000`.
+`auditd` can't filter on socket address family in the rule itself, so a consumer must post-process the audit log:
+parse the `SOCKADDR` record's `saddr=` hex field, decode `sa_family` (bytes 0-1, little-endian; `AF_VSOCK` = 40)
+and, for a `sockaddr_vm`, the CID and port fields, and keep only `cid=16, port=5000`. The rule does **not**
+exclude the packaged `ssh-cert-api` binary's own `connect()`s (an earlier draft added `-F exe!=/usr/bin/ssh-cert-api`
+to cut log volume) — doing so would discard exactly the case where an attacker runs or bind-mounts that same
+binary path under the wrong uid or outside its cgroup: `Allowlist.Classify` would call that `Anomalous`, but
+`AuditWatcher` would never see the `connect()` to classify if the rule filtered it out first. See §4.1/§4.2 for
+where the real exe+uid+cgroup decision is made, on every observed `connect()`, not just other processes'.
 
 - **Pros:** ubiquitous (Amazon Linux ships `auditd`), integrates with whatever SIEM already ingests audit logs,
   no kernel module or BTF dependency.
@@ -147,8 +151,31 @@ PID transition.
 - Only this unit holds `CAP_BPF`/`CAP_PERFMON` (or `CAP_SYS_ADMIN`); `cerberus-api.service` is unaffected and
   keeps its current hardening (`NoNewPrivileges=yes`, `ProtectSystem=strict`, etc. — see
   `packaging/rpm/cerberus-api.service`).
-- Ordering: `cerberus-api.service` should declare `After=cerberus-vsock-watch.service` so the watcher is always
-  up before `ssh-cert-api` starts dialing the enclave — no boot-time blind window.
+- Ordering: `cerberus-vsock-watch.service` runs `Type=notify` (not `Type=simple`) and sends systemd `READY=1`
+  (`cmd/cerberus-vsock-watch/sdnotify.go`) only once at least one enabled detector has completed its own startup
+  sequence (the audit log is open, or the eBPF program is attached) — not merely once the process has forked.
+  `cerberus-api.service` declares `After=cerberus-vsock-watch.service` **and** `Wants=cerberus-vsock-watch.service`
+  (a soft dependency: a host without the vsock-watch package installed at all is unaffected — `Wants=`/`After=` on
+  a nonexistent unit is a no-op), so when the watcher IS installed and enabled, `ssh-cert-api` cannot start dialing
+  the enclave while the watcher is still *initializing* — closing the boot-time blind window that `Type=simple`
+  ordering alone could not (systemd considers a `Type=simple` unit "started" the instant it's forked, regardless
+  of what its goroutines have or haven't finished doing yet). This is **not** an airtight guarantee: `After=` only
+  delays `cerberus-api`'s start job until the watcher's start job *concludes*, not until it *succeeds* — if the
+  watcher fails outright at boot before ever sending `READY=1` (e.g. missing `CAP_DAC_READ_SEARCH`, a bad audit-log
+  path, or an unsupported kernel with auditd also broken — the exhausted-detectors case in §4.4), its start job
+  concludes (as failed) almost immediately, and `cerberus-api.service` starts right behind it, unblocked,
+  reproducing the same gap this ordering exists to close. `Requires=` would close that too, but was deliberately
+  not used here: it would turn the vsock-watch package from an optional bolt-on into a hard dependency of
+  `cerberus-api`, so a host that hasn't installed or configured it correctly would have `cerberus-api` refuse to
+  start at all rather than degrade — a materially worse operational failure mode than the residual gap it would
+  close. `Restart=on-failure` on the watcher unit means this gap is also self-limiting in practice (the watcher
+  keeps retrying), but the window exists on every restart attempt, not just the very first boot.
+  - Readiness policy is deliberately **OR**, not AND, across the two detectors — matching
+    `detectorHealth.allDown()`'s existing policy (§4.4) that single-detector operation is an acceptable degraded
+    mode, not a fatal one. Waiting for both auditd AND eBPF before signaling ready would mean a host where eBPF
+    can never attach (unsupported kernel, no BPF LSM) but `--disable-ebpf` wasn't set would never send `READY=1`
+    at all — and with the `Wants=`/`After=` ordering above, that would block `cerberus-api.service` from starting
+    forever, a materially worse outcome than today's graceful auditd-only degradation.
 - Config: expected exe path + service unit name, overridable like the rest of Cerberus's config surface;
   defaults baked in.
 

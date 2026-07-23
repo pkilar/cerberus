@@ -17,10 +17,14 @@ import (
 // This file implements the auditd detection path described in
 // docs/vsock-connect-detection.md §3 (Option A) / §4.2: an auditd rule
 //
-//	auditctl -a always,exit -F arch=b64 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch
+//	auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch
 //
-// logs every connect() syscall from a process other than the expected
-// ssh-cert-api binary. That rule alone is noisy (it fires for ANY connect(),
+// (see packaging/audit-rules/61-cerberus-vsock.rules) logs every connect()
+// syscall from every process, including the expected ssh-cert-api binary —
+// deliberately not filtered by exe, since AuditWatcher needs to see and
+// classify a connect() from that exact exe path too, in case it's running
+// under the wrong uid or outside cerberus-api.service's cgroup (see
+// Allowlist.Classify). That rule alone is noisy (it fires for ANY connect(),
 // not just vsock ones), so this package tails the audit log, correlates each
 // SYSCALL record with its paired SOCKADDR record (both share the same
 // `msg=audit(timestamp:serial)` id), decodes the SOCKADDR's raw sockaddr_vm
@@ -29,12 +33,9 @@ import (
 // kernel facility, a different code path, so an attacker has to disable both
 // to fully blind the system (§4.4).
 //
-// Note the auditctl rule's `-F exe!=` pre-filter is a coarse noise reduction,
-// not the actual security boundary — the real decision is Allowlist.Classify
-// below, which is why this package still classifies every parsed event
-// rather than trusting the rule's exe filter alone (defense in depth, and it
-// means a misconfigured or absent auditctl rule degrades to "more log lines
-// to parse", not "silently stops working").
+// The real security decision is Allowlist.Classify below, applied to every
+// parsed event — a misconfigured or absent auditctl rule degrades to "more
+// log lines to parse" (or none at all), not "silently stops working".
 
 // auditRecord is one parsed `type=... msg=audit(...): k=v k=v ...` line.
 type auditRecord struct {
@@ -243,8 +244,12 @@ type AuditWatcher struct {
 // Run tails Path from EOF (not from the beginning of an existing file — we
 // only care about connects from now on) until ctx is canceled. It transparently
 // follows log rotation: if the underlying inode changes (logrotate replacing
-// the file), Run reopens Path.
-func (w *AuditWatcher) Run(ctx context.Context) error {
+// the file), Run reopens Path. onReady, if non-nil, is called exactly once,
+// immediately after Path is successfully opened and before Run starts
+// polling — callers use this to signal process readiness (e.g. systemd's
+// sd_notify READY=1, see cmd/cerberus-vsock-watch) only once this detector
+// is actually watching, not merely once the process has started.
+func (w *AuditWatcher) Run(ctx context.Context, onReady func()) error {
 	interval := w.PollInterval
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
@@ -254,6 +259,9 @@ func (w *AuditWatcher) Run(ctx context.Context) error {
 	f, reader, err := openAtEnd(w.Path)
 	if err != nil {
 		return fmt.Errorf("vsockwatch: opening audit log %q: %w", w.Path, err)
+	}
+	if onReady != nil {
+		onReady()
 	}
 	defer func() { _ = f.Close() }()
 
@@ -334,14 +342,19 @@ func (w *AuditWatcher) handleLine(ctx context.Context, corr *correlator, line st
 	if !cls.Verdict.Alertworthy() {
 		return
 	}
-	if w.Shipper != nil {
-		_ = w.Shipper.Ship(ctx, NewAnomalyAlert(ev, cls))
-	}
+	// Blocker runs before Ship: an alert-delivery attempt (even an async,
+	// non-blocking one) must never be able to delay the reactive kill, which
+	// only has value if it happens promptly. See ship_async.go.
 	if w.Blocker != nil && cls.Verdict.Blockworthy() {
 		if err := w.Blocker.Block(ctx, ev); err != nil {
 			slog.Error("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
 		} else {
 			slog.Error("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
+		}
+	}
+	if w.Shipper != nil {
+		if err := w.Shipper.Ship(ctx, NewAnomalyAlert(ev, cls)); err != nil {
+			slog.Error("vsockwatch.ship.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
 		}
 	}
 }

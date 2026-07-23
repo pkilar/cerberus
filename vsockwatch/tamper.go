@@ -3,6 +3,7 @@ package vsockwatch
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -89,8 +90,10 @@ func (t *TamperWatch) RunAuditRuleCheck(ctx context.Context) error {
 				continue
 			}
 			if t.everPresent && t.Shipper != nil {
-				_ = t.Shipper.Ship(ctx, NewTamperAlert(SourceAuditd,
-					fmt.Sprintf("auditctl rule with key=%s is no longer present (was present at a prior check)", AuditRuleKey)))
+				if err := t.Shipper.Ship(ctx, NewTamperAlert(SourceAuditd,
+					fmt.Sprintf("auditctl rule with key=%s is no longer present (was present at a prior check)", AuditRuleKey))); err != nil {
+					slog.Error("vsockwatch.ship.failed", "detector", SourceAuditd, "error", err)
+				}
 				// Only alert once per disappearance, not on every tick,
 				// so a sustained outage doesn't spam the alert channel.
 				// Re-arms once the rule is observed present again.

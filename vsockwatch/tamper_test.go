@@ -23,7 +23,7 @@ func withFakeAuditRules(t *testing.T, sequence [][]string) {
 
 func TestAuditRulePresent(t *testing.T) {
 	withFakeAuditRules(t, [][]string{
-		{`-a always,exit -F arch=b64 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch`},
+		{`-a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch`},
 	})
 	present, err := AuditRulePresent(context.Background())
 	if err != nil {

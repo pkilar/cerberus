@@ -173,7 +173,7 @@ func TestAuditWatcher_Run_AlertsOnAnomalousConnect(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	go func() { _ = w.Run(ctx, nil) }()
 
 	// Give Run a moment to open the file at EOF before we append, so this
 	// isn't racing the initial open.
@@ -221,7 +221,7 @@ func TestAuditWatcher_Run_LineSplitAcrossPollTicks(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -281,7 +281,7 @@ func TestAuditWatcher_Run_NoAlertForExpectedCaller(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -322,7 +322,7 @@ func TestAuditWatcher_Run_BlocksOnAnomalousConnect(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -369,7 +369,7 @@ func TestAuditWatcher_Run_DoesNotBlockOnIndeterminate(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
@@ -397,5 +397,68 @@ func TestAuditWatcher_Run_DoesNotBlockOnIndeterminate(t *testing.T) {
 	}
 	if blocker.count() != 0 {
 		t.Fatalf("got %d Block calls, want 0 (Indeterminate must never block)", blocker.count())
+	}
+}
+
+// readyCounter counts onReady invocations, safe for concurrent use.
+type readyCounter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (r *readyCounter) mark() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+}
+
+func (r *readyCounter) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func TestAuditWatcher_Run_CallsOnReadyAfterFileOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	w := &AuditWatcher{
+		Path:         path,
+		PollInterval: 10 * time.Millisecond,
+		Allowlist:    testAllowlist(999, nil, 0, errors.New("no cgroup")),
+		Shipper:      &fakeShipper{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := &readyCounter{}
+	go func() { _ = w.Run(ctx, ready.mark) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for ready.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := ready.count(); got != 1 {
+		t.Fatalf("onReady called %d times, want exactly 1", got)
+	}
+}
+
+func TestAuditWatcher_Run_DoesNotCallOnReadyIfOpenFails(t *testing.T) {
+	w := &AuditWatcher{
+		Path:      filepath.Join(t.TempDir(), "does-not-exist", "audit.log"),
+		Allowlist: testAllowlist(999, nil, 0, errors.New("no cgroup")),
+	}
+
+	ready := &readyCounter{}
+	err := w.Run(context.Background(), ready.mark)
+	if err == nil {
+		t.Fatal("expected an error opening a nonexistent audit log's parent directory")
+	}
+	if got := ready.count(); got != 0 {
+		t.Fatalf("onReady called %d times, want 0 when Run fails before entering its loop", got)
 	}
 }

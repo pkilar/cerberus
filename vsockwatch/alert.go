@@ -170,11 +170,13 @@ type WebhookShipper struct {
 	Format WebhookFormat
 }
 
-// webhookTimeout bounds the default client's request when Client is nil. Both
-// detector loops call Ship synchronously for every alert-worthy event, so a
+// webhookTimeout bounds the default client's request when Client is nil.
+// AsyncShipper (vsockwatch/ship_async.go) delivers alerts on its own
+// goroutine, decoupled from the detectors' event-consumption loops, but that
+// goroutine still calls Ship synchronously for each queued alert — so a
 // webhook peer that accepts a connection but never responds must not be able
-// to block a detector from consuming any further events indefinitely. A var,
-// not a const, so tests can shorten it rather than waiting out the default.
+// to block delivery of any further queued alerts indefinitely. A var, not a
+// const, so tests can shorten it rather than waiting out the default.
 var webhookTimeout = 10 * time.Second
 
 func (w WebhookShipper) Ship(ctx context.Context, a Alert) error {

@@ -5,19 +5,27 @@
 # after the distro-default rule files, which is not load-bearing here but
 # keeps it out of the way of any numbering convention already in use).
 #
-# This rule alone is intentionally coarse: it logs every connect(2) from any
-# process OTHER than the packaged ssh-cert-api binary. auditd cannot filter on
-# socket address family in the rule itself, so cerberus-vsock-watch's auditd
-# path (vsockwatch/audit.go) does the real filtering — decoding each
-# correlated SYSCALL+SOCKADDR pair and only alerting on a genuine
-# AF_VSOCK connect to the enclave's (CID, port). A misconfigured or absent
-# rule degrades to "cerberus-vsock-watch has fewer audit log lines to parse",
-# not a silent gap in the eBPF detector, which is independent of this rule.
+# This rule logs EVERY connect(2), including from the packaged ssh-cert-api
+# binary itself: it does not filter by exe. auditd cannot filter on socket
+# address family in the rule itself, so cerberus-vsock-watch's auditd path
+# (vsockwatch/audit.go) does the real filtering — decoding each correlated
+# SYSCALL+SOCKADDR pair, keeping only a genuine AF_VSOCK connect to the
+# enclave's (CID, port), and classifying THAT against the full exe+uid+cgroup
+# allowlist (Allowlist.Classify). Excluding the expected exe path at the rule
+# level (an earlier version of this rule used `-F exe!=/usr/bin/ssh-cert-api`)
+# would silently hide exactly the attack this control exists to catch: an
+# attacker who runs (or bind-mounts) that same binary path under the wrong uid
+# or outside cerberus-api.service's cgroup — Allowlist.Classify would call
+# that Anomalous, but AuditWatcher would never even see the connect(2) to
+# classify, since the rule itself would have discarded it first. A misconfigured
+# or absent rule degrades to "cerberus-vsock-watch has fewer audit log lines to
+# parse", not a silent gap in the eBPF detector, which is independent of this
+# rule.
 #
 # After editing rule files, reload with: augenrules --load (or
 # `service auditd restart` on distros without augenrules). Verify with:
 #   auditctl -l | grep cerberus_vsock_watch
 # cerberus-vsock-watch's TamperWatch (vsockwatch/tamper.go) periodically runs
 # this same check and alerts if a previously-observed rule disappears.
--a always,exit -F arch=b64 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch
--a always,exit -F arch=b32 -S connect -F exe!=/usr/bin/ssh-cert-api -k cerberus_vsock_watch
+-a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch
+-a always,exit -F arch=b32 -S connect -k cerberus_vsock_watch

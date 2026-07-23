@@ -9,7 +9,15 @@ After=auditd.service
 Wants=auditd.service
 
 [Service]
-Type=simple
+# Type=notify (not Type=simple): systemd only considers this unit "active"
+# once it sends READY=1 over $NOTIFY_SOCKET (cmd/cerberus-vsock-watch/sdnotify.go),
+# which happens after a detector has actually initialized (the audit log is
+# open, or the eBPF program is attached) -- not merely once the process has
+# forked. Under Type=simple, cerberus-api.service (ordered After= this unit,
+# see cerberus-api.service) could start dialing the enclave during the
+# window while detection was still initializing or had failed outright.
+Type=notify
+NotifyAccess=main
 # Deliberately a DIFFERENT service account than cerberus-api's (see
 # packaging/arch/cerberus-api.service, User=cerberus): a compromise of the
 # cerberus account alone must not also blind this watcher.

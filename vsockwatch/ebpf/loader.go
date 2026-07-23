@@ -57,8 +57,13 @@ type Watcher struct {
 // rejection, or a tracepoint format mismatch on this kernel) are returned as
 // an error rather than causing a panic, so a caller running both detectors
 // (see cmd/cerberus-vsock-watch) can keep the auditd path running even if
-// this one fails to start — the two are deliberately independent.
-func (w *Watcher) Run(ctx context.Context) error {
+// this one fails to start — the two are deliberately independent. onReady,
+// if non-nil, is called exactly once, immediately after the ring buffer
+// reader is successfully opened and before Run starts consuming events —
+// callers use this to signal process readiness (e.g. systemd's sd_notify
+// READY=1) only once this detector is actually attached, not merely once the
+// process has started.
+func (w *Watcher) Run(ctx context.Context, onReady func()) error {
 	spec, err := cilium.LoadCollectionSpecFromReader(bytes.NewReader(programObject))
 	if err != nil {
 		return fmt.Errorf("vsockwatch/ebpf: parsing embedded object: %w", err)
@@ -105,6 +110,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 	}()
 
+	if onReady != nil {
+		onReady()
+	}
+
 	for {
 		record, err := reader.Read()
 		if err != nil {
@@ -125,14 +134,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 		if !cls.Verdict.Alertworthy() {
 			continue
 		}
-		if w.Shipper != nil {
-			_ = w.Shipper.Ship(ctx, vsockwatch.NewAnomalyAlert(ev, cls))
-		}
+		// Blocker runs before Ship: an alert-delivery attempt (even an
+		// async, non-blocking one) must never be able to delay the reactive
+		// kill, which only has value if it happens promptly. See
+		// vsockwatch/ship_async.go.
 		if w.Blocker != nil && cls.Verdict.Blockworthy() {
 			if err := w.Blocker.Block(ctx, ev); err != nil {
 				slog.Error("vsockwatch.block.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
 			} else {
 				slog.Error("vsockwatch.block.killed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe)
+			}
+		}
+		if w.Shipper != nil {
+			if err := w.Shipper.Ship(ctx, vsockwatch.NewAnomalyAlert(ev, cls)); err != nil {
+				slog.Error("vsockwatch.ship.failed", "pid", ev.PID, "uid", ev.UID, "exe", ev.Exe, "error", err)
 			}
 		}
 	}
