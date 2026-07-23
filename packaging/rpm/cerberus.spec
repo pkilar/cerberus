@@ -63,8 +63,9 @@ certificates received over VSOCK.
 # see docs/THREAT-MODEL.md SIGN-1). Runs two independent detectors (an auditd
 # rule + an eBPF tracepoint probe) side by side. It does NOT authorize or
 # block signing requests; it only makes an out-of-band signing attempt
-# observable. Requires audit (auditctl) for the auditd-based detector; the
-# eBPF detector needs no additional package (the object is prebuilt and
+# observable. Requires audit (auditctl) for the auditd-based detector; on
+# RHEL 10 that package alone isn't sufficient -- see the Requires block below.
+# The eBPF detector needs no additional package (the object is prebuilt and
 # embedded in the binary) but does need a 5.8+ kernel with BPF ring buffer
 # support and CAP_BPF/CAP_PERFMON (granted via the unit's
 # AmbientCapabilities, not requiring root).
@@ -72,6 +73,17 @@ certificates received over VSOCK.
 %package vsock-watch
 Summary:        Cerberus VSOCK-connect detective control (out-of-band signing detection)
 Requires:       audit
+# RHEL 10 split the classic audit userspace tooling: auditctl (needed by
+# TamperWatch's AuditRulePresent, vsockwatch/tamper.go, to verify the auditd
+# rule is still installed) ships in audit-rules there, not the base audit
+# package -- confirmed via `dnf provides '*/auditctl'` on a RHEL 10 host.
+# Gated on the rhel macro (>= 10) so Amazon Linux 2/2023, Fedora, and RHEL 8/9
+# (which leave it undefined, or define it below 10) are unaffected -- audit
+# alone is sufficient there, and audit-rules isn't guaranteed to exist as a
+# distinct package on those distributions.
+%if 0%{?rhel} >= 10
+Requires:       audit-rules
+%endif
 Requires(pre):  shadow-utils
 %{?systemd_requires}
 
@@ -353,6 +365,14 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.1-1
+- Fix cerberus-vsock-watch missing auditctl on RHEL 10: that release split
+  the classic audit userspace tooling so auditctl (needed by TamperWatch's
+  AuditRulePresent check, vsockwatch/tamper.go) ships in a separate
+  audit-rules package rather than the base audit package. The vsock-watch
+  subpackage now also Requires audit-rules when %{rhel} >= 10; Amazon Linux
+  2/2023, Fedora, and RHEL 8/9 are unaffected (audit alone is still
+  sufficient there). No functional change to any other subpackage.
 * Wed Jul 22 2026 Paul Kilar <pkilar@gmail.com> - 0.10.0-1
 - New cerberus-vsock-watch subpackage: a detective control for SIGN-1
   (docs/THREAT-MODEL.md) — a compromised host with root access can dial the

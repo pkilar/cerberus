@@ -26,7 +26,11 @@ disruptive; pass `--yes` to skip that in a scripted/CI context.
 
 - `cerberus-vsock-watch` installed from the packaged artifact (RPM/deb/Arch — see CLAUDE.md's Packaging section),
   or built from source and placed at `/usr/bin/cerberus-vsock-watch`.
-- `auditd` installed and running.
+- `auditd` installed and running, with `auditctl` on `$PATH`. **On RHEL 10**, that release split the classic audit
+  userspace tooling: `auditctl` ships in a separate `audit-rules` package, not the base `audit` package. The RPM
+  spec's `cerberus-vsock-watch` subpackage now `Requires: audit-rules` when built with `%{rhel} >= 10` (fixed in
+  0.10.1), so installing the packaged RPM on RHEL 10 pulls it in automatically — if you built/installed an older
+  RPM, `dnf install audit-rules` (or rebuild from a current checkout) before running this script.
 - The `cerberus-audit` service account exists (created by the package's `useradd`/`sysusers.d` scriptlet).
 - Kernel ≥ 5.8 with tracefs or debugfs mounted, for the eBPF checks (items 2, 3, 6). If this host intentionally
   runs `--disable-ebpf`, those three items will correctly report as failed/skipped — that's expected, not a bug
