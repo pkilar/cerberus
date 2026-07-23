@@ -338,6 +338,13 @@ check_api_restart_chaos() {
     systemctl start cerberus-vsock-watch.service 2>/dev/null
     systemctl start cerberus-api.service || { print_error "failed to start cerberus-api.service"; record api_restart_chaos FAIL; return 1; }
     sleep 2
+    # Anchor the log query to the actual restart moment rather than a fixed
+    # "-10 seconds" lookback: a fixed window can reach back far enough to pick
+    # up an unrelated anomaly alert from an EARLIER check (e.g. item 2+3's
+    # deliberate cerberus-stress anomaly), especially when items run quickly
+    # back to back.
+    local restart_ts
+    restart_ts=$(date '+%Y-%m-%d %H:%M:%S')
     print_status "restarting cerberus-api.service (new MainPID) while cerberus-vsock-watch observes..."
     systemctl restart cerberus-api.service
     sleep 3
@@ -348,8 +355,16 @@ check_api_restart_chaos() {
     # docs/vsock-connect-detection.md §4.1) -- if that retry budget is ever
     # exhausted on a slow-to-settle host, the result is a still-safe
     # Indeterminate alert (never Blockworthy), not a failure of this check.
+    #
+    # Match on the alert's exe= field specifically, not a bare substring
+    # search for "ssh-cert-api" anywhere in the line: every anomaly alert's
+    # "reason" text names the *expected* exe path too (e.g. `exe
+    # "/tmp/cerberus-stress-verify" != expected "/usr/bin/ssh-cert-api"`), so a
+    # bare substring grep also matches alerts about a COMPLETELY different
+    # process (like the disposable cerberus-stress test client from an earlier
+    # check) merely because ssh-cert-api's path is mentioned as the expectation.
     local restart_alerts
-    restart_alerts=$(journalctl -u cerberus-vsock-watch --since "-10 seconds" --no-pager 2>/dev/null | grep 'vsockwatch.alert' | grep 'ssh-cert-api')
+    restart_alerts=$(journalctl -u cerberus-vsock-watch --since "$restart_ts" --no-pager 2>/dev/null | grep 'vsockwatch.alert' | grep -E 'exe=/usr/bin/ssh-cert-api([[:space:]]|$)')
     if echo "$restart_alerts" | grep -qi 'reason="anomalous:'; then
         print_error "a false-positive ANOMALOUS alert fired for the legitimate ssh-cert-api exe during the restart (this would trigger --block) -- see journalctl -u cerberus-vsock-watch"
         record api_restart_chaos FAIL
