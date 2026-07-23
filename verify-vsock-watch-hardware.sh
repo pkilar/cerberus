@@ -77,49 +77,131 @@ unit_installed() {
     systemctl list-unit-files "$1" >/dev/null 2>&1 && systemctl list-unit-files "$1" | grep -q "$1"
 }
 
-# --- Item 0: is the installed binary actually built from this checkout? ---
-# This script never rebuilds or reinstalls cerberus-vsock-watch itself (only
-# cerberus-stress, as a disposable test client) -- it only drives whatever is
-# already installed. If you pulled a fix but didn't rebuild+reinstall the
-# package, the Go-code-dependent checks below (api-restart, in particular)
-# will keep failing identically, which looks exactly like "the fix didn't
-# work" even though it was never actually deployed. This is a heuristic
-# (binary mtime vs. latest relevant commit time), not a guarantee.
+# Runs "$bin_path -V" and compares its output against $expected (the
+# checkout's VERSION). Prints a PASS/FAIL line for $label and returns non-zero
+# on a version mismatch, an unsupported -V flag, or any other failure.
+check_one_binary_version() {
+    local label="$1" bin_path="$2" expected="$3"
+    local output status
+    output=$("$bin_path" -V 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        if echo "$output" | grep -q "flag provided but not defined: -V"; then
+            print_error "$label ($bin_path) does not support -V yet -- installed binary predates the version-flag feature; rebuild and reinstall the package"
+        else
+            print_error "$label ($bin_path) -V failed (exit $status): $(echo "$output" | head -1)"
+        fi
+        return 1
+    fi
+    local got
+    got=$(echo "$output" | head -1 | tr -d '[:space:]')
+    if [ "$got" != "$expected" ]; then
+        print_error "$label ($bin_path) reports version '$got', expected '$expected' (from VERSION) -- installed binary is stale; rebuild and reinstall the package"
+        return 1
+    fi
+    print_status "$label ($bin_path) version matches VERSION: $got"
+    return 0
+}
+
+# --- Item 0: do the installed cerberus binaries actually match this checkout? ---
+# This script never rebuilds or reinstalls cerberus-vsock-watch/ssh-cert-api
+# itself (only cerberus-stress, as a disposable test client) -- it only drives
+# whatever is already installed. If you pulled a fix but didn't
+# rebuild+reinstall the package, the Go-code-dependent checks below
+# (api-restart, in particular) will keep failing identically, which looks
+# exactly like "the fix didn't work" even though it was never actually
+# deployed. Every binary reports its exact build version via -V (stamped from
+# the top-level VERSION file at build time -- see version/version.go), so this
+# is an exact comparison, not a timestamp-based heuristic.
 check_deployment_freshness() {
     echo
-    echo "=== 0. Confirm the installed cerberus-vsock-watch reflects this checkout ==="
-    if ! unit_installed cerberus-vsock-watch.service; then
-        print_skip "cerberus-vsock-watch.service not installed -- skipping"
-        record deployment_freshness SKIP
-        return 2
-    fi
-    if [ ! -x /usr/bin/cerberus-vsock-watch ]; then
-        print_warning "no binary at /usr/bin/cerberus-vsock-watch -- skipping freshness check"
-        record deployment_freshness SKIP
-        return 2
-    fi
-    if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        print_warning "not running from a git checkout -- can't compare against source; skipping freshness check"
-        record deployment_freshness SKIP
-        return 2
-    fi
+    echo "=== 0. Confirm installed cerberus binaries match this checkout's VERSION ==="
 
-    local installed_mtime latest_commit_time
-    installed_mtime=$(stat -c %Y /usr/bin/cerberus-vsock-watch 2>/dev/null)
-    latest_commit_time=$(git log -1 --format=%ct -- vsockwatch cmd/cerberus-vsock-watch 2>/dev/null)
-    if [ -z "$installed_mtime" ] || [ -z "$latest_commit_time" ]; then
-        print_warning "could not compare binary mtime against the latest relevant commit -- skipping freshness check"
+    if [ ! -f VERSION ]; then
+        print_warning "no VERSION file in the current directory -- not running from a repo checkout root; skipping version check"
         record deployment_freshness SKIP
         return 2
     fi
+    local expected
+    expected=$(tr -d '[:space:]' < VERSION)
+    if [ -z "$expected" ]; then
+        print_warning "VERSION file is empty -- skipping version check"
+        record deployment_freshness SKIP
+        return 2
+    fi
+    print_status "expected version (from VERSION): $expected"
 
-    if [ "$installed_mtime" -lt "$latest_commit_time" ]; then
-        print_error "the installed /usr/bin/cerberus-vsock-watch ($(date -d "@$installed_mtime" '+%Y-%m-%d %H:%M:%S')) predates the latest commit touching vsockwatch/cmd/cerberus-vsock-watch ($(date -d "@$latest_commit_time" '+%Y-%m-%d %H:%M:%S'))"
-        print_error "rebuild and reinstall the package (or at least the binary + restart the service) before trusting api-restart's result -- an identical failure across re-runs usually means the fix was never actually deployed, not that it didn't work"
-        record deployment_freshness FAIL
+    local ok=1 checked=0
+
+    # label:path:unit -- the unit name only decides whether "binary missing"
+    # is expected (not installed at all -> SKIP) or itself a problem (the unit
+    # IS installed but the binary it points at is gone -> FAIL).
+    local -a targets=(
+        "cerberus-vsock-watch:/usr/bin/cerberus-vsock-watch:cerberus-vsock-watch.service"
+        "ssh-cert-api:/usr/bin/ssh-cert-api:cerberus-api.service"
+    )
+    local entry label rest bin_path unit
+    for entry in "${targets[@]}"; do
+        label="${entry%%:*}"
+        rest="${entry#*:}"
+        bin_path="${rest%%:*}"
+        unit="${rest#*:}"
+
+        if [ ! -x "$bin_path" ]; then
+            if unit_installed "$unit"; then
+                print_error "$unit is installed but $bin_path is missing or not executable"
+                ok=0
+            else
+                print_skip "$label not installed at $bin_path -- skipping"
+            fi
+            continue
+        fi
+        checked=$((checked + 1))
+        check_one_binary_version "$label" "$bin_path" "$expected" || ok=0
+    done
+
+    # ssh-cert-signer normally runs only inside the Nitro enclave, not on this
+    # host -- there is no VSOCK "report version" message (see messages/), so it
+    # can't be checked remotely. Best-effort: only check it if a copy happens
+    # to be present on the host (e.g. a non-enclave dev setup).
+    if [ -x /usr/bin/ssh-cert-signer ]; then
+        checked=$((checked + 1))
+        check_one_binary_version "ssh-cert-signer" /usr/bin/ssh-cert-signer "$expected" || ok=0
     else
-        print_status "installed binary is not older than the latest relevant commit (heuristic only, not a guarantee -- a rebuild with no source changes also passes this)"
+        print_skip "ssh-cert-signer not present on this host -- expected, it normally runs only inside the Nitro enclave and can't be version-checked remotely"
+    fi
+
+    # cerberus-stress is the disposable test client this script itself drives
+    # (find_stress_binary) -- report its version for diagnostic context, but
+    # don't fail the overall check on a mismatch: it's commonly built ad hoc
+    # from source (reporting "dev") rather than installed from a package.
+    if find_stress_binary; then
+        local stress_output stress_version stress_status
+        stress_output=$("$CERBERUS_STRESS_BIN" -V 2>&1)
+        stress_status=$?
+        if [ "$stress_status" -eq 0 ]; then
+            stress_version=$(echo "$stress_output" | head -1 | tr -d '[:space:]')
+            if [ "$stress_version" = "$expected" ]; then
+                print_status "cerberus-stress ($CERBERUS_STRESS_BIN) version matches VERSION: $stress_version"
+            else
+                print_warning "cerberus-stress ($CERBERUS_STRESS_BIN) reports version '$stress_version', checkout VERSION is '$expected' -- fine for an ad hoc test client, just informational"
+            fi
+        else
+            print_warning "cerberus-stress ($CERBERUS_STRESS_BIN) does not support -V yet -- predates the version-flag feature; rebuild it (this does not affect the checks above)"
+        fi
+    fi
+
+    if [ "$checked" -eq 0 ]; then
+        print_skip "no relevant cerberus binaries found on this host -- skipping version check"
+        record deployment_freshness SKIP
+        return 2
+    fi
+
+    if [ "$ok" -eq 1 ]; then
         record deployment_freshness PASS
+    else
+        print_error "rebuild and reinstall the mismatched package(s) (or at least the binary + restart the affected service) before trusting the checks below -- an identical failure across re-runs usually means the fix was never actually deployed, not that it didn't work"
+        record deployment_freshness FAIL
     fi
 }
 
@@ -493,7 +575,7 @@ usage() {
 Usage: sudo ./verify-vsock-watch-hardware.sh [--yes] {all|freshness|tracepoint|ebpf|api-restart|tamper|block|notify}
 
   all           run every check in sequence (default if no argument given)
-  freshness     item 0: the installed binary isn't older than this checkout's latest relevant commit
+  freshness     item 0: installed cerberus-vsock-watch/ssh-cert-api/ssh-cert-signer -V matches this checkout's VERSION
   tracepoint    item 1: tracepoint format matches vsock_connect.c
   ebpf          items 2+3: BPF verifier acceptance + a real connect emits an event
   api-restart   item 4: cerberus-api restart does not cause a false positive
