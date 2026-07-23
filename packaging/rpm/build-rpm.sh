@@ -72,6 +72,26 @@ trap 'rm -rf "${STAGING_DIR}"' EXIT
 
 mkdir -p "${STAGING_DIR}/${TARBALL}"
 # Use git archive if available, otherwise fall back to rsync.
+#
+# NOTE on file timestamps: `git archive` stamps every extracted file's mtime
+# with HEAD's commit date, not "now" -- this is deliberate upstream git
+# behavior (reproducible archive contents for a given commit, regardless of
+# when you run `git archive`). On Fedora/RHEL (RHEL 10 in particular), the
+# rpmbuild toolchain's own reproducible-builds policy then derives
+# SOURCE_DATE_EPOCH from the spec's top %changelog entry
+# (source_date_epoch_from_changelog) and clamps every FILE (not directory)
+# mtime in the buildroot to it (clamp_mtime_to_source_date_epoch) -- both
+# real rpm macros, on by default on those distros, absent from a bare Arch
+# rpm-tools install. The net effect an operator will see: every installed
+# file (including freshly `go build`-compiled binaries) carries the
+# %changelog date, not the actual build time, while directories -- untouched
+# by that clamp -- show the real build time. This is expected, intentional
+# reproducible-builds behavior, not a packaging bug: the same source always
+# produces byte-identical (and timestamp-identical) output. It does mean an
+# operator timestamp-diffing an installed binary against "when I built this"
+# will see the %changelog date instead -- diff against the RPM's own
+# metadata (`rpm -q --qf '%{BUILDTIME}\n' cerberus-vsock-watch`) for the
+# actual build time instead.
 if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree &>/dev/null; then
     git -C "${PROJECT_ROOT}" archive --format=tar HEAD \
         | tar -x -C "${STAGING_DIR}/${TARBALL}"

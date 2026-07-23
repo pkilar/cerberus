@@ -66,6 +66,14 @@ looks identical to "the fix didn't work." The `freshness` check (item 0, include
 by comparing the installed binary's mtime against the latest commit touching `vsockwatch`/`cmd/cerberus-vsock-watch`
 — if it fails, redeploy before trusting anything else in the run.
 
+**Why this heuristic works even though file timestamps on an RPM install look "wrong"**: if you `rpm -qi` or
+`stat` files from a packaged install (as opposed to the `go build`+`cp` fast path above) and notice every file
+dated to the spec's `%changelog` entry rather than "whenever the build actually ran" — that's expected, not a bug
+(see the comment above `git archive` in `packaging/rpm/build-rpm.sh` for the full mechanism: Fedora/RHEL's
+reproducible-builds tooling clamps installed file mtimes to a `SOURCE_DATE_EPOCH` derived from that changelog
+date). This actually makes the `freshness` heuristic *more* reliable on an RPM install, not less — both sides of
+the comparison end up anchored to source-derived timestamps rather than wall-clock build time.
+
 To redeploy after pulling a fix:
 
 ```bash
