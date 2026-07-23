@@ -27,6 +27,7 @@ import (
 	"time"
 
 	_ "github.com/pkilar/cerberus/logging" // configures slog process-wide (LOG_FORMAT, DEBUG)
+	"github.com/pkilar/cerberus/version"
 	"github.com/pkilar/cerberus/vsockwatch"
 	vsockebpf "github.com/pkilar/cerberus/vsockwatch/ebpf"
 )
@@ -106,7 +107,13 @@ func run() int {
 	tamperCheckInterval := flag.Duration("tamper-check-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL", 30*time.Second), "how often to verify the auditd rule is still installed")
 	disableEBPF := flag.Bool("disable-ebpf", envBoolDefault("CERBERUS_VSOCK_WATCH_DISABLE_EBPF", false), "run only the auditd detector (for hosts where the eBPF probe can't load — see docs/vsock-connect-detection.md §7)")
 	block := flag.Bool("block", envBoolDefault("CERBERUS_VSOCK_WATCH_BLOCK", false), "opt-in: best-effort SIGKILL the offending process on a confirmed Anomalous classification (NOT true prevention — see docs/vsock-connect-detection.md §4.5/§7; requires CAP_KILL)")
+	showVersion := flag.Bool("V", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.Version)
+		return 0
+	}
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
 

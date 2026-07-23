@@ -11,8 +11,12 @@ GOTIDY=$(GOCMD) mod tidy
 BINARY_NAME=ssh-cert-api
 BINARY_PATH=./$(BINARY_NAME)
 
+# Version stamped into the binary's -V flag output; single source of truth is
+# the top-level VERSION file.
+VERSION := $(shell cat $(CURDIR)/../VERSION)
+
 # Build flags for stripped release binary
-LDFLAGS_STRIP = -ldflags="-s -w"
+LDFLAGS_STRIP = -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=$(VERSION)"
 
 # Default target executed when you just run `make`
 all: build

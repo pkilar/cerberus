@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/enclave"
 	"github.com/pkilar/cerberus/ssh-cert-api/internal/keyload"
 	cerberusldap "github.com/pkilar/cerberus/ssh-cert-api/internal/ldap"
+	"github.com/pkilar/cerberus/version"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
@@ -35,6 +37,13 @@ import (
 const shutdownGrace = 10 * time.Second
 
 func main() {
+	showVersion := flag.Bool("V", false, "print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.Version)
+		return
+	}
+
 	log.Println("Starting SSH Certificate API...")
 
 	// --- 1. Load Configuration ---

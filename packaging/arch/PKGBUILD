@@ -56,12 +56,16 @@ build() {
     export GOPATH="$srcdir/gopath" GOCACHE="$srcdir/gocache"
     export GOFLAGS='-mod=readonly -modcacherw'
 
-    ( cd ssh-cert-api    && go build -buildmode=pie -trimpath -ldflags='-s -w' -o ssh-cert-api    ./cmd/ssh-cert-api )
-    ( cd ssh-cert-signer && go build -buildmode=pie -trimpath -ldflags='-s -w' -o ssh-cert-signer ./cmd/ssh-cert-signer )
+    # Version stamped into each binary's -V flag output — reuses pkgver so it
+    # never drifts from the RPM/Debian version.
+    local ldflags_version="-X github.com/pkilar/cerberus/version.Version=$pkgver"
+
+    ( cd ssh-cert-api    && go build -buildmode=pie -trimpath -ldflags="-s -w $ldflags_version" -o ssh-cert-api    ./cmd/ssh-cert-api )
+    ( cd ssh-cert-signer && go build -buildmode=pie -trimpath -ldflags="-s -w $ldflags_version" -o ssh-cert-signer ./cmd/ssh-cert-signer )
     # Root module — already at $srcdir/${pkgbase}-${pkgver}, no subshell cd
     # needed. See packaging/rpm/cerberus.spec's build step for why the
     # embedded eBPF object is prebuilt rather than compiled here.
-    go build -buildmode=pie -trimpath -ldflags='-s -w' -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+    go build -buildmode=pie -trimpath -ldflags="-s -w $ldflags_version" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 }
 
 package_cerberus-api() {

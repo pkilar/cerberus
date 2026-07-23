@@ -174,12 +174,12 @@ export CGO_ENABLED=0
 
 # Build the API binary.
 cd ssh-cert-api
-go build -ldflags="-s -w" -o ssh-cert-api ./cmd/ssh-cert-api
+go build -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=%{version}" -o ssh-cert-api ./cmd/ssh-cert-api
 cd ..
 
 # Build the signer binary.
 cd ssh-cert-signer
-go build -ldflags="-s -w" -o ssh-cert-signer ./cmd/ssh-cert-signer
+go build -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=%{version}" -o ssh-cert-signer ./cmd/ssh-cert-signer
 cd ..
 
 # Build the vsock-watch detective control (root module — no cd needed). The
@@ -189,7 +189,7 @@ cd ..
 # vsockwatch/ebpf/src/vsock_connect.c's header comment), and eBPF bytecode is
 # architecture-portable, so one object serves both x86_64 and aarch64. Run
 # `make vsock-watch-bpf` to regenerate it from source if that file changes.
-go build -ldflags="-s -w" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+go build -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=%{version}" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 
 %install
 rm -rf %{buildroot}

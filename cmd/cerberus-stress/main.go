@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/pkilar/cerberus/version"
 )
 
 func main() {
@@ -42,6 +44,8 @@ func main() {
 		runAPI(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
+	case "-V", "--version", "version":
+		fmt.Println(version.Version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
 		usage()

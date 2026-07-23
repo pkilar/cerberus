@@ -17,15 +17,20 @@ ifeq ($(DEB_HOST_ARCH),arm64)
 export GOARCH = arm64
 endif
 
+# Version stamped into each binary's -V flag output; single source of truth is
+# the top-level VERSION file (staged into the source root by build-deb.sh).
+VERSION := $(shell cat $(CURDIR)/VERSION)
+LDFLAGS_VERSION = -X github.com/pkilar/cerberus/version.Version=$(VERSION)
+
 %:
 	dh $@
 
 override_dh_auto_build-arch:
-	cd ssh-cert-api    && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-api    ./cmd/ssh-cert-api
-	cd ssh-cert-signer && go build -buildmode=pie -ldflags="-s -w" -o ssh-cert-signer ./cmd/ssh-cert-signer
+	cd ssh-cert-api    && go build -buildmode=pie -ldflags="-s -w $(LDFLAGS_VERSION)" -o ssh-cert-api    ./cmd/ssh-cert-api
+	cd ssh-cert-signer && go build -buildmode=pie -ldflags="-s -w $(LDFLAGS_VERSION)" -o ssh-cert-signer ./cmd/ssh-cert-signer
 	# Root module — no cd needed. See packaging/rpm/cerberus.spec's build step
 	# for why the embedded eBPF object is prebuilt rather than compiled here.
-	go build -buildmode=pie -ldflags="-s -w" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
+	go build -buildmode=pie -ldflags="-s -w $(LDFLAGS_VERSION)" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 
 # The cssh client (Architecture: all) is shell — nothing to compile. Splitting
 # the build override keeps an indep-only build (dpkg-buildpackage -A) from

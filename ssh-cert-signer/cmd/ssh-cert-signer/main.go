@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	"github.com/pkilar/cerberus/messages"
 	"github.com/pkilar/cerberus/ssh-cert-signer/internal/attestation"
 	"github.com/pkilar/cerberus/ssh-cert-signer/internal/handlers"
+	"github.com/pkilar/cerberus/version"
 )
 
 const (
@@ -169,6 +171,13 @@ func samePublicKey(a, b ssh.Signer) bool {
 }
 
 func main() {
+	showVersion := flag.Bool("V", false, "print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.Version)
+		return
+	}
+
 	log.Println("Starting Enclave Signing Service...")
 
 	// Initialize attestation provider (gracefully degrades outside enclaves)
