@@ -155,9 +155,10 @@ which the bounded retry above now resolves in the common case without changing t
 
 ### 4.2 Event pipeline
 
-1. **eBPF collector** (`cerberus-vsock-watch`, a small Go binary + embedded CO-RE object) attaches to
-   `security_socket_connect` (falls back to `sys_enter_connect` if LSM BPF is unavailable), filters in-kernel as
-   in §3B, and pushes one ring-buffer event per matching connect.
+1. **eBPF collector** (`cerberus-vsock-watch`, a small Go binary + embedded object) attaches to the
+   `sys_enter_connect` **tracepoint** (§3B; not the `security_socket_connect` LSM hook — see §4.5/§7 for why this
+   is deliberately a detective, not a preventive, attach point), filters in-kernel, and pushes one ring-buffer
+   event per matching connect.
 2. **Userspace consumer** (same binary) enriches each event: resolves `/proc/<pid>/exe` (best-effort — a process
    that's already gone by read time is itself suspicious and logged as such), checks against the allowlist
    (§4.1), and classifies expected vs. anomalous.
@@ -208,9 +209,10 @@ which the bounded retry above now resolves in the common case without changing t
   - Readiness policy is deliberately **OR**, not AND, across the two detectors — matching
     `detectorHealth.allDown()`'s existing policy (§4.4) that single-detector operation is an acceptable degraded
     mode, not a fatal one. Waiting for both auditd AND eBPF before signaling ready would mean a host where eBPF
-    can never attach (unsupported kernel, no BPF LSM) but `--disable-ebpf` wasn't set would never send `READY=1`
-    at all — and with the `Wants=`/`After=` ordering above, that would block `cerberus-api.service` from starting
-    forever, a materially worse outcome than today's graceful auditd-only degradation.
+    can never attach (unsupported kernel: missing `BPF_PROG_TYPE_TRACEPOINT`/`BPF_MAP_TYPE_RINGBUF` support, or
+    the loader lacks `CAP_BPF`/`CAP_PERFMON`) but `--disable-ebpf` wasn't set would never send `READY=1` at all —
+    and with the `Wants=`/`After=` ordering above, that would block `cerberus-api.service` from starting forever,
+    a materially worse outcome than today's graceful auditd-only degradation.
 - Config: expected exe path + service unit name, overridable like the rest of Cerberus's config surface;
   defaults baked in.
 
