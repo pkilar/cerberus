@@ -231,11 +231,42 @@ check_tamper_alert() {
         record tamper_alert SKIP
         return 2
     fi
+
+    # Fail fast if the kernel itself lacks audit netlink support (CONFIG_AUDIT
+    # not built in, or disabled via the audit= kernel command-line parameter).
+    # auditctl's add/list/delete calls all fail identically in that case
+    # ("Error - audit support not in kernel", "Cannot open netlink audit
+    # socket") regardless of the audit-rules package being installed -- this
+    # is a kernel/host configuration issue, not something any packaging fix
+    # can address, and it's better to say so clearly than to blindly report
+    # PASS on rule install and burn 40s waiting for an alert that can never
+    # fire (observed on a real RHEL 10 host).
+    local probe_err
+    if ! probe_err=$(auditctl -s 2>&1 >/dev/null); then
+        print_error "auditctl cannot reach the kernel audit subsystem: ${probe_err}"
+        print_error "this is a kernel/host configuration issue, not a Cerberus bug -- check that this kernel has CONFIG_AUDIT built in and that 'audit=1' isn't disabled on the kernel command line (cat /proc/cmdline), then retry"
+        record tamper_alert FAIL
+        return 1
+    fi
+
     systemctl start cerberus-vsock-watch.service
     if ! auditctl -l 2>/dev/null | grep -q cerberus_vsock_watch; then
         print_status "installing the audit rule from packaging/audit-rules/61-cerberus-vsock.rules"
-        auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch
-        auditctl -a always,exit -F arch=b32 -S connect -k cerberus_vsock_watch
+        if ! auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch; then
+            print_error "auditctl -a failed to install the arch=b64 rule -- see output above"
+            record tamper_alert FAIL
+            return 1
+        fi
+        if ! auditctl -a always,exit -F arch=b32 -S connect -k cerberus_vsock_watch; then
+            print_error "auditctl -a failed to install the arch=b32 rule -- see output above"
+            record tamper_alert FAIL
+            return 1
+        fi
+    fi
+    if ! auditctl -l 2>/dev/null | grep -q cerberus_vsock_watch; then
+        print_error "rule installation did not take effect (auditctl -l shows nothing for cerberus_vsock_watch) -- cannot proceed"
+        record tamper_alert FAIL
+        return 1
     fi
     sleep 2
 
@@ -261,8 +292,8 @@ check_tamper_alert() {
     fi
 
     print_status "restoring the audit rule..."
-    auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch
-    auditctl -a always,exit -F arch=b32 -S connect -k cerberus_vsock_watch
+    auditctl -a always,exit -F arch=b64 -S connect -k cerberus_vsock_watch || print_warning "failed to restore the arch=b64 rule -- restore it manually"
+    auditctl -a always,exit -F arch=b32 -S connect -k cerberus_vsock_watch || print_warning "failed to restore the arch=b32 rule -- restore it manually"
 
     print_warning "MANUAL: separately confirm 'systemctl stop cerberus-vsock-watch' (killing BOTH detectors at once) is itself noticed operationally -- e.g. via the external heartbeat monitor if configured (docs/vsock-connect-detection.md §4.4/§8). Not scriptable here: it depends on infrastructure outside this repo."
 }
@@ -284,12 +315,15 @@ check_block_cap_kill() {
     local caps
     caps=$(systemctl show cerberus-vsock-watch.service -p AmbientCapabilities --value 2>/dev/null)
     echo "AmbientCapabilities on cerberus-vsock-watch.service: $caps"
-    case "$caps" in
-        *CAP_KILL*) print_status "CAP_KILL present in the running unit's AmbientCapabilities" ;;
-        *) print_error "CAP_KILL NOT present -- --block cannot signal a process it doesn't own. Check packaging/*/cerberus-vsock-watch.service and 'systemctl daemon-reload'"
-           record block_cap_kill FAIL
-           return 1 ;;
-    esac
+    # systemd renders capability names lowercase (e.g. "cap_kill") in this
+    # --value output, NOT the uppercase CAP_KILL form used in unit-file
+    # syntax -- match case-insensitively rather than assuming one form.
+    if ! echo "$caps" | grep -qi 'cap_kill'; then
+        print_error "CAP_KILL NOT present -- --block cannot signal a process it doesn't own. Check packaging/*/cerberus-vsock-watch.service and 'systemctl daemon-reload'"
+        record block_cap_kill FAIL
+        return 1
+    fi
+    print_status "CAP_KILL present in the running unit's AmbientCapabilities"
 
     print_warning "starting a transient cerberus-vsock-watch-verify.service with --block enabled (does not modify the real unit); it WILL SIGKILL the disposable cerberus-stress test process below."
     systemctl stop cerberus-vsock-watch.service 2>/dev/null

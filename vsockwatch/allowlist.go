@@ -103,7 +103,14 @@ func (a *Allowlist) Classify(ev Event) Classification {
 		return Classification{Verdict: Indeterminate, Reason: fmt.Sprintf("could not resolve expected uid for %q: %v", a.Username, err)}
 	}
 	if ev.UID != uid {
-		return Classification{Verdict: Anomalous, Reason: fmt.Sprintf("uid %d != expected %d (%s)", ev.UID, uid, a.Username)}
+		// The cached expected uid may simply be stale (see cgroup's mismatch
+		// handling below for why this matters in practice); one uncached
+		// re-check before declaring Anomalous costs a single lookup and only
+		// runs on the mismatch path, never on every event.
+		fresh, ferr := a.refreshUID()
+		if ferr != nil || ev.UID != fresh {
+			return Classification{Verdict: Anomalous, Reason: fmt.Sprintf("uid %d != expected %d (%s)", ev.UID, uid, a.Username)}
+		}
 	}
 
 	// Cgroup is the strongest signal but optional: skip (not alert, not
@@ -111,7 +118,22 @@ func (a *Allowlist) Classify(ev Event) Classification {
 	if ev.CgroupID != 0 {
 		cg, err := a.cgroupID()
 		if err == nil && cg != 0 && ev.CgroupID != cg {
-			return Classification{Verdict: Anomalous, Reason: fmt.Sprintf("cgroup id %d != expected %d (%s)", ev.CgroupID, cg, a.Unit)}
+			// The cached expected cgroup may be stale: systemd can
+			// rmdir+recreate a unit's cgroup across a restart (e.g. once it
+			// briefly becomes empty between stop and start), which changes
+			// the inode. Without a fresh re-check here, every vsock connect
+			// from the just-restarted, perfectly legitimate ssh-cert-api
+			// process is misclassified Anomalous -- and, with --block
+			// enabled, killed outright -- for up to cacheTTL after every
+			// single restart, purely from cache timing rather than any real
+			// mismatch. Confirmed against a real cerberus-api.service
+			// restart via verify-vsock-watch-hardware.sh's api-restart
+			// chaos test. A genuinely wrong cgroup still mismatches on the
+			// fresh lookup, so this doesn't weaken the actual check.
+			fresh, ferr := a.refreshCgroupID()
+			if ferr != nil || fresh == 0 || ev.CgroupID != fresh {
+				return Classification{Verdict: Anomalous, Reason: fmt.Sprintf("cgroup id %d != expected %d (%s)", ev.CgroupID, cg, a.Unit)}
+			}
 		}
 	}
 
@@ -142,7 +164,13 @@ func (a *Allowlist) uid() (uint32, error) {
 		return cached, nil
 	}
 	a.mu.Unlock()
+	return a.refreshUID()
+}
 
+// refreshUID unconditionally re-resolves the expected uid, bypassing the
+// cache, and updates it. Used by uid() on a cache miss, and by Classify to
+// double-check a cache-derived mismatch before declaring an event Anomalous.
+func (a *Allowlist) refreshUID() (uint32, error) {
 	uid, err := a.lookupUID(a.Username)
 	if err != nil {
 		return 0, err
@@ -164,7 +192,14 @@ func (a *Allowlist) cgroupID() (uint64, error) {
 		return cached, nil
 	}
 	a.mu.Unlock()
+	return a.refreshCgroupID()
+}
 
+// refreshCgroupID unconditionally re-resolves the expected cgroup inode,
+// bypassing the cache, and updates it. Used by cgroupID() on a cache miss,
+// and by Classify to double-check a cache-derived mismatch before declaring
+// an event Anomalous.
+func (a *Allowlist) refreshCgroupID() (uint64, error) {
 	path := a.CgroupRoot + "/system.slice/" + a.Unit
 	cg, err := a.statCgroupID(path)
 	if err != nil {

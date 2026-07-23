@@ -87,10 +87,67 @@ func TestClassify_UIDLookupFails_Indeterminate(t *testing.T) {
 func TestClassify_CgroupMismatch_Anomalous(t *testing.T) {
 	a := testAllowlist(999, nil, 777, nil)
 	ev := baseEvent()
-	ev.CgroupID = 111 // does not match the resolved 777
+	ev.CgroupID = 111 // does not match the resolved 777, even after a fresh re-check (same resolver)
 	cls := a.Classify(ev)
 	if cls.Verdict != Anomalous {
 		t.Fatalf("Verdict = %v, want Anomalous (cgroup mismatch)", cls.Verdict)
+	}
+}
+
+func TestClassify_CgroupMismatch_RevalidatesStaleCacheBeforeAnomalous(t *testing.T) {
+	// Simulates a legitimate cerberus-api.service restart that changed its
+	// cgroup (systemd can rmdir+recreate an empty transient cgroup between
+	// stop and start): the cache holds a STALE value (777) from before the
+	// restart, but the resolver now reports the CURRENT cgroup (111), which
+	// matches the event. A stale cache alone must not misclassify this as
+	// Anomalous once a fresh lookup confirms the match.
+	a := &Allowlist{
+		ExePath:      "/usr/bin/ssh-cert-api",
+		Username:     "cerberus",
+		Unit:         "cerberus-api.service",
+		lookupUID:    func(string) (uint32, error) { return 999, nil },
+		statCgroupID: func(string) (uint64, error) { return 111, nil }, // the current cgroup
+		cacheTTL:     time.Minute,
+		cachedCG:     777, // stale, pre-restart value
+		cgResolved:   true,
+		cgAt:         time.Now(),
+	}
+	ev := baseEvent()
+	ev.CgroupID = 111 // the connecting process's actual, current cgroup
+
+	cls := a.Classify(ev)
+	if cls.Verdict != Expected {
+		t.Fatalf("Verdict = %v (%s), want Expected -- a stale cached cgroup must not misclassify a legitimate process once a fresh lookup confirms a match", cls.Verdict, cls.Reason)
+	}
+}
+
+func TestClassify_UIDMismatch_RevalidatesStaleCacheBeforeAnomalous(t *testing.T) {
+	a := &Allowlist{
+		ExePath:      "/usr/bin/ssh-cert-api",
+		Username:     "cerberus",
+		lookupUID:    func(string) (uint32, error) { return 999, nil }, // the current uid
+		statCgroupID: func(string) (uint64, error) { return 0, errors.New("no cgroup") },
+		cacheTTL:     time.Minute,
+		cachedUID:    1000, // stale
+		uidResolved:  true,
+		uidAt:        time.Now(),
+	}
+	ev := baseEvent()
+	ev.UID = 999 // matches the current (fresh) uid, not the stale cached one
+
+	cls := a.Classify(ev)
+	if cls.Verdict != Expected {
+		t.Fatalf("Verdict = %v (%s), want Expected -- a stale cached uid must not misclassify a legitimate process once a fresh lookup confirms a match", cls.Verdict, cls.Reason)
+	}
+}
+
+func TestClassify_UIDMismatch_StillAnomalousWhenRefreshAlsoMismatches(t *testing.T) {
+	a := testAllowlist(999, nil, 0, errors.New("no cgroup"))
+	ev := baseEvent()
+	ev.UID = 0 // root: mismatches both the cache and a fresh re-check (same resolver)
+	cls := a.Classify(ev)
+	if cls.Verdict != Anomalous {
+		t.Fatalf("Verdict = %v, want Anomalous (uid mismatch persists after revalidation)", cls.Verdict)
 	}
 }
 

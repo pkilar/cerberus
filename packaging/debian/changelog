@@ -1,3 +1,19 @@
+cerberus (0.10.2) unstable; urgency=medium
+
+  * Fix a real false-positive in cerberus-vsock-watch found via a live
+    cerberus-api.service restart chaos test on a real RHEL 10 host
+    (verify-vsock-watch-hardware.sh): Allowlist's cached expected cgroup
+    inode can go stale across a restart that changes the unit's cgroup,
+    misclassifying the newly-restarted, legitimate ssh-cert-api as
+    Anomalous for up to the 5s cache window -- and, with the opt-in
+    --block reactive-kill enabled, killing it outright. Allowlist.Classify
+    now does one uncached re-check before declaring a uid or cgroup
+    mismatch Anomalous. Applies to this Debian package the same as RPM
+    and Arch, since it's a Go code fix, not packaging. See
+    docs/vsock-connect-detection.md §4.1.
+
+ -- Paul Kilar <pkilar@gmail.com>  Thu, 23 Jul 2026 14:30:00 -0400
+
 cerberus (0.10.1) unstable; urgency=medium
 
   * No Debian-specific changes; version bump to stay in lockstep with the

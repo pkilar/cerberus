@@ -365,6 +365,20 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.2-1
+- Fix a real false-positive in cerberus-vsock-watch found via a live
+  cerberus-api.service restart chaos test on a real RHEL 10 host
+  (verify-vsock-watch-hardware.sh): Allowlist's cached expected cgroup
+  inode can go stale across a restart that changes the unit's cgroup
+  (systemd may rmdir+recreate an empty transient cgroup between stop and
+  start), misclassifying the newly-restarted, perfectly legitimate
+  ssh-cert-api as Anomalous for up to the 5s cache window -- and, with
+  the opt-in --block reactive-kill enabled, killing it outright.
+  Allowlist.Classify now does one uncached re-check (refreshUID/
+  refreshCgroupID) before declaring a uid or cgroup mismatch Anomalous;
+  a genuinely wrong uid/cgroup still mismatches on the fresh lookup, so
+  this only closes the cache-timing false positive, not the actual
+  security check. See docs/vsock-connect-detection.md §4.1.
 * Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.1-1
 - Fix cerberus-vsock-watch missing auditctl on RHEL 10: that release split
   the classic audit userspace tooling so auditctl (needed by TamperWatch's

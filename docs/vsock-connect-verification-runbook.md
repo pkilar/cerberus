@@ -131,3 +131,22 @@ Once you've run this, the useful thing to report back is the final summary block
 any `journalctl -u cerberus-vsock-watch` excerpts around a FAIL. If everything passes, `docs/vsock-connect-detection.md`
 §6's "NOT done" list should be updated to move these items into "Done" (with a pointer to this runbook and the
 host/kernel version they were verified against).
+
+## Known findings from prior runs
+
+**RHEL 10, 2026-07-23** — first real run of this script surfaced three issues, all now fixed (0.10.2):
+
+- **`api-restart` genuinely failed**: a live `cerberus-api.service` restart produced real anomaly alerts for the
+  legitimate `ssh-cert-api` (`cgroup id ... != expected ...`) — `Allowlist`'s cached cgroup inode was stale across
+  the restart. Fixed in `Allowlist.Classify` (one uncached re-check before declaring a mismatch `Anomalous`; see
+  `docs/vsock-connect-detection.md` §4.1). **If you're on an older build, expect this check to fail until you
+  update.**
+- **`tamper` failed for a host reason, not a Cerberus bug**: `auditctl` itself couldn't reach the kernel audit
+  subsystem (`Error - audit support not in kernel`) — this kernel has no `CONFIG_AUDIT` support at all, so no
+  audit rule can ever load, independent of the `audit`/`audit-rules` packaging. The script now probes for this
+  with `auditctl -s` up front and fails fast with that diagnosis instead of burning 40s on a doomed wait. If you
+  hit this, the fix is on the kernel/host side (confirm `CONFIG_AUDIT` is built in and `audit=0` isn't on the
+  kernel command line), not in this repo.
+- **`block` failed on a script bug, not a real problem**: the check compared `systemctl show`'s `AmbientCapabilities`
+  output against uppercase `CAP_KILL`, but systemd renders capability names lowercase (`cap_kill`) in that
+  output — the capability was actually present the whole time. Fixed to match case-insensitively.

@@ -115,9 +115,19 @@ A `connect()` to `(CID=16, port=5000)` is **expected** iff all of:
 
 Anything else connecting to `CID 16, port 5000` is an **anomaly** → alert at `critical` severity immediately.
 
-The allowlist's MainPID is re-resolved via `systemctl show -p MainPID cerberus-api.service` (cached ~5s) rather
-than fixed at watcher startup, so a `cerberus-api.service` restart doesn't produce a false positive during the
-PID transition.
+The expected uid (`os/user.Lookup`) and cgroup inode (`os.Stat` on `system.slice/<Unit>`) are each resolved
+dynamically and cached for `DefaultCacheTTL` (5s) rather than fixed at watcher startup, so a service-account
+change or unit reinstall is picked up without restarting the watcher.
+
+**Revalidation on a cache-derived mismatch**: a `cerberus-api.service` restart can change its cgroup — systemd
+may `rmdir`+recreate a unit's cgroup once it briefly becomes empty between stop and start, which changes the
+inode — so the cache can be stale for up to `DefaultCacheTTL` immediately after a legitimate restart. Rather than
+alerting (and, with `--block` enabled, killing) the just-restarted, perfectly legitimate `ssh-cert-api` process
+for the length of that window, `Classify` does one uncached re-check (`refreshUID`/`refreshCgroupID`) before
+declaring a uid or cgroup mismatch `Anomalous`. This costs a single extra lookup and only runs on the mismatch
+path, never on every event, and a genuinely wrong uid/cgroup still mismatches on the fresh lookup — it doesn't
+weaken the check, it only closes a false-positive window caused purely by cache timing. Found via a real
+`cerberus-api.service` restart during `verify-vsock-watch-hardware.sh`'s `api-restart` chaos test (§6).
 
 ### 4.2 Event pipeline
 
@@ -273,31 +283,49 @@ default trust model and should configure the watcher to match (documented operat
 - Unit tests for `TamperWatch`/`Heartbeat` (`vsockwatch/tamper_test.go`) with a faked `auditctl -l` output and a
   faked HTTP client.
 
-**NOT done — required before production deploy, on a real target host:** (automated by `verify-vsock-watch-hardware.sh`
-at the repo root; see `docs/vsock-connect-verification-runbook.md` for prerequisites, safety notes, and how each
-check maps to the items below)
+**Verified on real hardware** (RHEL 10, 2026-07-23, via `verify-vsock-watch-hardware.sh`; see
+`docs/vsock-connect-verification-runbook.md`):
 
-- Confirm the live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c`:
-  `cat /sys/kernel/debug/tracing/events/syscalls/sys_enter_connect/format` (or the `tracefs` path).
-- Load the compiled object into a real kernel and confirm the BPF verifier accepts it
-  (`link.Tracepoint` succeeding, not erroring).
-- Drive an actual VSOCK connect (a throwaway test binary dialing the real or a loopback-substituted enclave CID)
-  and confirm the eBPF path emits an event with the expected pid/uid/comm — the eBPF equivalent of the auditd
-  smoke test already done.
-- Chaos test: restart `cerberus-api.service` mid-run, confirm no false positive during the MainPID/cgroup
-  transition on real systemd.
-- Chaos test: `auditctl -D` / `systemctl stop cerberus-vsock-watch` on a real host, confirm the tampering
-  meta-alert fires from the surviving detector and that `AmbientCapabilities` in the packaged unit are
-  sufficient (this sandbox cannot grant/verify `CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_PTRACE`/`CAP_DAC_READ_SEARCH`
-  end-to-end). `CAP_DAC_READ_SEARCH` in paticular lets the de-privileged `cerberus-audit` account read the
-  root-owned `/var/log/audit/audit.log` (0600) and the tracefs tracepoint-id file; without it, both detectors
-  fail at startup with `permission denied` and the process exits (`all_detectors_down`).
-- With `--block` enabled, confirm `ebpf.Watcher.Run` actually invokes `Blocker.Block` end-to-end on a real
-  anomalous connect (the auditd path already has this coverage via `TestAuditWatcher_Run_BlocksOnAnomalousConnect`;
-  the eBPF equivalent, `TestDecodeEvent_BlockworthyWiring`, only checks that a decoded event's classification and
-  PID compose correctly with a `Blocker` — it doesn't drive `Run` itself, since that needs the same real-kernel
-  privilege as the rest of this section). Also confirm `CAP_KILL` is sufficient for `cerberus-audit` to signal a
-  process it doesn't own.
+- Live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c` — `uservaddr` (the
+  second `connect(2)` argument) confirmed at offset 24, size 8, exactly matching `ctx->args[1]`.
+- The BPF verifier accepts the compiled object and the tracepoint attaches (`link.Tracepoint` succeeding).
+- A real `AF_VSOCK` connect (driven by `cerberus-stress signer -transport vsock`) produced a correctly classified
+  `ebpf`-sourced anomaly event.
+- `cerberus-api.service` genuinely waits on `cerberus-vsock-watch`'s `Type=notify` `READY=1`, not just its process
+  start (§4.3).
+
+**Found and fixed by this same run** — real gaps the chaos tests were specifically designed to catch:
+
+- Chaos test (`cerberus-api.service` restart mid-run) caught a genuine false-positive: `Allowlist`'s cached
+  cgroup inode went stale across a restart that changed the unit's cgroup, misclassifying the newly-restarted,
+  perfectly legitimate `ssh-cert-api` as `Anomalous` for the length of the 5s cache window (and would have been
+  killed outright with `--block` enabled). Fixed in `Allowlist.Classify` — see §4.1's "Revalidation on a
+  cache-derived mismatch". **Needs a re-run to confirm the fix**, since the fix landed after this test run.
+- The `--block`/`CAP_KILL` check in `verify-vsock-watch-hardware.sh` itself had a case-sensitivity bug (matched
+  uppercase `CAP_KILL` against `systemctl show`'s lowercase `cap_kill` output) that produced a false FAIL even
+  though the capability was genuinely present. Fixed in the script. **Needs a re-run** to get an actual
+  end-to-end confirmation that `--block` SIGKILLs a cross-uid process (that part of the check never ran, since
+  the script bailed out on the false capability-check failure first).
+
+**Blocked on this specific host, not a Cerberus bug:**
+
+- Chaos test (audit-rule removal → tampering meta-alert): this RHEL 10 host's kernel has no audit netlink
+  support at all (`auditctl -s` itself fails with "Error - audit support not in kernel" / "Cannot open netlink
+  audit socket"), so no audit rule can ever actually load — independent of the `audit`/`audit-rules` packaging
+  fix. `TamperWatch` correctly never alerts in this state (per its "never observed present" fail-quiet design,
+  §4.4) — this needs a host with a kernel that actually has `CONFIG_AUDIT` built in (check `cat /proc/cmdline`
+  for `audit=0` and the kernel config) before it can be verified. `verify-vsock-watch-hardware.sh` now probes for
+  this with `auditctl -s` and fails fast with this diagnosis instead of burning 40s on a doomed wait.
+- `CAP_DAC_READ_SEARCH` sufficiency for reading `/var/log/audit/audit.log` and the tracefs tracepoint-id file —
+  moot on this host until audit netlink itself works, but not yet independently confirmed either way.
+
+**Still not done:**
+
+- Chaos test: `systemctl stop cerberus-vsock-watch` (killing both detectors at once) noticed by an external
+  heartbeat monitor — depends on operator-side monitoring infrastructure outside this repo (§4.4/§8), flagged as
+  a `MANUAL` step in the runbook.
+- The documented `Wants=`/`After=` residual gap (§4.3: watcher fails outright before `READY=1`, `cerberus-api`
+  starts anyway) — also flagged as a `MANUAL` step, not yet independently reproduced.
 
 ## 7. Why this is detection, not prevention
 
