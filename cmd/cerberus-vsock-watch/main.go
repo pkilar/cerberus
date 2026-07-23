@@ -107,12 +107,21 @@ func run() int {
 	tamperCheckInterval := flag.Duration("tamper-check-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL", 30*time.Second), "how often to verify the auditd rule is still installed")
 	disableEBPF := flag.Bool("disable-ebpf", envBoolDefault("CERBERUS_VSOCK_WATCH_DISABLE_EBPF", false), "run only the auditd detector (for hosts where the eBPF probe can't load — see docs/vsock-connect-detection.md §7)")
 	block := flag.Bool("block", envBoolDefault("CERBERUS_VSOCK_WATCH_BLOCK", false), "opt-in: best-effort SIGKILL the offending process on a confirmed Anomalous classification (NOT true prevention — see docs/vsock-connect-detection.md §4.5/§7; requires CAP_KILL)")
+	lsmMonitor := flag.Bool("lsm-monitor", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_MONITOR", false), "opt-in: load the preventive LSM gate (security_socket_connect) in log-only mode — never denies a connect() by itself; see docs/vsock-connect-detection.md §4.6")
+	lsmEnforce := flag.Bool("lsm-enforce", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE", false), "actually deny a cgroup-mismatched connect() via the LSM gate (NOT exe/uid-checked — narrower than --block; requires --lsm-monitor; run --lsm-monitor alone across a real cerberus-api.service restart first — see docs/vsock-connect-detection.md §4.6)")
+	lsmEnforceStateFile := flag.String("lsm-enforce-state-file", envDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE_STATE_FILE", "/run/cerberus-vsock-watch/lsm-enforce"), `runtime toggle for the LSM gate's enforce mode: contents ("true"/"false") are polled every --lsm-poll-interval and override --lsm-enforce without a restart; missing/malformed content leaves the mode unchanged`)
+	lsmPollInterval := flag.Duration("lsm-poll-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL", 250*time.Millisecond), "how often the LSM gate's cgroup pin and enforce-state-file are refreshed")
 	showVersion := flag.Bool("V", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.Version)
 		return 0
+	}
+
+	if err := validateLSMFlags(*lsmMonitor, *lsmEnforce); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
@@ -151,7 +160,7 @@ func run() int {
 		"exe_path", *exePath, "username", *username, "unit", *unit,
 		"audit_log", *auditLogPath, "webhook_configured", *webhookURL != "",
 		"heartbeat_configured", *heartbeatURL != "", "ebpf_enabled", !*disableEBPF,
-		"block_enabled", *block)
+		"block_enabled", *block, "lsm_monitor_enabled", *lsmMonitor, "lsm_enforce_enabled", *lsmEnforce)
 
 	// blocker stays nil (the interface zero value) when --block is unset, so
 	// AuditWatcher/ebpf.Watcher's "if w.Blocker != nil" checks disable the
@@ -280,6 +289,30 @@ func run() int {
 		})
 	}
 
+	// The preventive LSM gate is fully independent of the two detectors
+	// above: a different program type, a different attach mechanism, and —
+	// per its own doc comment — deliberately NOT wired into
+	// detectorHealth/fatalShutdown or the shared readyGate, since its
+	// narrower (cgroup-only) scope makes it a poor proxy for either "is
+	// detection still active" or "has this process finished starting up".
+	// recoverDetector's onPanic is nil for the same reason tamperwatch's is.
+	if *lsmMonitor {
+		lsmGuard := &vsockebpf.LSMGuard{
+			Allowlist:        allow,
+			Shipper:          asyncShipper,
+			Blocker:          blocker,
+			Enforce:          *lsmEnforce,
+			PollInterval:     *lsmPollInterval,
+			EnforceStatePath: *lsmEnforceStateFile,
+		}
+		producersWG.Go(func() {
+			defer recoverDetector("lsm", nil)
+			if err := lsmGuard.Run(ctx, nil); err != nil && ctx.Err() == nil {
+				slog.Error("vsockwatch.lsm.stopped", "error", err)
+			}
+		})
+	}
+
 	tamperWatch := &vsockwatch.TamperWatch{Shipper: asyncShipper, Interval: *tamperCheckInterval}
 	producersWG.Go(func() {
 		defer recoverDetector("tamperwatch", nil)
@@ -311,6 +344,20 @@ func run() int {
 	cancelShipper()
 	shipperWG.Wait()
 	return exitCode
+}
+
+// validateLSMFlags enforces that --lsm-enforce is never accepted without
+// --lsm-monitor — a hard startup error, not a silent auto-promotion. This is
+// the structural half of the monitor-first rollout: an operator must
+// explicitly opt into loading the LSM gate at all (--lsm-monitor) before
+// enforcement can even be considered, and is expected to have watched it run
+// clean (see docs/vsock-connect-detection.md §4.6) before ever adding
+// --lsm-enforce.
+func validateLSMFlags(monitor, enforce bool) error {
+	if enforce && !monitor {
+		return fmt.Errorf("vsockwatch: --lsm-enforce requires --lsm-monitor (run --lsm-monitor alone first and confirm it logs cleanly across a real cerberus-api.service restart — see docs/vsock-connect-detection.md §4.6)")
+	}
+	return nil
 }
 
 // parseWebhookFormat validates the --webhook-format/CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT

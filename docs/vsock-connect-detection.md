@@ -1,12 +1,15 @@
 # VSOCK-Connect Detection Design
 
-> **Status:** Implemented (Option C — both detectors), plus an opt-in reactive-kill response (§4.5; default off).
+> **Status:** Implemented (Option C — both detectors), plus an opt-in reactive-kill response (§4.5; default off)
+> and an opt-in, monitor-first preventive LSM gate (§4.6; default off, dry-run before enforcement).
 > Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
-> **Kind of control:** Detective, not preventive. See §7 for why no host-side control can fully prevent this.
+> **Kind of control:** Primarily detective, plus a narrow, opt-in preventive gate (§4.6) that only blocks by
+> cgroup identity. See §7 for why no host-side control can fully prevent `SIGN-1` — the LSM gate narrows the gap,
+> it does not close it.
 > The opt-in reactive kill in §4.5 is a mitigation response, not prevention either — see that section.
 > **Code:** `vsockwatch/` (allowlist, alerting, auditd correlator, tamper watch, heartbeat, reactive-kill blocker)
-> and `vsockwatch/ebpf/` (the eBPF loader and probe), wired together in `cmd/cerberus-vsock-watch/main.go`.
-> Packaged as `cerberus-vsock-watch` (RPM/deb/Arch — see `packaging/`).
+> and `vsockwatch/ebpf/` (the eBPF loader/probe and the LSM gate loader), wired together in
+> `cmd/cerberus-vsock-watch/main.go`. Packaged as `cerberus-vsock-watch` (RPM/deb/Arch — see `packaging/`).
 >
 > **Read before deploying:** the eBPF probe (`vsockwatch/ebpf/src/vsock_connect.c`) was written, compiled, and
 > ELF-validated (`go test ./vsockwatch/ebpf/...`) in a development sandbox with no kernel BTF, no debugfs tracing
@@ -16,7 +19,11 @@
 > end-to-end with the real compiled `cerberus-vsock-watch` binary against a synthetic audit log (§6) and is
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
 > must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
-> walked through in `docs/vsock-connect-verification-runbook.md`.
+> walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
+> §4.6) carries the SAME caveat, plus its own: it has never been attached to a live kernel's
+> `security_socket_connect` hook, and even the exact BTF attach-point name and parameter-type compatibility are
+> unconfirmed — see that file's header comment. Never enable `--lsm-enforce` without first running
+> `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
 
 ## 1. Problem statement
 
@@ -257,13 +264,68 @@ is deliberately **not** the same thing as prevention:
   trigger it; a real connect is expected to be observed by both, making a redundant, harmless second `SIGKILL`
   to an already-dead PID the common case rather than the exception.
 
-**Not attempted here — true kernel-level prevention.** Actually denying a non-allowlisted `connect()` before it
-succeeds would require a BPF program attached to the `security_socket_connect` **LSM** hook (not a tracepoint),
-which can return a nonzero value the kernel treats as a deny. That's a materially larger and riskier change: it
-needs `CONFIG_BPF_LSM=y` and `bpf` in the kernel's `lsm=` boot parameter, a new `CAP_MAC_ADMIN` grant, and — like
-the existing tracepoint probe (see this doc's top-of-file status note) — cannot be load-tested in this sandbox;
-a bug in an LSM hook has a much larger blast radius than a bug here, since it can block *all* `connect()` calls
-on the host, not just fail to alert on one. Tracked as a follow-up in §8, not built as part of this change.
+**True kernel-level prevention is now built — see §4.6.** Actually denying a non-allowlisted `connect()` before
+it succeeds requires a BPF program attached to the `security_socket_connect` **LSM** hook (not a tracepoint),
+which can return a nonzero value the kernel treats as a deny — unlike the reactive kill above, which cannot stop
+the first attempt. §4.6 covers the design, its narrower (cgroup-only) scope, and why it still does not close
+`SIGN-1`.
+
+### 4.6 Preventive LSM gate (opt-in, monitor-first, default off)
+
+`CERBERUS_VSOCK_WATCH_LSM_MONITOR=true` (or `--lsm-monitor`) loads a second, independent eBPF program
+(`vsockwatch/ebpf/src/vsock_lsm.c`, loaded by `vsockwatch/ebpf/lsm.go`'s `LSMGuard`) attached to the
+`security_socket_connect` **LSM** hook rather than a tracepoint. Unlike `sys_enter_connect`, an LSM hook's return
+value IS acted on by the kernel: a nonzero return denies the `connect()` before it succeeds. This is the one
+piece of this design that is genuinely preventive, not just detective.
+
+**Why this is narrower than the detective path, not a superset of it.** An LSM hook must decide allow/deny
+synchronously, entirely in-kernel — there is no way to pause the syscall and ask a Go userspace process "does
+`/proc/<pid>/exe` match?" the way `Allowlist.Classify` does. The only identity signal cheap and available
+entirely in-kernel is `bpf_get_current_cgroup_id()`. So the LSM gate denies a connect only when the caller is
+OUTSIDE the pinned `ssh-cert-api` cgroup — it does NOT check exe path or uid the way the detective path does.
+A compromised `ssh-cert-api` itself (or anything sharing its cgroup) still passes the gate untouched. **This
+does not close `SIGN-1`** (see §7) — it prevents a rogue, *non*-ssh-cert-api process from reaching the enclave
+at all, which the detective path could previously only alert on after the fact.
+
+**Mechanism:**
+- `vsock_lsm.c` maintains a double-buffered `lsm_policy` map (2 slots) plus a single-word `lsm_active_slot`
+  index: `LSMGuard`'s poll loop writes a full new policy into the currently-INACTIVE slot, then flips the index
+  as a publish barrier, so an in-kernel reader never observes a torn write straddling the cgroup id and its
+  "populated" flag — the moment this matters most is exactly a `cerberus-api.service` restart, when the pinned
+  cgroup id changes.
+- A separate `lsm_mode` map (0=monitor, 1=enforce) decouples the enforce toggle from the cgroup pin entirely.
+- **Fail-open bootstrap is structural, not a convention**: the maps are zero-initialized by the kernel, so
+  before `LSMGuard` ever publishes a policy, `populated=0` and every connect is allowed — there is no window
+  where an unconfigured gate denies everything.
+- The cgroup pin reuses `Allowlist.CgroupID()` (the same cached resolution `Classify` uses for the detective
+  path — see §4.1), refreshed every `--lsm-poll-interval` (default 250ms).
+
+**Rollout is monitor-first by design, not just convention:**
+- `--lsm-monitor` alone loads the gate and ships a `vsock_lsm_block` alert (`lsm_mode=monitor`,
+  `lsm_denied=false`) on every cgroup mismatch, but the program never returns a deny — this is the only way to
+  load the gate at all.
+- `--lsm-enforce` is rejected as a hard startup error unless `--lsm-monitor` is also set
+  (`cmd/cerberus-vsock-watch/main.go`'s `validateLSMFlags`) — enforcement is never silently auto-promoted.
+- An operator is expected to watch `--lsm-monitor` run clean — no `lsm_denied` (impossible in monitor mode
+  anyway) and, more importantly, no would-deny alert naming the legitimate `ssh-cert-api`'s own exe — across at
+  least one real `cerberus-api.service` restart before ever adding `--lsm-enforce`. `--lsm-enforce-state-file`
+  (default `/run/cerberus-vsock-watch/lsm-enforce`, in the unit's `RuntimeDirectory=`) also allows toggling
+  enforcement at runtime without a restart, polled the same interval as the cgroup pin.
+
+**Why the restart race is a documented residual risk, not something this design eliminates.** This is
+structurally the same race `Allowlist`'s bounded cgroup-revalidation retry (§4.1) exists to paper over for the
+detective path — except here, a lost race means a REAL denied `connect()`, not just a noisy `Indeterminate`
+alert. `ssh-cert-api` has no dial retry on the signing path (`ssh-cert-api/internal/enclave/client.go`), so a
+false deny during a lost race surfaces immediately as a user-visible signing failure, not a silently-absorbed
+hiccup. The tight default poll interval and the mandatory monitor-mode practice above mitigate this; neither
+eliminates it.
+
+**Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
+in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a
+new `CAP_MAC_ADMIN` grant (`packaging/*/cerberus-vsock-watch.service`). See `docs/RUNBOOK.md`'s "Preventive LSM
+gate prerequisites" for verification commands. Per this doc's top-of-file status note, whether the kernel's
+BTF-based LSM attach machinery accepts this program's exact section name and parameter types is genuinely
+unconfirmed against a live kernel — see `vsock_lsm.c`'s header comment.
 
 ## 5. False-positive inventory
 
@@ -362,12 +424,16 @@ fix) to fully address:
 ## 7. Why this is detection, not prevention
 
 Any secret or agent that lives only on the host is reachable by the same root access this design defends
-against — root can read `ssh-cert-api`'s memory, disable `auditd`, or unload an eBPF program. This is why the
-design leans on (a) two independent detection paths, (b) alerting on tampering with the detectors themselves, and
-(c) an external heartbeat that doesn't depend on the host to self-report. None of this closes `SIGN-1`; it makes
-exploitation observable and non-repudiable. Actually *closing* the gap requires moving the authorization decision
-into the enclave itself (forwarding the original Kerberos ticket/OIDC token and re-deriving policy inside the
-PCR0-measured image) — a materially larger project, tracked separately.
+against — root can read `ssh-cert-api`'s memory, disable `auditd`, or unload an eBPF program (including the
+LSM gate itself — a root attacker can unload it exactly as easily as the tracepoint detectors). This is why the
+design leans on (a) two independent detection paths, (b) alerting on tampering with the detectors themselves,
+(c) an external heartbeat that doesn't depend on the host to self-report, and, additionally, (d) the §4.6
+preventive LSM gate — but (d) only ever checks cgroup membership, so it does not change this section's
+conclusion for anything running IN ssh-cert-api's own cgroup. None of this closes `SIGN-1`; between the
+detective paths and the LSM gate, it makes exploitation by anything else observable and, opt-in, preventable —
+but a compromise of ssh-cert-api itself remains fully in scope. Actually *closing* the gap requires moving the
+authorization decision into the enclave itself (forwarding the original Kerberos ticket/OIDC token and
+re-deriving policy inside the PCR0-measured image) — a materially larger project, tracked separately.
 
 ## 8. Open questions / follow-ups
 
@@ -379,9 +445,7 @@ PCR0-measured image) — a materially larger project, tracked separately.
   system already watching `/health` behind the LB, but that's a separate piece of infrastructure to stand up.
 - Enclave-side authorization (the actual fix for `SIGN-1`, not just detection of its exploitation) is tracked as
   a separate, larger design.
-- True kernel-level prevention (§4.5): an LSM BPF hook on `security_socket_connect` that actually denies a
-  non-allowlisted connect before it succeeds, rather than reacting after the fact. Requires `CONFIG_BPF_LSM`, a
-  new `CAP_MAC_ADMIN` grant, a new BPF program (this package's tracepoint object can't be reused — LSM programs
-  attach differently and have stricter verifier constraints), and real-hardware load-testing this sandbox can't
-  provide. Turns this control from detective into (also) preventive, which would also need updates to
-  `docs/THREAT-MODEL.md`'s `SIGN-1` writeup. Tracked separately, not built as part of this change.
+- True kernel-level prevention is now built — see §4.6. What's still open: closing the cgroup-vs-exe/uid gap
+  (denying a connect from a process that shares ssh-cert-api's cgroup but has a different exe/uid) isn't
+  feasible without a synchronous userspace round-trip, which an LSM hook cannot do — this is a hard
+  architectural ceiling on the gate's precision, not a missing feature to build.

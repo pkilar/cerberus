@@ -28,6 +28,13 @@ ExecStart=/usr/bin/cerberus-vsock-watch
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+# Owned by User=/Group= above, auto-created on start and removed on stop.
+# This is the actual control against an unprivileged local user writing the
+# --lsm-enforce-state-file runtime toggle to silently disable the preventive
+# LSM gate's enforcement (docs/vsock-connect-detection.md §4.6) — get the
+# mode wrong here and the toggle file becomes a local bypass.
+RuntimeDirectory=cerberus-vsock-watch
+RuntimeDirectoryMode=0750
 
 # CAP_BPF/CAP_PERFMON: load and attach the eBPF probe (falls back to
 # CAP_SYS_ADMIN on kernels without the split BPF capabilities, pre-5.8).
@@ -56,8 +63,14 @@ LimitNOFILE=65536
 # unconditionally since blocking defaults to off and is toggled at runtime,
 # not at install time — matching how CAP_BPF/CAP_PERFMON are granted even
 # though --disable-ebpf can turn off eBPF.
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL
+# CAP_MAC_ADMIN: load/attach the preventive LSM gate (BPF_PROG_TYPE_LSM on
+# security_socket_connect, CERBERUS_VSOCK_WATCH_LSM_MONITOR/_LSM_ENFORCE,
+# docs/vsock-connect-detection.md §4.6) — distinct from CAP_BPF/CAP_PERFMON,
+# which only cover ordinary (tracepoint) program types. Granted
+# unconditionally for the same reason as CAP_KILL above: both --lsm-monitor/
+# --lsm-enforce and --block are runtime-toggled, not install-time-fixed.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN
 
 # Security hardening. NoNewPrivileges is intentionally NOT set: the ambient
 # capabilities above must survive exec, which NoNewPrivileges would strip.

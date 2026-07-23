@@ -551,7 +551,29 @@ Environment variables are managed via sysconfig files rather than inline in the 
 
 **`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
 
-**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL` (a Slack Incoming Webhook URL is auto-detected and formatted correctly), `_WEBHOOK_FORMAT` (force `slack` or `generic`), `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF` — see `docs/vsock-connect-detection.md`
+**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL` (a Slack Incoming Webhook URL is auto-detected and formatted correctly), `_WEBHOOK_FORMAT` (force `slack` or `generic`), `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF`, `_BLOCK` — plus the preventive LSM gate's `_LSM_MONITOR`, `_LSM_ENFORCE`, `_LSM_ENFORCE_STATE_FILE`, `_LSM_POLL_INTERVAL` (opt-in, monitor-first — see [Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites) below and `docs/vsock-connect-detection.md` §4.6)
+
+#### Preventive LSM gate prerequisites
+
+`--lsm-monitor`/`--lsm-enforce` (docs/vsock-connect-detection.md §4.6) need real kernel support beyond what the
+tracepoint detectors require — check before enabling either flag:
+
+```bash
+# CONFIG_BPF_LSM must be built in:
+grep CONFIG_BPF_LSM /boot/config-$(uname -r)
+# "bpf" must be among the ACTIVE LSMs (not just compiled in):
+cat /sys/kernel/security/lsm
+```
+
+If `bpf` is missing from the active LSM list, it must be **appended to** the kernel's `lsm=` boot parameter —
+**never replace it outright**: `lsm=bpf` alone silently drops every other active LSM (SELinux, AppArmor), which
+is a materially worse outcome than not having this feature. Append it in your bootloader config (e.g.
+`lsm=selinux,bpf` on an SELinux host) and reboot.
+
+Rollout is monitor-first by design: install with `--lsm-monitor` alone (never `--lsm-enforce`) and watch it log
+cleanly — with no `lsm_denied` alerts naming the legitimate `ssh-cert-api` — across at least one real
+`cerberus-api.service` restart before ever adding `--lsm-enforce`. `verify-vsock-watch-hardware.sh`'s
+`lsm-kernel-support`/`lsm-monitor`/`lsm-enforce`/`lsm-restart-chaos` checks automate this.
 
 ### Versioning
 
@@ -1084,10 +1106,16 @@ the host, anything with root on the EC2 host can dial the enclave's VSOCK listen
 arbitrary principals — entirely bypassing the Casbin authorization described in this section. This is documented
 as `SIGN-1` in `docs/THREAT-MODEL.md` and is an accepted architectural residual of the host-mediated design, not
 fixable from the host side alone. The optional **`cerberus-vsock-watch`** package (`docs/vsock-connect-detection.md`)
-is a detective control for exactly this: it runs two independent detectors (an `auditd` rule and an eBPF probe)
-that alert whenever a process other than the legitimate `ssh-cert-api` connects to the enclave. It does not
-prevent the bypass — nothing running on the host can — but it makes exploitation observable, including tampering
-with the detectors themselves. Install and enable it alongside `cerberus-api`:
+is primarily a detective control for exactly this: it runs two independent detectors (an `auditd` rule and an
+eBPF probe) that alert whenever a process other than the legitimate `ssh-cert-api` connects to the enclave, plus
+an opt-in reactive-kill (`--block`) that reacts after the fact. It also ships an opt-in, monitor-first
+**preventive** LSM gate (`--lsm-monitor`/`--lsm-enforce`, §4.6 — see
+[Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites) above) that CAN deny a connect() before it
+succeeds — but only from a process outside `ssh-cert-api`'s own cgroup. **This narrows, but does not close, `SIGN-1`**:
+a compromised `ssh-cert-api` itself (or anything sharing its cgroup) still passes the gate untouched and can send
+an arbitrary signing request. Nothing running on the host can fully close this gap — but between the detective
+paths and the LSM gate, exploitation by anything *other than* ssh-cert-api itself is both observable and, opt-in,
+preventable. Install and enable it alongside `cerberus-api`:
 ```sh
 sudo systemctl enable --now cerberus-vsock-watch
 ```

@@ -22,6 +22,13 @@ type Kind string
 const (
 	KindVSockAnomaly   Kind = "vsock_connect_anomaly"
 	KindDetectorTamper Kind = "detector_tampering"
+	// KindVSockLSMBlock is a would-deny (monitor mode) or actually-denied
+	// (enforce mode) event from the preventive LSM gate (§4.6). Deliberately
+	// a DISTINCT Kind from KindVSockAnomaly: the LSM gate's cgroup-only
+	// in-kernel decision is an architecturally coarser signal than the
+	// detective path's full exe/uid/cgroup classification, and conflating
+	// them under one Kind would mislead anyone triaging alerts.
+	KindVSockLSMBlock Kind = "vsock_lsm_block"
 )
 
 // Alert is the structured payload shipped on every alert-worthy Event or
@@ -44,6 +51,14 @@ type Alert struct {
 	Comm     string `json:"comm,omitempty"`
 	Exe      string `json:"exe,omitempty"`
 	CgroupID uint64 `json:"cgroup_id,omitempty"`
+
+	// LSMMode and LSMDenied are set only on a KindVSockLSMBlock alert:
+	// LSMMode is "monitor" or "enforce" (which mode the gate was running in
+	// when this event fired), LSMDenied reports whether the connect() was
+	// actually denied (always false in monitor mode). omitempty on both
+	// means zero shape change to every other alert kind's JSON.
+	LSMMode   string `json:"lsm_mode,omitempty"`
+	LSMDenied bool   `json:"lsm_denied,omitempty"`
 }
 
 // NewAnomalyAlert builds an Alert for an Anomalous or Indeterminate
@@ -61,6 +76,32 @@ func NewAnomalyAlert(ev Event, cls Classification) Alert {
 		Comm:     ev.Comm,
 		Exe:      ev.Exe,
 		CgroupID: ev.CgroupID,
+	}
+}
+
+// NewLSMBlockAlert builds an Alert for a cgroup-mismatch event from the
+// preventive LSM gate. cls comes from calling Allowlist.Classify(ev) purely
+// for alert-message enrichment (a rich Reason using the existing
+// Expected/Anomalous/Indeterminate vocabulary) — it is NEVER used for the
+// in-kernel allow/deny decision itself, which is cgroup-only (see
+// vsockwatch/ebpf/lsm.go and docs/vsock-connect-detection.md §4.6). mode is
+// "monitor" or "enforce"; denied reports whether this specific event was
+// actually blocked (always false in monitor mode, by construction).
+func NewLSMBlockAlert(ev Event, cls Classification, mode string, denied bool) Alert {
+	return Alert{
+		Time:      time.Now(),
+		Severity:  "critical",
+		Kind:      KindVSockLSMBlock,
+		Reason:    fmt.Sprintf("lsm cgroup mismatch (%s): %s", cls.Verdict, cls.Reason),
+		Detector:  ev.Source,
+		PID:       ev.PID,
+		UID:       ev.UID,
+		GID:       ev.GID,
+		Comm:      ev.Comm,
+		Exe:       ev.Exe,
+		CgroupID:  ev.CgroupID,
+		LSMMode:   mode,
+		LSMDenied: denied,
 	}
 }
 
@@ -127,6 +168,8 @@ func (l LogShipper) Ship(_ context.Context, a Alert) error {
 		"comm", a.Comm,
 		"exe", a.Exe,
 		"cgroup_id", a.CgroupID,
+		"lsm_mode", a.LSMMode,
+		"lsm_denied", a.LSMDenied,
 	)
 	return nil
 }
@@ -262,6 +305,9 @@ func slackPayload(a Alert) slackWebhookPayload {
 	}
 	if a.CgroupID != 0 {
 		fmt.Fprintf(&b, "*Cgroup ID:* %d\n", a.CgroupID)
+	}
+	if a.LSMMode != "" {
+		fmt.Fprintf(&b, "*LSM mode:* %s  *Denied:* %t\n", a.LSMMode, a.LSMDenied)
 	}
 	fmt.Fprintf(&b, "*Time:* %s", a.Time.Format(time.RFC3339))
 	return slackWebhookPayload{Text: b.String()}

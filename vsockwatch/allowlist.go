@@ -220,6 +220,15 @@ func (a *Allowlist) refreshUID() (uint32, error) {
 	return uid, nil
 }
 
+// CgroupID exposes the same cached cgroup-inode resolution Classify uses
+// (see cgroupID/refreshCgroupID below), so a preventive control (the LSM
+// gate's cgroup pin, vsockwatch/ebpf/lsm.go) and this detective
+// classification always derive the expected cgroup from one source of
+// truth, inheriting the same DefaultCacheTTL.
+func (a *Allowlist) CgroupID() (uint64, error) {
+	return a.cgroupID()
+}
+
 // cgroupID resolves and caches the expected cgroup inode. See uid's doc
 // comment: the resolver call (os.Stat) runs unlocked for the same reason.
 func (a *Allowlist) cgroupID() (uint64, error) {
