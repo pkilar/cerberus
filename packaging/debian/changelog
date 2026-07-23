@@ -1,3 +1,17 @@
+cerberus (0.10.4) unstable; urgency=medium
+
+  * Reduce cerberus-vsock-watch alert noise on a cerberus-api.service
+    restart: a third real restart chaos test on the same RHEL 10 host
+    confirmed 0.10.3's Indeterminate downgrade was working correctly
+    (the reported failure was a bug in the verification script, since
+    fixed) but the Indeterminate alert still fired on essentially every
+    restart -- safe but noisy. Allowlist.Classify's single cgroup
+    recheck is now a bounded retry loop instead of one attempt, so the
+    common case resolves cleanly to Expected with no alert at all. See
+    docs/vsock-connect-detection.md §4.1.
+
+ -- Paul Kilar <pkilar@gmail.com>  Thu, 23 Jul 2026 17:30:00 -0400
+
 cerberus (0.10.3) unstable; urgency=medium
 
   * Fix a second round of a real false-positive in cerberus-vsock-watch,

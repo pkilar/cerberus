@@ -119,31 +119,39 @@ The expected uid (`os/user.Lookup`) and cgroup inode (`os.Stat` on `system.slice
 dynamically and cached for `DefaultCacheTTL` (5s) rather than fixed at watcher startup, so a service-account
 change or unit reinstall is picked up without restarting the watcher.
 
-**Revalidation on a cache-derived mismatch**: a `cerberus-api.service` restart can change its cgroup — systemd
-may `rmdir`+recreate a unit's cgroup once it briefly becomes empty between stop and start, which changes the
-inode — so the cache can be stale for up to `DefaultCacheTTL` immediately after a legitimate restart. Rather than
-alerting (and, with `--block` enabled, killing) the just-restarted, perfectly legitimate `ssh-cert-api` process
-for the length of that window, `Classify` does one uncached re-check (`refreshUID`/`refreshCgroupID`) before
-declaring a uid or cgroup mismatch. This costs a single extra lookup and only runs on the mismatch path, never on
-every event, and resolves the common case (the cache was simply a few seconds old) back to `Expected`.
+**Revalidation on a cache-derived uid mismatch**: the cached expected uid can simply be a few seconds stale.
+`Classify` does one uncached re-check (`refreshUID`) before declaring a uid mismatch — a single extra lookup,
+only on the mismatch path, never on every event — which resolves the common case back to `Expected`. A uid
+mismatch that survives that recheck is `Anomalous`: uid is a static `/etc/passwd` entry, not a per-restart kernel
+object, so a real mismatch there isn't a timing artifact.
 
-**Why a cgroup mismatch downgrades to `Indeterminate`, not `Anomalous`, even after that recheck**: a single
-immediate recheck isn't actually guaranteed to win the race against systemd's *own* cgroup settling — on a real
-restart, the kernel can assign the new process to its new cgroup before the well-known `system.slice/<unit>` path
-`stat()`s to that same inode, and retrying with a sleep here would block the hot classification path for every
-event (the same problem `AsyncShipper`, §4.2, exists to avoid on the delivery side). So a uid mismatch that
-survives a fresh recheck is still `Anomalous` (uid is a static `/etc/passwd` entry, not a per-restart kernel
-object — a real mismatch there isn't a timing artifact), but a cgroup mismatch that survives it is
-`Indeterminate`: `exe` and `uid` already matched by this point, so this isn't "any random process" the way an exe
-or uid mismatch is. `Indeterminate` still alerts at the same `critical` severity as `Anomalous` (§4.2), but is
-deliberately never `Blockworthy` (`event.go`), so `--block` cannot `SIGKILL` the legitimate, freshly-restarted
-`ssh-cert-api` over a cgroup-settling false positive. A genuine attacker satisfying this narrower bar (same exe,
+**Bounded retry on a cache-derived cgroup mismatch**: a `cerberus-api.service` restart can change its cgroup —
+systemd may `rmdir`+recreate a unit's cgroup once it briefly becomes empty between stop and start — and, unlike
+uid, this can still be *in progress* by the time an event is classified: the kernel can assign the newly-started
+process to its new cgroup before the well-known `system.slice/<unit>` path `stat()`s to that same inode. A single
+immediate recheck (tried first, in an earlier version of this fix) isn't reliably enough to win that race — real
+hardware testing (`verify-vsock-watch-hardware.sh`'s `api-restart` chaos test, §6) showed it still produced an
+occasional false `Anomalous`. `Classify` now retries `refreshCgroupID` up to `cgroupRevalidateAttempts` times
+(default 10, `cgroupRevalidateInterval` apart, default 50ms — vars, not consts, so tests can shrink them), giving
+systemd's settling a bounded window to finish before giving up. This only runs on the mismatch path — in
+practice, only right around a restart — so a few hundred milliseconds of retry here is a materially different
+cost than blocking the hot path on every event the way an unconditional retry would (the same problem
+`AsyncShipper`, §4.2, exists to avoid on the delivery side).
+
+**Why a cgroup mismatch that survives the full retry budget downgrades to `Indeterminate`, not `Anomalous`**: the
+retry budget is generous but can't be unbounded, and can't guarantee it always wins the race on every host under
+every load condition. `exe` and `uid` already matched by this point, so this isn't "any random process" the way
+an exe or uid mismatch is. `Indeterminate` still alerts at the same `critical` severity as `Anomalous` (§4.2), but
+is deliberately never `Blockworthy` (`event.go`), so `--block` cannot `SIGKILL` the legitimate, freshly-restarted
+`ssh-cert-api` if the retry budget is ever exhausted. A genuine attacker satisfying this narrower bar (same exe,
 same uid, wrong cgroup — a copied binary running under the right account but outside `cerberus-api.service`) is
-still loudly alerted on every time, just not auto-killed by this signal alone. Found via two rounds of a real
-`cerberus-api.service` restart during `verify-vsock-watch-hardware.sh`'s `api-restart` chaos test (§6): the first
-round showed the raw cache-staleness false positive; the fix above closed most of it but one restart still
-produced a false `Anomalous` (not just a slower-to-resolve `Expected`), which is what led to the `Indeterminate`
-downgrade instead of trying to win the timing race outright.
+still loudly alerted on every time, just not auto-killed by this signal alone.
+
+This went through three real-hardware rounds via `verify-vsock-watch-hardware.sh`'s `api-restart` chaos test
+(§6) before landing here: round 1 found the raw cache-staleness false positive; a single-recheck fix closed most
+of it but one restart still produced a false `Anomalous`; downgrading a persisting mismatch to `Indeterminate`
+closed that safely, but real testing showed it still alerted (safely, but noisily) on essentially every restart,
+which the bounded retry above now resolves in the common case without changing the safety net.
 
 ### 4.2 Event pipeline
 
@@ -299,7 +307,7 @@ default trust model and should configure the watcher to match (documented operat
 - Unit tests for `TamperWatch`/`Heartbeat` (`vsockwatch/tamper_test.go`) with a faked `auditctl -l` output and a
   faked HTTP client.
 
-**Verified on real hardware** (RHEL 10, 2026-07-23, via `verify-vsock-watch-hardware.sh`, two runs; see
+**Verified on real hardware** (RHEL 10, 2026-07-23, via `verify-vsock-watch-hardware.sh`, three runs; see
 `docs/vsock-connect-verification-runbook.md`):
 
 - Live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c` — `uservaddr` (the
@@ -309,15 +317,19 @@ default trust model and should configure the watcher to match (documented operat
   `ebpf`-sourced anomaly event.
 - `cerberus-api.service` genuinely waits on `cerberus-vsock-watch`'s `Type=notify` `READY=1`, not just its process
   start (§4.3).
-- Chaos test (audit-rule removal → tampering meta-alert): on the re-run, the `detector_tampering` alert fired
-  correctly after the rule was removed. (The first run's "audit support not in kernel" failure was specific to
-  that boot/session on this host, not a Cerberus issue — see the runbook's known-findings log.)
-- `--block` + `CAP_KILL`: end-to-end confirmed on the re-run — a `cerberus-stress` process running as a different
-  uid than `cerberus-audit` was genuinely `SIGKILL`ed, confirming cross-uid signaling actually works, not just
-  that the capability string is present.
+- Chaos test (audit-rule removal → tampering meta-alert): confirmed stable across the second and third runs — the
+  `detector_tampering` alert fired correctly both times. (The first run's "audit support not in kernel" failure was
+  specific to that boot/session on this host, not a Cerberus issue — see the runbook's known-findings log.)
+- `--block` + `CAP_KILL`: end-to-end confirmed twice — a `cerberus-stress` process running as a different uid than
+  `cerberus-audit` was genuinely `SIGKILL`ed, confirming cross-uid signaling actually works, not just that the
+  capability string is present.
+- Deployment freshness: `verify-vsock-watch-hardware.sh`'s item 0 confirmed the installed binary was actually
+  rebuilt from the fixed source before the third run — ruling out "the fix wasn't deployed" as an explanation for
+  `api-restart` still failing that run (see below).
 
-**Found and fixed across two rounds of the `api-restart` chaos test** — this one caught a real gap the check was
-specifically designed to catch, and took two fix attempts to fully close:
+**Found and fixed across three rounds of the `api-restart` chaos test** — this one caught a real gap the check
+was specifically designed to catch, and took three fix attempts (two Cerberus code fixes, one verification-script
+fix) to fully address:
 
 - Round 1: `Allowlist`'s cached cgroup inode went stale across a restart that changed the unit's cgroup,
   misclassifying the newly-restarted, perfectly legitimate `ssh-cert-api` as `Anomalous` (and, with `--block`
@@ -326,8 +338,16 @@ specifically designed to catch, and took two fix attempts to fully close:
 - Round 2: the recheck fix reduced the false positives (four alerts down to one) but didn't fully close it — a
   single immediate recheck isn't guaranteed to win the race against systemd's own cgroup settling during a
   restart. Fixed by downgrading a cgroup mismatch that survives the recheck to `Indeterminate` (alerts, never
-  auto-kills) rather than trying to outrun the timing race — see §4.1's "Why a cgroup mismatch downgrades to
-  `Indeterminate`". **Needs a third re-run to confirm**, since this fix landed after the second test run.
+  auto-kills) rather than trying to outrun the timing race.
+- Round 3: the third re-run (with the deployment-freshness check confirming the fix genuinely was deployed) still
+  reported `api_restart_chaos` as `FAIL` — but the underlying Cerberus behavior was actually correct
+  (`Indeterminate`, not `Anomalous`); `verify-vsock-watch-hardware.sh`'s own check was the bug, grepping for any
+  alert mentioning `ssh-cert-api` regardless of verdict. Fixed the script to only fail on `Anomalous` (treating an
+  occasional `Indeterminate` as an expected, non-failing warning), and separately improved `Allowlist.Classify` to
+  retry the cgroup recheck with a bounded budget (`cgroupRevalidateAttempts`/`cgroupRevalidateInterval`, default
+  10× 50ms) instead of a single attempt — see §4.1's "Bounded retry on a cache-derived cgroup mismatch" — so the
+  common case resolves to a clean `Expected` with no alert at all, rather than relying on the `Indeterminate`
+  safety net on every restart. **Needs a fourth re-run to confirm.**
 
 **Still not done:**
 

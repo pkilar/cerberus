@@ -86,19 +86,59 @@ func TestClassify_UIDLookupFails_Indeterminate(t *testing.T) {
 
 func TestClassify_CgroupMismatch_Indeterminate(t *testing.T) {
 	// exe and uid already matched, so a cgroup mismatch that persists even
-	// after a fresh recheck (same resolver both times, so this isn't just a
-	// stale cache) is Indeterminate, not Anomalous -- alert-worthy but never
-	// Blockworthy, since even a fresh recheck can race systemd's own cgroup
-	// settling around a legitimate restart (see Classify's doc comment).
+	// after the full retry budget (same resolver every attempt, so this
+	// isn't just a stale cache or a brief settling race) is Indeterminate,
+	// not Anomalous -- alert-worthy but never Blockworthy, since even a
+	// bounded retry can't guarantee it always wins systemd's cgroup-settling
+	// race around a legitimate restart (see Classify's doc comment).
+	origAttempts, origInterval := cgroupRevalidateAttempts, cgroupRevalidateInterval
+	cgroupRevalidateAttempts, cgroupRevalidateInterval = 2, time.Millisecond
+	defer func() { cgroupRevalidateAttempts, cgroupRevalidateInterval = origAttempts, origInterval }()
+
 	a := testAllowlist(999, nil, 777, nil)
 	ev := baseEvent()
-	ev.CgroupID = 111 // does not match the resolved 777, even after a fresh re-check
+	ev.CgroupID = 111 // does not match the resolved 777, even after every retry
 	cls := a.Classify(ev)
 	if cls.Verdict != Indeterminate {
-		t.Fatalf("Verdict = %v, want Indeterminate (cgroup mismatch persists after revalidation)", cls.Verdict)
+		t.Fatalf("Verdict = %v, want Indeterminate (cgroup mismatch persists after the full retry budget)", cls.Verdict)
 	}
 	if cls.Verdict.Blockworthy() {
 		t.Error("Indeterminate must never be Blockworthy -- a cgroup-settling race must not let --block kill a legitimate process")
+	}
+}
+
+func TestClassify_CgroupMismatch_MatchesPartwayThroughRetries(t *testing.T) {
+	// Simulates systemd's cgroup settling resolving mid-retry (not on the
+	// very first recheck, but before the retry budget is exhausted): the
+	// resolver reports the stale value for the first two calls, then the
+	// event's actual (current) cgroup from then on.
+	origAttempts, origInterval := cgroupRevalidateAttempts, cgroupRevalidateInterval
+	cgroupRevalidateAttempts, cgroupRevalidateInterval = 5, time.Millisecond
+	defer func() { cgroupRevalidateAttempts, cgroupRevalidateInterval = origAttempts, origInterval }()
+
+	calls := 0
+	a := &Allowlist{
+		ExePath:  "/usr/bin/ssh-cert-api",
+		Username: "cerberus",
+		Unit:     "cerberus-api.service",
+		lookupUID: func(string) (uint32, error) {
+			return 999, nil
+		},
+		statCgroupID: func(string) (uint64, error) {
+			calls++
+			if calls <= 2 {
+				return 777, nil // still stale, systemd hasn't settled yet
+			}
+			return 111, nil // settled: matches the event
+		},
+		cacheTTL: time.Minute,
+	}
+	ev := baseEvent()
+	ev.CgroupID = 111
+
+	cls := a.Classify(ev)
+	if cls.Verdict != Expected {
+		t.Fatalf("Verdict = %v (%s), want Expected -- a match partway through the retry budget must not be treated as a mismatch", cls.Verdict, cls.Reason)
 	}
 }
 

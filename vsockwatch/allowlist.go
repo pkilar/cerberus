@@ -60,6 +60,24 @@ type Allowlist struct {
 // without restarting the watcher.
 const DefaultCacheTTL = 5 * time.Second
 
+// cgroupRevalidateAttempts and cgroupRevalidateInterval bound how hard
+// Classify retries a cgroup mismatch before giving up and downgrading to
+// Indeterminate (see Classify). A single immediate recheck isn't always
+// enough: on a real cerberus-api.service restart, the kernel can assign the
+// newly-started process to its new cgroup before the well-known
+// system.slice/<unit> path stat()s to that same inode, and confirmed
+// real-hardware testing (verify-vsock-watch-hardware.sh's api-restart chaos
+// test) showed that settling can outlast one immediate retry. This only
+// runs on the mismatch path (rare — in practice, only right around a
+// restart), never on every event, so a few hundred milliseconds of bounded
+// retry here is a materially different cost than blocking the hot path on
+// every event. Vars, not consts, so tests can shrink them rather than
+// waiting out the real interval.
+var (
+	cgroupRevalidateAttempts = 10
+	cgroupRevalidateInterval = 50 * time.Millisecond
+)
+
 // NewAllowlist builds an Allowlist with real (non-test) resolvers.
 func NewAllowlist(exePath, username, unit string) *Allowlist {
 	return &Allowlist{
@@ -118,31 +136,41 @@ func (a *Allowlist) Classify(ev Event) Classification {
 	if ev.CgroupID != 0 {
 		cg, err := a.cgroupID()
 		if err == nil && cg != 0 && ev.CgroupID != cg {
-			// The cached expected cgroup may be stale: systemd can
+			// The cached expected cgroup may be stale (systemd can
 			// rmdir+recreate a unit's cgroup across a restart, which changes
-			// the inode. A fresh, uncached re-check resolves the common case
-			// (the cache was simply a few seconds old).
-			fresh, ferr := a.refreshCgroupID()
-			if ferr == nil && fresh != 0 && ev.CgroupID == fresh {
+			// the inode), or the restart may still be racing systemd's own
+			// cgroup settling (the kernel can assign the newly-started
+			// process to its new cgroup before the well-known
+			// system.slice/<unit> path stat()s to that same inode). Retry a
+			// bounded number of times with a short interval between: this
+			// only runs on the rare mismatch path, not on every event, so a
+			// few hundred milliseconds here is a materially different cost
+			// than blocking the hot path unconditionally (the problem
+			// AsyncShipper exists to avoid on the delivery side).
+			matched := false
+			for attempt := range cgroupRevalidateAttempts {
+				if attempt > 0 {
+					time.Sleep(cgroupRevalidateInterval)
+				}
+				fresh, ferr := a.refreshCgroupID()
+				if ferr == nil && fresh != 0 && ev.CgroupID == fresh {
+					matched = true
+					break
+				}
+			}
+			if matched {
 				return Classification{Verdict: Expected, Reason: "matches exe/uid/cgroup"}
 			}
-			// Even a fresh recheck can still race systemd's own cgroup
-			// settling: on a real cerberus-api.service restart (confirmed
-			// via verify-vsock-watch-hardware.sh's api-restart chaos test),
-			// the kernel can assign the new process to its new cgroup before
-			// the well-known system.slice/<unit> path stat()s to that same
-			// inode -- a single immediate recheck isn't guaranteed to win
-			// that race, and retrying with a sleep here would block the hot
-			// classification path for every event (the same problem
-			// AsyncShipper exists to avoid on the delivery side). exe and
-			// uid already matched by this point, so this is not "any random
+			// The retry budget above is generous but not unbounded, and
+			// can't guarantee it always wins the settling race. exe and uid
+			// already matched by this point, so this is not "any random
 			// process" -- Indeterminate still alerts at the same critical
 			// severity as Anomalous, but is deliberately never Blockworthy
 			// (see that method), so --block cannot SIGKILL the legitimate,
-			// freshly-restarted ssh-cert-api over a cgroup-settling false
-			// positive. A genuine attacker satisfying this narrower bar
-			// (same exe, same uid, wrong cgroup) is still loudly alerted on
-			// every time, just not auto-killed by this signal alone.
+			// freshly-restarted ssh-cert-api if the race is ever lost. A
+			// genuine attacker satisfying this narrower bar (same exe, same
+			// uid, wrong cgroup) is still loudly alerted on every time, just
+			// not auto-killed by this signal alone.
 			return Classification{Verdict: Indeterminate, Reason: fmt.Sprintf("cgroup id %d != expected %d (%s)", ev.CgroupID, cg, a.Unit)}
 		}
 	}

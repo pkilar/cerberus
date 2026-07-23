@@ -365,6 +365,22 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.4-1
+- Reduce cerberus-vsock-watch alert noise on a cerberus-api.service
+  restart: a third real restart chaos test on the same RHEL 10 host
+  (verify-vsock-watch-hardware.sh) confirmed 0.10.3's Indeterminate
+  downgrade was working correctly (the reported failure was actually a
+  bug in the verification script, since fixed, that didn't distinguish
+  Anomalous from Indeterminate alerts) -- but showed the Indeterminate
+  alert still fires on essentially every restart, which is safe but
+  noisy. Allowlist.Classify's single cgroup recheck is now a bounded
+  retry loop (cgroupRevalidateAttempts/cgroupRevalidateInterval,
+  default 10 attempts x 50ms) instead of one attempt, giving systemd's
+  cgroup settling a real window to finish -- only on the rare mismatch
+  path, not every event. The common case now resolves cleanly to
+  Expected with no alert at all; the Indeterminate safety net (never
+  Blockworthy) remains for whatever residual timing variance exceeds
+  the retry budget. See docs/vsock-connect-detection.md §4.1.
 * Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.3-1
 - Fix a second round of a real false-positive in cerberus-vsock-watch,
   found via a second real cerberus-api.service restart chaos test on a

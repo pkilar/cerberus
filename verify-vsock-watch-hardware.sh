@@ -259,12 +259,24 @@ check_api_restart_chaos() {
     print_status "restarting cerberus-api.service (new MainPID) while cerberus-vsock-watch observes..."
     systemctl restart cerberus-api.service
     sleep 3
-    if journalctl -u cerberus-vsock-watch --since "-10 seconds" --no-pager 2>/dev/null | grep 'vsockwatch.alert' | grep -q 'ssh-cert-api'; then
-        print_error "a false-positive anomaly alert fired for the legitimate ssh-cert-api exe during the restart -- see journalctl -u cerberus-vsock-watch"
+    # An ANOMALOUS alert naming ssh-cert-api's own exe would be a real
+    # regression (it's what --block would act on). An INDETERMINATE alert
+    # naming it is expected, by-design, best-effort behavior: Allowlist
+    # retries a cgroup mismatch for a bounded window before giving up (see
+    # docs/vsock-connect-detection.md §4.1) -- if that retry budget is ever
+    # exhausted on a slow-to-settle host, the result is a still-safe
+    # Indeterminate alert (never Blockworthy), not a failure of this check.
+    local restart_alerts
+    restart_alerts=$(journalctl -u cerberus-vsock-watch --since "-10 seconds" --no-pager 2>/dev/null | grep 'vsockwatch.alert' | grep 'ssh-cert-api')
+    if echo "$restart_alerts" | grep -qi 'reason="anomalous:'; then
+        print_error "a false-positive ANOMALOUS alert fired for the legitimate ssh-cert-api exe during the restart (this would trigger --block) -- see journalctl -u cerberus-vsock-watch"
         record api_restart_chaos FAIL
         return 1
     fi
-    print_status "no false positive during cerberus-api's MainPID/cgroup transition"
+    if echo "$restart_alerts" | grep -qi 'reason="indeterminate:'; then
+        print_warning "an Indeterminate alert fired for ssh-cert-api during the restart -- expected, by-design: Allowlist's cgroup-settling retry budget was exhausted this time, but Indeterminate never triggers --block. Not a failure, but if this happens often, consider raising cgroupRevalidateAttempts/cgroupRevalidateInterval (vsockwatch/allowlist.go)."
+    fi
+    print_status "no false-positive ANOMALOUS alert during cerberus-api's MainPID/cgroup transition"
     record api_restart_chaos PASS
 }
 

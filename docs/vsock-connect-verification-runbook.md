@@ -184,5 +184,21 @@ progress, not a full fix:
   the new process into its new cgroup before the well-known `system.slice/<unit>` path `stat()`s to that same
   inode. Fixed (0.10.3) by downgrading a cgroup mismatch that survives the recheck to `Indeterminate` (alerts,
   never auto-kills) instead of trying to outrun the timing race with retries/sleeps in the hot classification
-  path. See `docs/vsock-connect-detection.md` §4.1. **Needs a third re-run to confirm** — if you're seeing
-  `api-restart` fail, check your build includes this fix (0.10.3+) before re-reporting it as a new issue.
+  path. See `docs/vsock-connect-detection.md` §4.1.
+
+**RHEL 10, 2026-07-23 (third run, same host, with `freshness` confirming 0.10.3 was actually deployed)** —
+`tamper` and `block` still pass. `api-restart` still reported `FAIL`, but for a different reason than either
+prior round:
+
+- **The Cerberus fix (0.10.3) was actually working correctly** — the alert firing for `ssh-cert-api` during the
+  restart was `Indeterminate` (safe, by design), not `Anomalous`. **The verification script itself had the bug**:
+  its check grepped for any alert mentioning `ssh-cert-api`, regardless of verdict, so it reported `FAIL` even
+  though nothing dangerous happened. Fixed the script to only fail on a genuine `Anomalous` alert, warning (not
+  failing) on `Indeterminate`.
+- Separately, since an `Indeterminate` alert firing on every single restart is still undesirable noise (even
+  though it's safe), `Allowlist.Classify`'s single recheck became a bounded retry loop (0.10.4:
+  `cgroupRevalidateAttempts`/`cgroupRevalidateInterval`, default 10× 50ms) so the common case resolves cleanly to
+  `Expected` with no alert at all, rather than relying on the `Indeterminate` safety net every time. See
+  `docs/vsock-connect-detection.md` §4.1. **Needs a fourth re-run to confirm** — if you're still seeing
+  `api-restart` fail with an `Anomalous` (not `Indeterminate`) reason, that's a genuine regression worth
+  re-reporting; an occasional `Indeterminate` warning is expected and not a failure.
