@@ -15,7 +15,8 @@
 > sections, ring buffer event decoding) has been verified. The auditd path, by contrast, HAS been exercised
 > end-to-end with the real compiled `cerberus-vsock-watch` binary against a synthetic audit log (§6) and is
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
-> must complete the three verification steps in §6.
+> must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
+> walked through in `docs/vsock-connect-verification-runbook.md`.
 
 ## 1. Problem statement
 
@@ -272,7 +273,9 @@ default trust model and should configure the watcher to match (documented operat
 - Unit tests for `TamperWatch`/`Heartbeat` (`vsockwatch/tamper_test.go`) with a faked `auditctl -l` output and a
   faked HTTP client.
 
-**NOT done — required before production deploy, on a real target host:**
+**NOT done — required before production deploy, on a real target host:** (automated by `verify-vsock-watch-hardware.sh`
+at the repo root; see `docs/vsock-connect-verification-runbook.md` for prerequisites, safety notes, and how each
+check maps to the items below)
 
 - Confirm the live tracepoint format matches `struct trace_event_raw_sys_enter` in `vsock_connect.c`:
   `cat /sys/kernel/debug/tracing/events/syscalls/sys_enter_connect/format` (or the `tracefs` path).
