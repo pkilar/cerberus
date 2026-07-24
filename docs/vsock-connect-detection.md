@@ -22,10 +22,13 @@
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
 > §4.6) carries the SAME caveat, plus its own history: a real load attempt confirmed the `socket_connect` LSM
 > hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
-> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but the verifier rejected the program's parameter
-> types (`void *`, since fixed — see that file's header comment). The fix has only been verified locally
-> (BTF inspection, `go test`), NOT via another real load attempt. Never enable `--lsm-enforce` without first
-> running `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
+> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but the verifier rejected the program because its
+> function signature declared the hook's three arguments as separate native parameters instead of the single
+> `ctx` array pointer an LSM trampoline actually provides (fixed — see that file's header comment; an earlier
+> attempted fix addressed a different, wrong theory and made no difference on real hardware). This fix has only
+> been verified locally (disassembly/BTF inspection, `go test`), NOT via another real load attempt. Never enable
+> `--lsm-enforce` without first running `--lsm-monitor` alone across at least one real `cerberus-api.service`
+> restart.
 
 ## 1. Problem statement
 
@@ -340,13 +343,17 @@ eliminates it.
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a
 new `CAP_MAC_ADMIN` grant (`packaging/*/cerberus-vsock-watch.service`). See `docs/RUNBOOK.md`'s "Preventive LSM
 gate prerequisites" for verification commands. A real load attempt confirmed the `socket_connect` hook IS
-exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but also caught a real bug in the process: the program's `void
-*` parameter types didn't match the real hook's `struct socket *`/`struct sockaddr *` signature, which the
-kernel verifier rejects for a trampoline-attached (LSM/fentry/fexit) program — fixed by forward-declaring the
-two struct names instead of using `void *` (see `vsock_lsm.c`'s header comment for the full mechanism). This is
-the second real-hardware-only bug this feature has hit — the first was the wrong attach-point name,
-`security_socket_connect` instead of `socket_connect` — a reminder that both classes of mistake are easy to make
-and only a real kernel load attempt fully confirms either is fixed.
+exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but also caught a real bug in the process: the program declared
+the hook's three arguments as separate native parameters (`sock`, `address`, `addrlen`), which the kernel
+verifier rejects for a trampoline-attached (LSM/fentry/fexit) program — these programs are invoked with a
+single `ctx` pointer to an array of the hook's raw argument values, not the arguments passed natively in
+registers. Fixed by taking that single `ctx` parameter and manually unpacking `ctx[1]`/`ctx[2]` (see
+`vsock_lsm.c`'s header comment for the full mechanism). An earlier fix attempt addressed a different, plausible
+but wrong theory (BTF pointer-type matching) and made no difference on real hardware — the verifier error was
+byte-for-byte identical before and after, since the underlying instructions hadn't actually changed. This is the
+third real-hardware-only bug this feature has hit — the first was the wrong attach-point name,
+`security_socket_connect` instead of `socket_connect` — a reminder that this class of mistake is easy to make
+and only a real kernel load attempt fully confirms it's fixed.
 
 ## 5. False-positive inventory
 

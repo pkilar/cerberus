@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	cilium "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 )
 
@@ -15,10 +16,11 @@ import (
 // program into a kernel (this sandbox has no CONFIG_BPF_LSM support to load
 // it against — see vsock_lsm.c's header comment), only that the embedded
 // object parses into the program/map shape LSMGuard.Run expects, plus (below)
-// that its two pointer parameters carry real struct BTF types rather than
-// `void *` — a real-hardware load once failed the verifier over exactly
-// this (see vsock_lsm.c's "FIRST REAL-HARDWARE LOAD ATTEMPT" comment), and
-// that failure mode is invisible to LoadCollectionSpecFromReader's ELF
+// that it takes the single `ctx` array parameter the LSM trampoline calling
+// convention actually provides, rather than the hook's real arguments as
+// separate native parameters. A real-hardware load once failed the verifier
+// over exactly this mismatch (see vsock_lsm.c's "CALLING CONVENTION" note),
+// and that failure mode is invisible to LoadCollectionSpecFromReader's ELF
 // parsing alone, so it needs its own explicit assertion.
 func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 	spec, err := cilium.LoadCollectionSpecFromReader(bytes.NewReader(lsmProgramObject))
@@ -48,14 +50,17 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 		t.Errorf("section name = %q, want lsm/socket_connect", prog.SectionName)
 	}
 
-	// A trampoline-attached program (LSM, like fentry/fexit) is verified by
-	// matching each argument's BTF type against the real target hook's
-	// signature. `void *` params (BTF PTR-to-void) fail that match and the
-	// kernel verifier rejects the program before it ever runs -- this is
-	// exactly the bug the "FIRST REAL-HARDWARE LOAD ATTEMPT" note in
-	// vsock_lsm.c documents. Assert both pointer params resolve to forward-
-	// declared structs (by name), not void, so a regression back to `void *`
-	// fails here instead of on a real kernel.
+	// An LSM (trampoline-attached) program is invoked with exactly ONE
+	// parameter -- a pointer to an array of the hook's real arguments as raw
+	// u64 values -- never the hook's real arguments as separate native
+	// parameters (see vsock_lsm.c's "CALLING CONVENTION" note, and
+	// docs.ebpf.io's BPF_PROG_TYPE_LSM page). A 3-native-parameter signature
+	// compiles fine and passed every check in this test EXCEPT this one, but
+	// failed the kernel verifier on real hardware ("R2 !read_ok") because
+	// the trampoline never populates r2/r3 the way a native 3-arg call
+	// would. Assert the BTF-declared parameter count directly so a
+	// regression back to native per-argument parameters fails here instead
+	// of on a real kernel.
 	var fn *btf.Func
 	if err := spec.Types.TypeByName("cerberus_lsm_check_connect", &fn); err != nil {
 		t.Fatalf("looking up cerberus_lsm_check_connect BTF: %v", err)
@@ -64,21 +69,25 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 	if !ok {
 		t.Fatalf("cerberus_lsm_check_connect BTF type = %T, want *btf.FuncProto", fn.Type)
 	}
-	wantParamStructs := map[string]string{"sock": "socket", "address": "sockaddr"}
-	for _, param := range proto.Params {
-		wantStruct, relevant := wantParamStructs[param.Name]
-		if !relevant {
-			continue
+	if len(proto.Params) != 1 {
+		t.Errorf("param count = %d, want 1 (a single ctx array pointer, not one parameter per hook argument): %v",
+			len(proto.Params), proto.Params)
+	}
+
+	// Belt-and-suspenders: confirm the program actually reads its argument
+	// via a memory LOAD (ctx[N], e.g. `r2 = *(u64 *)(r1 + 0x10)`) rather than
+	// a bare register move/read (`r4 = r2`) -- the latter is exactly what
+	// produced "R2 !read_ok" on real hardware, since the trampoline never
+	// writes anything into r2 directly.
+	sawLoad := false
+	for _, ins := range prog.Instructions {
+		if ins.OpCode.Class().IsLoad() && ins.Src == asm.R1 {
+			sawLoad = true
+			break
 		}
-		ptr, ok := param.Type.(*btf.Pointer)
-		if !ok {
-			t.Errorf("param %q type = %T, want *btf.Pointer (got a bare %v -- void*?)", param.Name, param.Type, param.Type)
-			continue
-		}
-		fwd, ok := ptr.Target.(*btf.Fwd)
-		if !ok || fwd.Name != wantStruct {
-			t.Errorf("param %q points to %v, want forward-declared struct %s", param.Name, ptr.Target, wantStruct)
-		}
+	}
+	if !sawLoad {
+		t.Error("no instruction loads from r1 (the ctx array pointer) -- expected ctx[N]-style argument unwrapping")
 	}
 
 	wantMaps := map[string]struct {
