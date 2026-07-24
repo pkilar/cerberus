@@ -126,12 +126,9 @@ func run() int {
 		return 2
 	}
 
-	apiSlice := *lsmAPISlice
-	if apiSlice == "" {
-		apiSlice = strings.TrimSuffix(*unit, ".service") + ".slice"
-	}
-	if *lsmMonitor && apiSlice == "" {
-		fmt.Fprintln(os.Stderr, "vsockwatch: --api-slice could not be derived from --unit; set it explicitly")
+	apiSlice, err := deriveAPISlice(*lsmAPISlice, *unit, *lsmMonitor)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 
@@ -427,6 +424,26 @@ func validateLSMFlags(monitor, enforce bool) error {
 		return fmt.Errorf("vsockwatch: --lsm-enforce requires --lsm-monitor (run --lsm-monitor alone first and confirm it logs cleanly across a real cerberus-api.service restart — see docs/vsock-connect-detection.md §4.6)")
 	}
 	return nil
+}
+
+// deriveAPISlice resolves the effective --api-slice value: the explicit flag
+// if set, otherwise <unit base name>.slice derived from --unit (stripping a
+// trailing ".service"). The empty-derivation check must happen on the base
+// name BEFORE ".slice" is appended -- appending a non-empty literal suffix
+// guarantees the concatenated result is never "", so checking apiSlice == ""
+// afterwards can never fire, silently letting a misconfigured --unit produce
+// the nonsensical slice name ".slice" instead of failing fast. When
+// --lsm-monitor is set and the base name is empty, that's returned as an
+// error instead. See docs/vsock-connect-detection.md §4.6.
+func deriveAPISlice(apiSliceFlag, unit string, lsmMonitor bool) (string, error) {
+	if apiSliceFlag != "" {
+		return apiSliceFlag, nil
+	}
+	base := strings.TrimSuffix(unit, ".service")
+	if lsmMonitor && base == "" {
+		return "", fmt.Errorf("vsockwatch: --api-slice could not be derived from --unit; set it explicitly")
+	}
+	return base + ".slice", nil
 }
 
 // parseWebhookFormat validates the --webhook-format/CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT
