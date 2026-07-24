@@ -58,11 +58,17 @@ CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL=30s
 # by the packaged unit). Load in log-only mode first:
 # CERBERUS_VSOCK_WATCH_LSM_MONITOR=false
 #
-# CURRENTLY DISABLED — setting this to true is a hard startup error. Real
-# hardware testing found the cgroup pin (updated on a poll timer) cannot
-# reliably win the race against ssh-cert-api's near-instant enclave dial
-# after a cerberus-api.service restart, denying the legitimate process on
-# effectively every restart. See docs/vsock-connect-detection.md §4.6.
+# The dedicated systemd slice containing ONLY cerberus-api.service (see the
+# Slice= directive in cerberus-api.service). Required for --lsm-enforce;
+# defaults to <the --unit base name>.slice if unset. Sharing this slice with
+# any other service weakens the LSM gate's identity check.
+# CERBERUS_VSOCK_WATCH_API_SLICE=cerberus-api.slice
+#
+# Actually deny a cgroup-mismatched connect(). Requires
+# CERBERUS_VSOCK_WATCH_LSM_MONITOR=true (or --lsm-monitor) -- refused at
+# startup otherwise. Run --lsm-monitor alone across a real
+# cerberus-api.service restart first and confirm it logs cleanly before
+# enabling this:
 # CERBERUS_VSOCK_WATCH_LSM_ENFORCE=false
 #
 # Runtime toggle for enforce mode without a restart: contents ("true"/

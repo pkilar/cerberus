@@ -19,6 +19,14 @@ Wants=cerberus-vsock-watch.service
 Type=simple
 User=cerberus
 Group=cerberus
+# Dedicated slice, exclusive to this service -- NEVER add another service to
+# it. The preventive LSM gate (cerberus-vsock-watch, opt-in --lsm-enforce)
+# pins its cgroup-ancestry check against THIS slice's cgroup, which persists
+# across this service's own restarts (only the service's own leaf cgroup is
+# destroyed/recreated by systemd on Restart=on-failure). Sharing this slice
+# with anything else would weaken that check back toward "any process in
+# this slice" -- see docs/vsock-connect-detection.md §4.6.
+Slice=cerberus-api.slice
 EnvironmentFile=-/etc/default/cerberus-api
 ExecStart=/usr/bin/ssh-cert-api
 Restart=on-failure
