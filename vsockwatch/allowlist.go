@@ -32,6 +32,23 @@ type Allowlist struct {
 	// non-systemd host, unit not running) that check is skipped rather than
 	// failing the whole classification, and is noted in the returned reason.
 	Unit string
+	// Slice is the systemd slice Unit actually runs under, e.g.
+	// "cerberus-api.slice" -- ssh-cert-api's cgroup is expected at
+	// SliceCgroupPath(CgroupRoot, Slice) + "/" + Unit, not hardcoded under
+	// "system.slice" the way this check originally assumed. Defaults to
+	// "system.slice" in NewAllowlist, preserving the original behavior for
+	// any deployment that doesn't set Slice= on the unit -- but the packaged
+	// cerberus-api.service now sets Slice=cerberus-api.slice unconditionally
+	// (see packaging/*/cerberus-api.service and
+	// vsockwatch/ebpf/lsm.go's LSMGuard, which pins its OWN ancestor-cgroup
+	// check against the same slice), so cmd/cerberus-vsock-watch/main.go
+	// overrides this to the same derived value LSMGuard uses -- both
+	// consumers must agree on where ssh-cert-api's process actually lives.
+	// Getting this wrong doesn't crash anything (an unresolvable path just
+	// makes this check silently skip, same as any other unresolvable-cgroup
+	// case), but it silently degrades every classification to exe/uid-only,
+	// dropping the "stronger, optional" cgroup signal §4.1 describes.
+	Slice string
 	// CgroupRoot is the cgroup v2 mount point, normally "/sys/fs/cgroup".
 	// Overridable for tests.
 	CgroupRoot string
@@ -84,6 +101,7 @@ func NewAllowlist(exePath, username, unit string) *Allowlist {
 		ExePath:      exePath,
 		Username:     username,
 		Unit:         unit,
+		Slice:        "system.slice",
 		CgroupRoot:   "/sys/fs/cgroup",
 		lookupUID:    lookupUIDByUsername,
 		statCgroupID: statCgroupIno,
@@ -279,8 +297,11 @@ func (a *Allowlist) cgroupID() (uint64, error) {
 // and by Classify to double-check a cache-derived mismatch before declaring
 // an event Anomalous.
 func (a *Allowlist) refreshCgroupID() (uint64, error) {
-	path := a.CgroupRoot + "/system.slice/" + a.Unit
-	cg, err := a.statCgroupID(path)
+	slicePath, _, err := SliceCgroupPath(a.CgroupRoot, a.Slice)
+	if err != nil {
+		return 0, err
+	}
+	cg, err := a.statCgroupID(slicePath + "/" + a.Unit)
 	if err != nil {
 		return 0, err
 	}

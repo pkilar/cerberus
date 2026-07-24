@@ -2,15 +2,18 @@ package vsockwatch
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
 
 func testAllowlist(uid uint32, uidErr error, cgroupID uint64, cgroupErr error) *Allowlist {
 	return &Allowlist{
-		ExePath:  "/usr/bin/ssh-cert-api",
-		Username: "cerberus",
-		Unit:     "cerberus-api.service",
+		ExePath:    "/usr/bin/ssh-cert-api",
+		Username:   "cerberus",
+		Unit:       "cerberus-api.service",
+		Slice:      "system.slice",
+		CgroupRoot: "/sys/fs/cgroup",
 		lookupUID: func(string) (uint32, error) {
 			if uidErr != nil {
 				return 0, uidErr
@@ -118,9 +121,11 @@ func TestClassify_CgroupMismatch_MatchesPartwayThroughRetries(t *testing.T) {
 
 	calls := 0
 	a := &Allowlist{
-		ExePath:  "/usr/bin/ssh-cert-api",
-		Username: "cerberus",
-		Unit:     "cerberus-api.service",
+		ExePath:    "/usr/bin/ssh-cert-api",
+		Username:   "cerberus",
+		Unit:       "cerberus-api.service",
+		Slice:      "system.slice",
+		CgroupRoot: "/sys/fs/cgroup",
 		lookupUID: func(string) (uint32, error) {
 			return 999, nil
 		},
@@ -153,6 +158,8 @@ func TestClassify_CgroupMismatch_RevalidatesStaleCacheBeforeAnomalous(t *testing
 		ExePath:      "/usr/bin/ssh-cert-api",
 		Username:     "cerberus",
 		Unit:         "cerberus-api.service",
+		Slice:        "system.slice",
+		CgroupRoot:   "/sys/fs/cgroup",
 		lookupUID:    func(string) (uint32, error) { return 999, nil },
 		statCgroupID: func(string) (uint64, error) { return 111, nil }, // the current cgroup
 		cacheTTL:     time.Minute,
@@ -293,5 +300,53 @@ func TestAllowlist_UIDCache(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("lookupUID called %d times, want 1 (cached)", calls)
+	}
+}
+
+// TestAllowlist_CgroupID_ResolvesUnderConfiguredSlice reproduces the bug an
+// adversarial review of PR #125 caught: refreshCgroupID used to hardcode
+// "system.slice/<Unit>" as ssh-cert-api's expected cgroup path, but the
+// packaged cerberus-api.service now sets Slice=cerberus-api.slice
+// unconditionally (packaging/*/cerberus-api.service) -- ssh-cert-api's real
+// cgroup lives at .../cerberus.slice/cerberus-api.slice/cerberus-api.service,
+// two levels below system.slice. With the old hardcoded assumption, EVERY
+// packaged deployment would silently fail this resolution and Classify would
+// silently drop the cgroup signal, degrading to exe/uid-only classification
+// -- not a crash (Classify already treats an unresolvable cgroup as "skip,
+// don't alert"), but a silent loss of the "stronger, optional" signal
+// docs/vsock-connect-detection.md §4.1 describes, for every install.
+//
+// This test uses REAL directories (not a faked statCgroupID) so it actually
+// exercises SliceCgroupPath + the real os.Stat-based resolution end to end,
+// and explicitly proves the OLD (system.slice) assumption would NOT have
+// found this path -- confirming Slice is load-bearing, not just plumbed
+// through unused.
+func TestAllowlist_CgroupID_ResolvesUnderConfiguredSlice(t *testing.T) {
+	dir := t.TempDir()
+	unitDir := dir + "/cerberus.slice/cerberus-api.slice/cerberus-api.service"
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	a := NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
+	a.CgroupRoot = dir
+	a.Slice = "cerberus-api.slice"
+
+	cg, err := a.CgroupID()
+	if err != nil {
+		t.Fatalf("CgroupID() with Slice=cerberus-api.slice: %v -- the dedicated-slice packaging change is not resolvable", err)
+	}
+	if cg == 0 {
+		t.Error("cg = 0, want a nonzero inode")
+	}
+
+	// The OLD, pre-fix assumption (NewAllowlist's default Slice,
+	// "system.slice", left unoverridden here) must NOT resolve this same
+	// directory tree -- otherwise this test isn't actually distinguishing
+	// the bug from the fix.
+	oldAssumption := NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
+	oldAssumption.CgroupRoot = dir
+	if _, err := oldAssumption.CgroupID(); err == nil {
+		t.Error("CgroupID() under the old system.slice assumption unexpectedly succeeded -- this test no longer distinguishes the bug from the fix")
 	}
 }

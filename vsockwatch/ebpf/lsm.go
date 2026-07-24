@@ -57,7 +57,7 @@ var (
 // recurring timer -- there is nothing to poll for, since the slice's cgroup
 // does not change across cerberus-api.service's own restarts.
 func resolveAPISliceCgroup(ctx context.Context, cgroupRoot, apiSlice string) (cgroupID uint64, level uint32, err error) {
-	path, level, err := sliceCgroupPath(cgroupRoot, apiSlice)
+	path, level, err := vsockwatch.SliceCgroupPath(cgroupRoot, apiSlice)
 	if err != nil {
 		return 0, 0, err
 	}

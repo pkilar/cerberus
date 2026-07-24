@@ -133,6 +133,18 @@ func run() int {
 	}
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
+	// The packaged cerberus-api.service now sets Slice=cerberus-api.slice
+	// unconditionally (see packaging/*/cerberus-api.service), so ssh-cert-api
+	// no longer lives under system.slice, NewAllowlist's default. Reuse the
+	// SAME derived slice LSMGuard pins its ancestor-cgroup check against,
+	// regardless of --lsm-monitor/--lsm-enforce -- this detective-path cgroup
+	// check (Allowlist.Slice) runs unconditionally too, and both consumers
+	// must agree on where ssh-cert-api's process actually lives. See
+	// Allowlist.Slice's doc comment for what silently degrades if this is
+	// wrong (the cgroup check just skips, same as any other unresolvable
+	// case -- not a crash, but a silent loss of the strongest identity
+	// signal for every classification).
+	allow.Slice = apiSlice
 
 	format, err := parseWebhookFormat(*webhookFormat)
 	if err != nil {

@@ -1,4 +1,4 @@
-package ebpf
+package vsockwatch
 
 import "testing"
 
@@ -46,7 +46,7 @@ func TestSliceCgroupPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path, level, err := sliceCgroupPath("/sys/fs/cgroup", tt.slice)
+			path, level, err := SliceCgroupPath("/sys/fs/cgroup", tt.slice)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
