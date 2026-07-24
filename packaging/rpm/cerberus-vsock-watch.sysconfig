@@ -42,3 +42,35 @@ CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL=30s
 # docs/vsock-connect-detection.md §7) — this leaves ONLY the auditd detector
 # running, which is a meaningfully weaker posture (single detection path).
 # CERBERUS_VSOCK_WATCH_DISABLE_EBPF=false
+
+# Opt-in: best-effort SIGKILL the offending process on a confirmed Anomalous
+# classification. NOT true prevention — the connect() (and anything sent over
+# it) may already have completed by the time this runs — see
+# docs/vsock-connect-detection.md §4.5/§7. Requires CAP_KILL (already granted
+# by the packaged unit).
+# CERBERUS_VSOCK_WATCH_BLOCK=false
+
+# Preventive LSM gate (opt-in, monitor-first — see
+# docs/vsock-connect-detection.md §4.6). Attaches a BPF_PROG_TYPE_LSM program
+# to the kernel's socket_connect hook and can deny a cgroup-mismatched
+# connect() outright — narrower than the two detectors above (cgroup-only, no
+# exe/uid check) and requires CONFIG_BPF_LSM + CAP_MAC_ADMIN (already granted
+# by the packaged unit). Load in log-only mode first:
+# CERBERUS_VSOCK_WATCH_LSM_MONITOR=false
+#
+# Actually deny a cgroup-mismatched connect(). Requires
+# CERBERUS_VSOCK_WATCH_LSM_MONITOR=true (or --lsm-monitor) — refused at
+# startup otherwise. Run --lsm-monitor alone across a real
+# cerberus-api.service restart first and confirm it logs cleanly before
+# enabling this:
+# CERBERUS_VSOCK_WATCH_LSM_ENFORCE=false
+#
+# Runtime toggle for enforce mode without a restart: contents ("true"/
+# "false") of this file are polled every LSM_POLL_INTERVAL and override
+# LSM_ENFORCE; missing/malformed content leaves the mode unchanged. Must stay
+# writable only by this service's account (RuntimeDirectoryMode=0750) — an
+# unprivileged local user able to write it could silently disable enforcement.
+# CERBERUS_VSOCK_WATCH_LSM_ENFORCE_STATE_FILE=/run/cerberus-vsock-watch/lsm-enforce
+#
+# How often the LSM gate's cgroup pin and enforce-state-file are refreshed:
+# CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL=250ms

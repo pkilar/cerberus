@@ -64,7 +64,7 @@ RuntimeDirectoryMode=0750
 # not at install time — matching how CAP_BPF/CAP_PERFMON are granted even
 # though --disable-ebpf can turn off eBPF.
 # CAP_MAC_ADMIN: load/attach the preventive LSM gate (BPF_PROG_TYPE_LSM on
-# security_socket_connect, CERBERUS_VSOCK_WATCH_LSM_MONITOR/_LSM_ENFORCE,
+# socket_connect, CERBERUS_VSOCK_WATCH_LSM_MONITOR/_LSM_ENFORCE,
 # docs/vsock-connect-detection.md §4.6) — distinct from CAP_BPF/CAP_PERFMON,
 # which only cover ordinary (tracepoint) program types. Granted
 # unconditionally for the same reason as CAP_KILL above: both --lsm-monitor/
