@@ -322,19 +322,20 @@ path could previously only alert on after the fact.
 - **The cgroup pin is resolved ONCE, at `cerberus-vsock-watch` startup** (`LSMGuard.Run`'s
   `resolveAPISliceCgroup`), against a dedicated systemd slice — never against `ssh-cert-api`'s own leaf cgroup,
   which systemd destroys and recreates on every restart. `sliceCgroupPath` (`vsockwatch/ebpf/cgroup_slice.go`)
-  computes the slice's on-disk cgroupfs path and its ancestor level (how many cgroup levels up from the
-  connecting process `bpf_get_current_ancestor_cgroup_id` must look) directly from systemd's own slice-naming
-  convention — dash-delimited segments are nested parent slices, so e.g. `cerberus-api.slice` actually lives
-  two levels down, at `.../cerberus.slice/cerberus-api.slice`. This is computed, never assumed as a hardcoded
-  constant, because this feature has already been bitten more than once by an unverified assumption about
-  kernel/systemd behavior (see the history below). `resolveAPISliceCgroup` retries up to
-  `apiSliceResolveAttempts` (default 20 × `apiSliceResolveInterval`, 250ms) times before giving up — this bounds
-  only the first-ever-boot ordering edge case (`cerberus-vsock-watch` starting before systemd has ever
-  instantiated the slice), a materially easier problem than the restart race this whole redesign exists to
-  close, since after the first successful resolution the slice's cgroup persists across every subsequent
-  `cerberus-api.service` restart untouched. `--lsm-poll-interval` (default 250ms) now governs only the
-  `--lsm-enforce-state-file` runtime-toggle check (`LSMGuard.pollLoop`) — the cgroup pin itself is no longer on
-  any recurring timer, since there is nothing about it left to poll for.
+  computes the slice's on-disk cgroupfs path and its ancestor level (the slice's own fixed depth from the
+  cgroup root — root is level 0, each step down the hierarchy is +1 — which `bpf_get_current_ancestor_cgroup_id`
+  takes as an absolute argument, not a distance measured from the connecting process's own cgroup) directly
+  from systemd's own slice-naming convention — dash-delimited segments are nested parent slices, so e.g.
+  `cerberus-api.slice` actually lives two levels down, at `.../cerberus.slice/cerberus-api.slice`. This is
+  computed, never assumed as a hardcoded constant, because this feature has already been bitten more than once
+  by an unverified assumption about kernel/systemd behavior (see the history below). `resolveAPISliceCgroup`
+  retries up to `apiSliceResolveAttempts` (default 20 × `apiSliceResolveInterval`, 250ms) times before giving
+  up — this bounds only the first-ever-boot ordering edge case (`cerberus-vsock-watch` starting before systemd
+  has ever instantiated the slice), a materially easier problem than the restart race this whole redesign
+  exists to close, since after the first successful resolution the slice's cgroup persists across every
+  subsequent `cerberus-api.service` restart untouched. `--lsm-poll-interval` (default 250ms) now governs only
+  the `--lsm-enforce-state-file` runtime-toggle check (`LSMGuard.pollLoop`) — the cgroup pin itself is no longer
+  on any recurring timer, since there is nothing about it left to poll for.
 - **The dedicated slice is named via `--api-slice`** (default: derived from `--unit` by `deriveAPISlice` —
   strip a trailing `.service` and append `.slice`, e.g. `cerberus-api.service` → `cerberus-api.slice`). It MUST
   contain ONLY `cerberus-api.service` — sharing it with any other unit would weaken the ancestry check back
