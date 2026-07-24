@@ -166,13 +166,20 @@ type fakePolicyWriter struct {
 	// Recorded by putPolicySlot; this struct is not safe for concurrent use,
 	// but nothing in this file calls it from more than one goroutine.
 	lastCgroupID   uint64
+	lastLevel      uint32
 	lastPopulated  bool
+	lastPolicySlot uint32
 	policyWriteCnt int
+
+	// Recorded by putActiveSlot.
+	lastActiveSlot uint32
 }
 
 func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, level uint32, populated bool) error {
 	f.calls = append(f.calls, "policy")
+	f.lastPolicySlot = slot
 	f.lastCgroupID = cgroupID
+	f.lastLevel = level
 	f.lastPopulated = populated
 	f.policyWriteCnt++
 	return nil
@@ -180,6 +187,7 @@ func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, level uin
 
 func (f *fakePolicyWriter) putActiveSlot(slot uint32) error {
 	f.calls = append(f.calls, "active")
+	f.lastActiveSlot = slot
 	return nil
 }
 
@@ -204,6 +212,41 @@ func TestLSMGuard_PublishOrder_WritesSlotBeforeFlippingActive(t *testing.T) {
 
 	if len(fw.calls) != 2 || fw.calls[0] != "policy" || fw.calls[1] != "active" {
 		t.Fatalf("call order = %v, want [policy active]", fw.calls)
+	}
+}
+
+// TestSeedInitialPolicy_WritesInactiveSlotNotSlotZero exercises Run's actual
+// one-time seeding call (seedInitialPolicy), not just a hand-simulated
+// re-enactment of it. The kernel zero-initializes lsm_active_slot to 0, so
+// slot 0 is already live the instant the LSM program is attached -- seeding
+// straight into slot 0 would be exactly the torn-write-against-a-live-reader
+// bug the double buffer exists to prevent. This guards against that
+// regression recurring: it fails if seedInitialPolicy is ever changed back
+// to seed slot 0.
+func TestSeedInitialPolicy_WritesInactiveSlotNotSlotZero(t *testing.T) {
+	fw := &fakePolicyWriter{}
+
+	if err := seedInitialPolicy(fw, 12345, 2); err != nil {
+		t.Fatalf("seedInitialPolicy: %v", err)
+	}
+
+	if len(fw.calls) != 2 || fw.calls[0] != "policy" || fw.calls[1] != "active" {
+		t.Fatalf("call order = %v, want [policy active]", fw.calls)
+	}
+	if fw.lastPolicySlot != 1 {
+		t.Errorf("policy slot = %d, want 1 (the inactive slot at boot, not the live slot 0)", fw.lastPolicySlot)
+	}
+	if fw.lastActiveSlot != 1 {
+		t.Errorf("active slot flipped to = %d, want 1", fw.lastActiveSlot)
+	}
+	if fw.lastCgroupID != 12345 {
+		t.Errorf("cgroupID = %d, want 12345", fw.lastCgroupID)
+	}
+	if fw.lastLevel != 2 {
+		t.Errorf("level = %d, want 2", fw.lastLevel)
+	}
+	if !fw.lastPopulated {
+		t.Error("populated = false, want true")
 	}
 }
 

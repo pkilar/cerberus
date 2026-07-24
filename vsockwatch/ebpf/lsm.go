@@ -81,6 +81,31 @@ func resolveAPISliceCgroup(ctx context.Context, cgroupRoot, apiSlice string) (cg
 		apiSlice, path, apiSliceResolveAttempts, lastErr)
 }
 
+// seedInitialPolicySlot is the slot seedInitialPolicy always writes into --
+// never 0, which the kernel zero-initializes lsm_active_slot to point at
+// (i.e. slot 0 is already live from the moment the program is attached).
+const seedInitialPolicySlot = 1
+
+// seedInitialPolicy performs Run's one-time publish of the resolved API
+// slice cgroup pin: write the populated policy into the currently-inactive
+// slot, then flip lsm_active_slot to it. This is the same
+// write-inactive-then-flip discipline pollLoop's mode toggle and every other
+// mutation in this file already follows -- see policyMapWriter's doc comment
+// and vsock_lsm.c's lsm_policy_slot comment for why a reversed order (or
+// writing directly into the already-live slot 0) is a torn-write bug a
+// concurrent in-kernel reader could observe. Broken out from Run so this
+// exact seed step is unit-testable via fakePolicyWriter without a running
+// eBPF LSM program (see TestSeedInitialPolicy_WritesInactiveSlotNotSlotZero).
+func seedInitialPolicy(pw policyMapWriter, cgroupID uint64, level uint32) error {
+	if err := pw.putPolicySlot(seedInitialPolicySlot, cgroupID, level, true); err != nil {
+		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_policy: %w", err)
+	}
+	if err := pw.putActiveSlot(seedInitialPolicySlot); err != nil {
+		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_active_slot: %w", err)
+	}
+	return nil
+}
+
 // LSMGuard loads vsock_lsm.c, attaches it to the socket_connect LSM hook
 // (invoked via the kernel's security_socket_connect() dispatcher — see
 // vsock_lsm.c's header comment on why the BPF attach point is always named
@@ -236,15 +261,21 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 	// like any other LSM attach failure -- the caller in
 	// cmd/cerberus-vsock-watch/main.go's lsmEnforceFatal treats that the
 	// same as a load/attach failure when --lsm-enforce was requested.
+	//
+	// The kernel zero-initializes lsm_active_slot to 0, so slot 0 is already
+	// the LIVE slot the instant the program is attached above (the ring
+	// buffer reader is already open at this point, so a concurrent connect
+	// is a real possibility, not a theoretical one). seedInitialPolicy
+	// therefore follows the exact same write-the-INACTIVE-slot-then-flip
+	// discipline as every other publish in this file, rather than writing
+	// straight into slot 0 -- which would be a torn write against a live
+	// reader, the very thing the double buffer exists to prevent.
 	cg, level, err := resolveAPISliceCgroup(ctx, g.Allowlist.CgroupRoot, g.APISlice)
 	if err != nil {
 		return fmt.Errorf("vsockwatch/ebpf: resolving API slice cgroup pin: %w", err)
 	}
-	if err := pw.putPolicySlot(0, cg, level, true); err != nil {
-		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_policy: %w", err)
-	}
-	if err := pw.putActiveSlot(0); err != nil {
-		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_active_slot: %w", err)
+	if err := seedInitialPolicy(pw, cg, level); err != nil {
+		return err
 	}
 
 	pollInterval := g.PollInterval

@@ -78,5 +78,6 @@ CERBERUS_VSOCK_WATCH_TAMPER_CHECK_INTERVAL=30s
 # unprivileged local user able to write it could silently disable enforcement.
 # CERBERUS_VSOCK_WATCH_LSM_ENFORCE_STATE_FILE=/run/cerberus-vsock-watch/lsm-enforce
 #
-# How often the LSM gate's cgroup pin and enforce-state-file are refreshed:
+# How often the LSM gate's LSM_ENFORCE_STATE_FILE runtime toggle is
+# re-checked (the cgroup pin is resolved once at startup, not polled):
 # CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL=250ms

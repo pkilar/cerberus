@@ -112,7 +112,7 @@ func run() int {
 	lsmEnforce := flag.Bool("lsm-enforce", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE", false), "actually deny a cgroup-mismatched connect() via the LSM gate (NOT exe/uid-checked — narrower than --block; requires --lsm-monitor; run --lsm-monitor alone across a real cerberus-api.service restart first — see docs/vsock-connect-detection.md §4.6)")
 	lsmAPISlice := flag.String("api-slice", envDefault("CERBERUS_VSOCK_WATCH_API_SLICE", ""), "the dedicated systemd slice unit containing ONLY cerberus-api.service (e.g. \"cerberus-api.slice\") — required when --lsm-enforce is set; sharing this slice with any other service weakens the LSM gate's identity check, see docs/vsock-connect-detection.md §4.6. Defaults to <unit base name>.slice derived from --unit if not set")
 	lsmEnforceStateFile := flag.String("lsm-enforce-state-file", envDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE_STATE_FILE", "/run/cerberus-vsock-watch/lsm-enforce"), `runtime toggle for the LSM gate's enforce mode: contents ("true"/"false") are polled every --lsm-poll-interval and override --lsm-enforce without a restart; missing/malformed content leaves the mode unchanged`)
-	lsmPollInterval := flag.Duration("lsm-poll-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL", 250*time.Millisecond), "how often the LSM gate's cgroup pin and enforce-state-file are refreshed")
+	lsmPollInterval := flag.Duration("lsm-poll-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL", 250*time.Millisecond), "how often the LSM gate's --lsm-enforce-state-file runtime toggle is re-checked (the cgroup pin is resolved once at startup, not polled)")
 	showVersion := flag.Bool("V", false, "print version and exit")
 	flag.Parse()
 
