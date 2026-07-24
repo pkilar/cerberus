@@ -711,8 +711,22 @@ check_lsm_enforce_denies() {
         return 1
     fi
 
+    print_warning "first confirming the same connect() succeeds with enforcement OFF, so a later nonzero exit can't be mistaken for an unrelated failure (timeout, enclave unreachable, stress binary misconfigured)"
+    local baseline_status
+    timeout 10 "$CERBERUS_STRESS_BIN" signer -transport vsock -target "${ENCLAVE_CID}:${ENCLAVE_PORT}" -requests 1 -timeout 3s \
+        >/tmp/cstress-lsm-enforce-baseline.out 2>&1
+    baseline_status=$?
+    if [ "$baseline_status" -ne 0 ]; then
+        print_error "baseline connect() FAILED (exit $baseline_status) with no enforcement active -- this check can't attribute a later failure to the LSM gate; see /tmp/cstress-lsm-enforce-baseline.out"
+        record lsm_enforce_denies FAIL
+        return 1
+    fi
+    print_status "baseline connect() succeeded with enforcement off -- a later denial can be attributed to the LSM gate"
+
     print_warning "starting a transient cerberus-vsock-watch-lsm-verify.service with --lsm-monitor --lsm-enforce (does not modify the real unit); it WILL deny the disposable cerberus-stress connect() below."
     systemctl stop cerberus-vsock-watch.service 2>/dev/null
+    local start_ts
+    start_ts=$(date '+%Y-%m-%d %H:%M:%S')
     systemd-run --unit=cerberus-vsock-watch-lsm-verify --uid=cerberus-audit --gid=cerberus-audit \
         -p AmbientCapabilities='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
         -p CapabilityBoundingSet='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
@@ -733,6 +747,10 @@ check_lsm_enforce_denies() {
     timeout 10 "$CERBERUS_STRESS_BIN" signer -transport vsock -target "${ENCLAVE_CID}:${ENCLAVE_PORT}" -requests 1 -timeout 3s \
         >/tmp/cstress-lsm-enforce-verify.out 2>&1
     stress_status=$?
+    sleep 1
+
+    local lsm_alerts
+    lsm_alerts=$(journalctl -u cerberus-vsock-watch-lsm-verify --since "$start_ts" --no-pager 2>/dev/null | grep 'vsockwatch.alert' | grep 'kind=vsock_lsm_block')
 
     systemctl stop cerberus-vsock-watch-lsm-verify.service 2>/dev/null
     systemctl start cerberus-vsock-watch.service 2>/dev/null
@@ -742,7 +760,21 @@ check_lsm_enforce_denies() {
         record lsm_enforce_denies FAIL
         return 1
     fi
-    print_status "cerberus-stress's connect() was denied (exit $stress_status) -- --lsm-enforce confirmed working"
+
+    # A nonzero exit alone doesn't prove the LSM gate denied the connect --
+    # it could just as easily be an unrelated timeout or client error. Require
+    # a matching alert that names this exact attempt as an enforced denial.
+    if ! echo "$lsm_alerts" | grep -q 'lsm_mode=enforce'; then
+        print_error "cerberus-stress's connect() failed (exit $stress_status) but no vsock_lsm_block alert with lsm_mode=enforce was observed -- the failure can't be attributed to the LSM gate (timeout? unrelated client error?); see /tmp/cstress-lsm-enforce-verify.out and journalctl -u cerberus-vsock-watch-lsm-verify"
+        record lsm_enforce_denies FAIL
+        return 1
+    fi
+    if ! echo "$lsm_alerts" | grep -q 'lsm_denied=true'; then
+        print_error "a vsock_lsm_block alert was observed but none reported lsm_denied=true -- the gate logged the attempt without actually denying it; see journalctl -u cerberus-vsock-watch-lsm-verify"
+        record lsm_enforce_denies FAIL
+        return 1
+    fi
+    print_status "cerberus-stress's connect() was denied (exit $stress_status) AND a matching lsm_mode=enforce lsm_denied=true alert was observed -- --lsm-enforce confirmed working"
     record lsm_enforce_denies PASS
 }
 
