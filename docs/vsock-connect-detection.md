@@ -1,16 +1,23 @@
 # VSOCK-Connect Detection Design
 
 > **Status:** Implemented (Option C — both detectors), plus an opt-in reactive-kill response (§4.5; default off)
-> and an opt-in preventive LSM gate (§4.6; default off). **`--lsm-enforce` is currently disabled at the code
-> level** (hard startup error) pending a real fix for the restart race described below — `--lsm-monitor` alone
-> is fully supported. Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
+> and an opt-in preventive LSM gate (§4.6; default off). **`--lsm-enforce` works**, gated behind `--lsm-monitor`
+> exactly as originally designed (`validateLSMFlags` in `cmd/cerberus-vsock-watch/main.go` refuses `--lsm-enforce`
+> without `--lsm-monitor`; monitor-first is a rollout habit, not a workaround for a bug). The gate's cgroup check
+> is pinned against a dedicated, stable systemd slice (`cerberus-api.slice` by default, `--api-slice` to
+> override) resolved ONCE at `cerberus-vsock-watch` startup — not polled against `ssh-cert-api`'s own leaf
+> cgroup, which systemd destroys and recreates on every restart. See §4.6 for why that makes the check
+> structurally race-free rather than just a smaller polling window. Companion to `docs/THREAT-MODEL.md`
+> (`SIGN-1`).
 > **Kind of control:** Primarily detective, plus a narrow, opt-in preventive gate (§4.6) that only blocks by
 > cgroup identity. See §7 for why no host-side control can fully prevent `SIGN-1` — the LSM gate narrows the gap,
 > it does not close it.
 > The opt-in reactive kill in §4.5 is a mitigation response, not prevention either — see that section.
 > **Code:** `vsockwatch/` (allowlist, alerting, auditd correlator, tamper watch, heartbeat, reactive-kill blocker)
-> and `vsockwatch/ebpf/` (the eBPF loader/probe and the LSM gate loader), wired together in
-> `cmd/cerberus-vsock-watch/main.go`. Packaged as `cerberus-vsock-watch` (RPM/deb/Arch — see `packaging/`).
+> and `vsockwatch/ebpf/` (the eBPF loader/probe, the LSM gate loader, and `cgroup_slice.go`'s slice-cgroup-path
+> computation), wired together in `cmd/cerberus-vsock-watch/main.go`. Packaged as `cerberus-vsock-watch`
+> (RPM/deb/Arch — see `packaging/`); the packaged `cerberus-api.service` now declares a dedicated
+> `Slice=cerberus-api.slice` that the LSM gate's ancestry check pins against (see that unit's `Slice=` comment).
 >
 > **Read before deploying:** the eBPF probe (`vsockwatch/ebpf/src/vsock_connect.c`) was written, compiled, and
 > ELF-validated (`go test ./vsockwatch/ebpf/...`) in a development sandbox with no kernel BTF, no debugfs tracing
@@ -21,17 +28,21 @@
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
 > must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
-> §4.6) carries the SAME caveat, plus its own history: a real load attempt confirmed the `socket_connect` LSM
-> hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
-> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, and — after two attempted fixes, the first wrong —
-> the program now loads and attaches successfully on real hardware (see that file's header comment for the full
-> history). With attach working, enforcement itself hit a real, and then a structural, problem: `LSMGuard`'s
-> cgroup-pin poll loop first read through `Allowlist`'s cached cgroup resolution (5s TTL, fixed), and even after
-> that fix, real hardware showed `ssh-cert-api`'s enclave dial happens roughly 1ms after a
-> `cerberus-api.service` restart — too fast for any poll-based cgroup pin to reliably catch up. `--lsm-enforce`
-> is therefore disabled at the code level (`validateLSMFlags`) until the cgroup pin is redesigned to be
-> event-driven rather than polled — see §4.6 for the full history and what would need to change to re-enable it.
-> `--lsm-monitor` alone is unaffected by any of this and remains fully supported.
+> §4.6) carries the SAME caveat, plus a longer history of real-hardware-only bugs, each found because a real load
+> or restart attempt caught something no amount of local review did: (1) the wrong attach-point name,
+> `security_socket_connect` instead of the bare hook `socket_connect`; (2) the wrong LSM calling convention (a
+> plausible-but-wrong BTF pointer-type fix attempt first, then the actual fix — LSM programs take a single `ctx`
+> argument array, not native per-argument parameters); (3) a cache-staleness bug, where the poll loop read
+> straight through `Allowlist`'s 5s-TTL cached cgroup resolution instead of a fresh one; and (4) — found only
+> after (3) was fixed — a deeper, architectural problem: `ssh-cert-api`'s enclave dial happens roughly 1ms after
+> a `cerberus-api.service` restart, too fast for ANY fixed-interval poll of the service's own leaf cgroup (which
+> systemd destroys and recreates on every restart) to reliably win that race. `--lsm-enforce` was disabled at the
+> code level while (4) was unresolved (see git history around commit `d64457e`). It is fixed now, structurally
+> rather than by tuning the poll interval: the gate checks the connecting process's cgroup ANCESTRY against a
+> dedicated, stable systemd slice instead of the leaf cgroup, resolved ONCE at startup rather than on a recurring
+> poll — there is nothing left to poll for, since the slice's cgroup never changes across a restart. See §4.6 for
+> the full mechanism, the `--api-slice` flag, and the restored monitor-first gating. `--lsm-monitor` alone was
+> never affected by any of this and remains fully supported.
 
 ## 1. Problem statement
 
@@ -291,39 +302,64 @@ detective.
 **Why this is narrower than the detective path, not a superset of it.** An LSM hook must decide allow/deny
 synchronously, entirely in-kernel — there is no way to pause the syscall and ask a Go userspace process "does
 `/proc/<pid>/exe` match?" the way `Allowlist.Classify` does. The only identity signal cheap and available
-entirely in-kernel is `bpf_get_current_cgroup_id()`. So the LSM gate denies a connect only when the caller is
-OUTSIDE the pinned `ssh-cert-api` cgroup — it does NOT check exe path or uid the way the detective path does.
-A compromised `ssh-cert-api` itself (or anything sharing its cgroup) still passes the gate untouched. **This
-does not close `SIGN-1`** (see §7) — it prevents a rogue, *non*-ssh-cert-api process from reaching the enclave
-at all, which the detective path could previously only alert on after the fact.
+entirely in-kernel is `bpf_get_current_ancestor_cgroup_id()` — the connecting process's cgroup ID at a
+given ancestor level, checked against the dedicated `cerberus-api.slice` cgroup (see Mechanism below), not
+`ssh-cert-api`'s own leaf cgroup. So the LSM gate denies a connect only when the caller is OUTSIDE that pinned
+slice — it does NOT check exe path or uid the way the detective path does. A compromised `ssh-cert-api` itself
+(or anything else sharing its slice) still passes the gate untouched. **This does not close `SIGN-1`** (see
+§7) — it prevents a rogue, *non*-ssh-cert-api process from reaching the enclave at all, which the detective
+path could previously only alert on after the fact.
 
 **Mechanism:**
-- `vsock_lsm.c` maintains a double-buffered `lsm_policy` map (2 slots) plus a single-word `lsm_active_slot`
-  index: `LSMGuard`'s poll loop writes a full new policy into the currently-INACTIVE slot, then flips the index
-  as a publish barrier, so an in-kernel reader never observes a torn write straddling the cgroup id and its
-  "populated" flag — the moment this matters most is exactly a `cerberus-api.service` restart, when the pinned
-  cgroup id changes.
+- `vsock_lsm.c` maintains a double-buffered `lsm_policy` map (2 slots, each an `allowed_cgroup_id` +
+  `ancestor_level` + `populated` flag) plus a single-word `lsm_active_slot` index: `LSMGuard.Run` writes a full
+  new policy into the currently-INACTIVE slot, then flips the index as a publish barrier, so an in-kernel reader
+  never observes a torn write straddling the cgroup id and its "populated" flag.
 - A separate `lsm_mode` map (0=monitor, 1=enforce) decouples the enforce toggle from the cgroup pin entirely.
 - **Fail-open bootstrap is structural, not a convention**: the maps are zero-initialized by the kernel, so
   before `LSMGuard` ever publishes a policy, `populated=0` and every connect is allowed — there is no window
   where an unconfigured gate denies everything.
-- The cgroup pin reuses `Allowlist.CgroupID()` (the same cached resolution `Classify` uses for the detective
-  path — see §4.1), refreshed every `--lsm-poll-interval` (default 250ms).
+- **The cgroup pin is resolved ONCE, at `cerberus-vsock-watch` startup** (`LSMGuard.Run`'s
+  `resolveAPISliceCgroup`), against a dedicated systemd slice — never against `ssh-cert-api`'s own leaf cgroup,
+  which systemd destroys and recreates on every restart. `sliceCgroupPath` (`vsockwatch/ebpf/cgroup_slice.go`)
+  computes the slice's on-disk cgroupfs path and its ancestor level (how many cgroup levels up from the
+  connecting process `bpf_get_current_ancestor_cgroup_id` must look) directly from systemd's own slice-naming
+  convention — dash-delimited segments are nested parent slices, so e.g. `cerberus-api.slice` actually lives
+  two levels down, at `.../cerberus.slice/cerberus-api.slice`. This is computed, never assumed as a hardcoded
+  constant, because this feature has already been bitten more than once by an unverified assumption about
+  kernel/systemd behavior (see the history below). `resolveAPISliceCgroup` retries up to
+  `apiSliceResolveAttempts` (default 20 × `apiSliceResolveInterval`, 250ms) times before giving up — this bounds
+  only the first-ever-boot ordering edge case (`cerberus-vsock-watch` starting before systemd has ever
+  instantiated the slice), a materially easier problem than the restart race this whole redesign exists to
+  close, since after the first successful resolution the slice's cgroup persists across every subsequent
+  `cerberus-api.service` restart untouched. `--lsm-poll-interval` (default 250ms) now governs only the
+  `--lsm-enforce-state-file` runtime-toggle check (`LSMGuard.pollLoop`) — the cgroup pin itself is no longer on
+  any recurring timer, since there is nothing about it left to poll for.
+- **The dedicated slice is named via `--api-slice`** (default: derived from `--unit` by `deriveAPISlice` —
+  strip a trailing `.service` and append `.slice`, e.g. `cerberus-api.service` → `cerberus-api.slice`). It MUST
+  contain ONLY `cerberus-api.service` — sharing it with any other unit would weaken the ancestry check back
+  toward "any process in this slice." The packaged `cerberus-api.service` sets `Slice=cerberus-api.slice`
+  exclusively for this purpose (see `packaging/*/cerberus-api.service`'s `Slice=` comment); a manual/non-RPM
+  deployment must add the equivalent `Slice=` directive itself before `--lsm-enforce` can be trusted.
 
-**`--lsm-enforce` is currently disabled — hard startup error if set.** Rollout was originally meant to be
-monitor-first (`--lsm-monitor` loads the gate and ships a `vsock_lsm_block` alert on every cgroup mismatch
-without ever denying; `--lsm-enforce` was gated behind having run `--lsm-monitor` clean first). Real hardware
-testing found a problem no amount of monitor-first practice would have caught, described below, so
-`cmd/cerberus-vsock-watch/main.go`'s `validateLSMFlags` now refuses `--lsm-enforce` unconditionally — not "only
-without `--lsm-monitor`," full stop — until the underlying race is actually closed. `--lsm-monitor` alone
-remains fully supported and safe: it never denies anything.
+**`--lsm-enforce` is restored to its original monitor-first gating.** Rollout is monitor-first, exactly as
+originally designed: `--lsm-monitor` loads the gate and ships a `vsock_lsm_block` alert on every cgroup mismatch
+without ever denying; `--lsm-enforce` requires `--lsm-monitor` to also be set
+(`cmd/cerberus-vsock-watch/main.go`'s `validateLSMFlags` — a hard startup error, not a silent auto-promotion, if
+`--lsm-enforce` is passed without `--lsm-monitor`), and an operator is expected to have run `--lsm-monitor`
+alone across a real `cerberus-api.service` restart and confirmed it logs cleanly before ever adding
+`--lsm-enforce`. `validateLSMFlags` used to refuse `--lsm-enforce` unconditionally, regardless of
+`--lsm-monitor` — that was a temporary, code-level block put in place while the restart race described below
+was unresolved (see git history around commit `d64457e`), not a permanent design choice. It's gone now that the
+race is closed structurally by the dedicated-slice mechanism above — monitor-first is once again a cheap
+operational habit, not a workaround for a bug.
 
 The `lsmEnforceFatal` mechanism (ships a `lsm_enforcement_down` critical alert and exits the process if
-`--lsm-enforce` was requested and the gate stops running) is still present in the code and still correct for
-when enforcement is eventually re-enabled — it's just unreachable for now, since `--lsm-enforce` can never be
-true past the startup check.
+`--lsm-enforce` was requested and the gate stops running) is live again now that `--lsm-enforce` can actually be
+set past startup — see `cmd/cerberus-vsock-watch/main.go`'s wiring of the LSM goroutine.
 
-**Why `--lsm-enforce` is disabled: two real-hardware bugs, the second one architectural, not just a bug fix.**
+**History: two real-hardware bugs found while the cgroup pin was still poll-based, the second one
+architectural — and the fix that actually closed it.**
 
 Bug 1 (fixed): `LSMGuard`'s poll loop was calling `Allowlist.CgroupID()`, the SAME cached cgroup resolution the
 detective path uses (`Allowlist.DefaultCacheTTL`, 5s). The poll loop's 250ms ticker was an illusion of tight
@@ -343,13 +379,21 @@ happens in ~1ms — this is a structural mismatch between "resolve the cgroup pi
 target event happens almost immediately," not an off-by-one or a cache bug. Tightening `--lsm-poll-interval`
 narrows the window but cannot close it. `ssh-cert-api` has no dial retry on the signing path
 (`ssh-cert-api/internal/enclave/client.go`), so a lost race is a real, user-visible signing failure every time,
-not a silently-absorbed hiccup — which is why this is disabled outright rather than left as a documented
-residual risk operators might reasonably accept.
+not a silently-absorbed hiccup — which is why disabling `--lsm-enforce` outright (rather than leaving it as a
+documented residual risk operators might reasonably accept) was the right call at the time: the actual fix
+needed an architectural change, not a tunable.
 
-**What would actually fix this**: replace the fixed-interval poll with something that reacts to the cgroup
-appearing rather than discovering it up to one interval later — e.g. an inotify watch on the cgroup directory,
-or synchronizing with `cerberus-api.service`'s own lifecycle directly. That's a real design change, not
-attempted here; `validateLSMFlags`'s doc comment says exactly what to revisit before removing the block.
+**What actually fixed this**: not a tighter poll interval, and not an inotify watch on the cgroup directory
+either (both were considered) — the underlying flaw was polling a value that changes on every restart at all
+(`ssh-cert-api`'s own leaf cgroup). The fix instead compares against a value that NEVER changes across a
+restart: a dedicated, stable systemd slice (`cerberus-api.slice`, exclusive to `cerberus-api.service` — see
+`packaging/*/cerberus-api.service`'s `Slice=` directive) whose cgroup is resolved ONCE, at
+`cerberus-vsock-watch` startup (`resolveAPISliceCgroup`), not refreshed on any timer. There is nothing left to
+poll for, and therefore no race window at all — see the Mechanism bullets above for exactly how the
+ancestor-cgroup check and the one-time resolution work. This is why it's accurate to describe the fix as
+structurally race-free rather than merely a smaller window: the old design's flaw was inherent to polling a
+value that could change again after every read; the new design compares against a value that provably doesn't
+change across a restart.
 
 **Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a

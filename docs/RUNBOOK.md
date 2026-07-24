@@ -551,7 +551,7 @@ Environment variables are managed via sysconfig files rather than inline in the 
 
 **`/etc/sysconfig/cerberus-signer`**: `EIF_PATH`, `ENCLAVE_CID`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_DEBUG` (the older `ARCH` variable was removed; `EIF_PATH` is now a single arch-less path — `/usr/share/cerberus/ssh-cert-signer.eif` — that operators populate post-install by renaming the per-arch build output)
 
-**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL` (a Slack Incoming Webhook URL is auto-detected and formatted correctly), `_WEBHOOK_FORMAT` (force `slack` or `generic`), `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF`, `_BLOCK` — plus the preventive LSM gate's `_LSM_MONITOR`, `_LSM_ENFORCE` (**currently disabled, hard startup error if true** — see [Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites) below), `_LSM_ENFORCE_STATE_FILE`, `_LSM_POLL_INTERVAL` (`docs/vsock-connect-detection.md` §4.6)
+**`/etc/sysconfig/cerberus-vsock-watch`** (optional package): `CERBERUS_VSOCK_WATCH_EXE_PATH`, `_USERNAME`, `_UNIT` (the expected `ssh-cert-api` identity), `_AUDIT_LOG`, `_WEBHOOK_URL` (a Slack Incoming Webhook URL is auto-detected and formatted correctly), `_WEBHOOK_FORMAT` (force `slack` or `generic`), `_HEARTBEAT_URL`, `_HEARTBEAT_INTERVAL`, `_TAMPER_CHECK_INTERVAL`, `_DISABLE_EBPF`, `_BLOCK` — plus the preventive LSM gate's `_LSM_MONITOR`, `_LSM_ENFORCE` (requires `_LSM_MONITOR` also be set — a hard startup error otherwise; see [Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites) below), `_API_SLICE` (the dedicated systemd slice the LSM gate pins its cgroup-ancestry check against; defaults to `<unit base name>.slice` derived from `_UNIT`), `_LSM_ENFORCE_STATE_FILE`, `_LSM_POLL_INTERVAL` (`docs/vsock-connect-detection.md` §4.6)
 
 #### Preventive LSM gate prerequisites
 
@@ -570,14 +570,37 @@ If `bpf` is missing from the active LSM list, it must be **appended to** the ker
 is a materially worse outcome than not having this feature. Append it in your bootloader config (e.g.
 `lsm=selinux,bpf` on an SELinux host) and reboot.
 
-**`--lsm-enforce` is currently disabled — a hard startup error if set.** Real hardware testing found the
-cgroup pin (refreshed on a poll timer) cannot reliably win the race against `ssh-cert-api`'s near-instant
-enclave dial after a `cerberus-api.service` restart (confirmed: roughly 1ms after the process starts), which
-denied the legitimate process on effectively every restart. See `docs/vsock-connect-detection.md` §4.6 for the
-full history and what would need to change before it's safe to re-enable. Install with `--lsm-monitor` alone
-for now — it never denies anything, so it's unaffected. `verify-vsock-watch-hardware.sh`'s
-`lsm-kernel-support`/`lsm-monitor` checks remain useful; `lsm-enforce`/`lsm-restart-chaos` will fail fast at
-startup (by design) until `--lsm-enforce` is re-enabled.
+**`Slice=` packaging requirement.** The LSM gate's cgroup-ancestry check is pinned against a dedicated systemd
+slice, not `ssh-cert-api`'s own leaf cgroup (which systemd destroys and recreates on every
+`cerberus-api.service` restart). The packaged `cerberus-api.service` sets `Slice=cerberus-api.slice`
+exclusively for this purpose — **never add another unit to this slice**, since sharing it weakens the check
+back toward "any process in this slice." A manual, non-RPM/deb/Arch deployment must add the equivalent
+`Slice=cerberus-api.slice` directive to its own `cerberus-api.service` before `--lsm-enforce` can be trusted;
+after adding it, `systemctl daemon-reload && systemctl restart cerberus-api` once to move the running service
+into the new slice.
+
+**`--api-slice` flag.** `cerberus-vsock-watch` names the slice to pin against via `--api-slice`
+(`CERBERUS_VSOCK_WATCH_API_SLICE`), defaulting to `<unit base name>.slice` derived from `--unit`/`_UNIT` (e.g.
+`cerberus-api.service` → `cerberus-api.slice`) — the same name the packaged unit sets via `Slice=`. Override it
+only if your `Slice=` directive uses a different name.
+
+**`--lsm-enforce` requires `--lsm-monitor` — restore the monitor-first practice.** `validateLSMFlags` refuses
+`--lsm-enforce` at startup unless `--lsm-monitor` is also set. Before enabling `--lsm-enforce` in production:
+run `--lsm-monitor` alone across a real `cerberus-api.service` restart and confirm it logs cleanly (no
+`vsock_lsm_block` alerts naming `ssh-cert-api`'s own exe), then verify the deny path itself on real target
+hardware with `verify-vsock-watch-hardware.sh`:
+
+```bash
+sudo ./verify-vsock-watch-hardware.sh lsm-kernel-support
+sudo ./verify-vsock-watch-hardware.sh lsm-monitor
+sudo ./verify-vsock-watch-hardware.sh lsm-enforce         # confirms a cgroup-mismatched connect() is denied
+sudo ./verify-vsock-watch-hardware.sh lsm-restart-chaos   # confirms a cerberus-api.service restart is NOT denied
+```
+
+`lsm-restart-chaos` is the check that originally caught the restart race this section used to document as a
+disabling condition for `--lsm-enforce` — it now exercises the dedicated-slice fix end to end and is expected
+to pass cleanly (zero denials of `ssh-cert-api`'s own exe across multiple restarts), not merely skip. See
+`docs/vsock-connect-detection.md` §4.6 for the full mechanism and history.
 
 ### Versioning
 
@@ -1113,15 +1136,15 @@ fixable from the host side alone. The optional **`cerberus-vsock-watch`** packag
 is primarily a detective control for exactly this: it runs two independent detectors (an `auditd` rule and an
 eBPF probe) that alert whenever a process other than the legitimate `ssh-cert-api` connects to the enclave, plus
 an opt-in reactive-kill (`--block`) that reacts after the fact. It also ships an opt-in **preventive** LSM gate
-(`--lsm-monitor`, §4.6 — see [Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites) above)
-that CAN deny a connect() before it succeeds — but only from a process outside `ssh-cert-api`'s own cgroup, and
-`--lsm-enforce` (the flag that would actually turn denial on) is currently disabled at the code level pending a
-restart-race fix, so this control is detective-only (`--lsm-monitor`) for now. **Even once re-enabled, this
-would only narrow, not close, `SIGN-1`**:
-a compromised `ssh-cert-api` itself (or anything sharing its cgroup) still passes the gate untouched and can send
-an arbitrary signing request. Nothing running on the host can fully close this gap — but between the detective
-paths and the LSM gate, exploitation by anything *other than* ssh-cert-api itself is both observable and, opt-in,
-preventable. Install and enable it alongside `cerberus-api`:
+(`--lsm-monitor`/`--lsm-enforce`, §4.6 — see [Preventive LSM gate prerequisites](#preventive-lsm-gate-prerequisites)
+above) that CAN deny a connect() before it succeeds — but only from a process outside the dedicated
+`cerberus-api.slice` cgroup (`--api-slice`), which `ssh-cert-api` runs under exclusively via the packaged
+`Slice=cerberus-api.slice`. `--lsm-enforce` requires `--lsm-monitor` to have been set first
+(`validateLSMFlags`), restoring the original monitor-first rollout practice. **This only narrows, not closes,
+`SIGN-1`**: a compromised `ssh-cert-api` itself (or anything else sharing its slice) still passes the gate
+untouched and can send an arbitrary signing request. Nothing running on the host can fully close this gap — but
+between the detective paths and the LSM gate, exploitation by anything *other than* ssh-cert-api itself is both
+observable and, opt-in, preventable. Install and enable it alongside `cerberus-api`:
 ```sh
 sudo systemctl enable --now cerberus-vsock-watch
 ```
