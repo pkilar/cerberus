@@ -7,14 +7,19 @@ import (
 	"testing"
 
 	cilium "github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 )
 
 // TestLSMObject_ParsesAsValidELF is the LSM-object mirror of
 // TestEmbeddedObject_ParsesAsValidELF (loader_test.go): it does NOT load the
 // program into a kernel (this sandbox has no CONFIG_BPF_LSM support to load
-// it against — see vsock_lsm.c's header comment on what's genuinely
-// unconfirmed), only that the embedded object parses into the program/map
-// shape LSMGuard.Run expects.
+// it against — see vsock_lsm.c's header comment), only that the embedded
+// object parses into the program/map shape LSMGuard.Run expects, plus (below)
+// that its two pointer parameters carry real struct BTF types rather than
+// `void *` — a real-hardware load once failed the verifier over exactly
+// this (see vsock_lsm.c's "FIRST REAL-HARDWARE LOAD ATTEMPT" comment), and
+// that failure mode is invisible to LoadCollectionSpecFromReader's ELF
+// parsing alone, so it needs its own explicit assertion.
 func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 	spec, err := cilium.LoadCollectionSpecFromReader(bytes.NewReader(lsmProgramObject))
 	if err != nil {
@@ -41,6 +46,39 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 	}
 	if prog.SectionName != "lsm/socket_connect" {
 		t.Errorf("section name = %q, want lsm/socket_connect", prog.SectionName)
+	}
+
+	// A trampoline-attached program (LSM, like fentry/fexit) is verified by
+	// matching each argument's BTF type against the real target hook's
+	// signature. `void *` params (BTF PTR-to-void) fail that match and the
+	// kernel verifier rejects the program before it ever runs -- this is
+	// exactly the bug the "FIRST REAL-HARDWARE LOAD ATTEMPT" note in
+	// vsock_lsm.c documents. Assert both pointer params resolve to forward-
+	// declared structs (by name), not void, so a regression back to `void *`
+	// fails here instead of on a real kernel.
+	var fn *btf.Func
+	if err := spec.Types.TypeByName("cerberus_lsm_check_connect", &fn); err != nil {
+		t.Fatalf("looking up cerberus_lsm_check_connect BTF: %v", err)
+	}
+	proto, ok := fn.Type.(*btf.FuncProto)
+	if !ok {
+		t.Fatalf("cerberus_lsm_check_connect BTF type = %T, want *btf.FuncProto", fn.Type)
+	}
+	wantParamStructs := map[string]string{"sock": "socket", "address": "sockaddr"}
+	for _, param := range proto.Params {
+		wantStruct, relevant := wantParamStructs[param.Name]
+		if !relevant {
+			continue
+		}
+		ptr, ok := param.Type.(*btf.Pointer)
+		if !ok {
+			t.Errorf("param %q type = %T, want *btf.Pointer (got a bare %v -- void*?)", param.Name, param.Type, param.Type)
+			continue
+		}
+		fwd, ok := ptr.Target.(*btf.Fwd)
+		if !ok || fwd.Name != wantStruct {
+			t.Errorf("param %q points to %v, want forward-declared struct %s", param.Name, ptr.Target, wantStruct)
+		}
 	}
 
 	wantMaps := map[string]struct {

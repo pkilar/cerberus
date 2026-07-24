@@ -20,10 +20,11 @@
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
 > must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
-> §4.6) carries the SAME caveat, plus its own: it has never been attached to a live kernel's `socket_connect` LSM
+> §4.6) carries the SAME caveat, plus its own history: a real load attempt confirmed the `socket_connect` LSM
 > hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
-> turn), and even whether this kernel exposes that hook to `BPF_PROG_TYPE_LSM` at all, or accepts this program's
-> parameter types, is unconfirmed — see that file's header comment. Never enable `--lsm-enforce` without first
+> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but the verifier rejected the program's parameter
+> types (`void *`, since fixed — see that file's header comment). The fix has only been verified locally
+> (BTF inspection, `go test`), NOT via another real load attempt. Never enable `--lsm-enforce` without first
 > running `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
 
 ## 1. Problem statement
@@ -338,12 +339,14 @@ eliminates it.
 **Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a
 new `CAP_MAC_ADMIN` grant (`packaging/*/cerberus-vsock-watch.service`). See `docs/RUNBOOK.md`'s "Preventive LSM
-gate prerequisites" for verification commands. Per this doc's top-of-file status note, whether this kernel
-exposes the `socket_connect` hook to `BPF_PROG_TYPE_LSM` at all, and whether its trampoline verification accepts
-this program's exact parameter types, is genuinely unconfirmed against a live kernel — see `vsock_lsm.c`'s header
-comment (the earlier draft of this file used the wrong attach-point name entirely, `security_socket_connect`
-instead of `socket_connect` — fixed, but a reminder that this class of mistake is easy to make and only a real
-kernel load attempt fully confirms it).
+gate prerequisites" for verification commands. A real load attempt confirmed the `socket_connect` hook IS
+exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but also caught a real bug in the process: the program's `void
+*` parameter types didn't match the real hook's `struct socket *`/`struct sockaddr *` signature, which the
+kernel verifier rejects for a trampoline-attached (LSM/fentry/fexit) program — fixed by forward-declaring the
+two struct names instead of using `void *` (see `vsock_lsm.c`'s header comment for the full mechanism). This is
+the second real-hardware-only bug this feature has hit — the first was the wrong attach-point name,
+`security_socket_connect` instead of `socket_connect` — a reminder that both classes of mistake are easy to make
+and only a real kernel load attempt fully confirms either is fixed.
 
 ## 5. False-positive inventory
 
