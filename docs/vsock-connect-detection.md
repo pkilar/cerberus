@@ -1,8 +1,9 @@
 # VSOCK-Connect Detection Design
 
 > **Status:** Implemented (Option C — both detectors), plus an opt-in reactive-kill response (§4.5; default off)
-> and an opt-in, monitor-first preventive LSM gate (§4.6; default off, dry-run before enforcement).
-> Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
+> and an opt-in preventive LSM gate (§4.6; default off). **`--lsm-enforce` is currently disabled at the code
+> level** (hard startup error) pending a real fix for the restart race described below — `--lsm-monitor` alone
+> is fully supported. Companion to `docs/THREAT-MODEL.md` (`SIGN-1`).
 > **Kind of control:** Primarily detective, plus a narrow, opt-in preventive gate (§4.6) that only blocks by
 > cgroup identity. See §7 for why no host-side control can fully prevent `SIGN-1` — the LSM gate narrows the gap,
 > it does not close it.
@@ -20,11 +21,17 @@
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
 > must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
-> §4.6) carries the SAME caveat, plus its own: it has never been attached to a live kernel's `socket_connect` LSM
+> §4.6) carries the SAME caveat, plus its own history: a real load attempt confirmed the `socket_connect` LSM
 > hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
-> turn), and even whether this kernel exposes that hook to `BPF_PROG_TYPE_LSM` at all, or accepts this program's
-> parameter types, is unconfirmed — see that file's header comment. Never enable `--lsm-enforce` without first
-> running `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
+> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, and — after two attempted fixes, the first wrong —
+> the program now loads and attaches successfully on real hardware (see that file's header comment for the full
+> history). With attach working, enforcement itself hit a real, and then a structural, problem: `LSMGuard`'s
+> cgroup-pin poll loop first read through `Allowlist`'s cached cgroup resolution (5s TTL, fixed), and even after
+> that fix, real hardware showed `ssh-cert-api`'s enclave dial happens roughly 1ms after a
+> `cerberus-api.service` restart — too fast for any poll-based cgroup pin to reliably catch up. `--lsm-enforce`
+> is therefore disabled at the code level (`validateLSMFlags`) until the cgroup pin is redesigned to be
+> event-driven rather than polled — see §4.6 for the full history and what would need to change to re-enable it.
+> `--lsm-monitor` alone is unaffected by any of this and remains fully supported.
 
 ## 1. Problem statement
 
@@ -303,47 +310,62 @@ at all, which the detective path could previously only alert on after the fact.
 - The cgroup pin reuses `Allowlist.CgroupID()` (the same cached resolution `Classify` uses for the detective
   path — see §4.1), refreshed every `--lsm-poll-interval` (default 250ms).
 
-**Rollout is monitor-first by design, not just convention:**
-- `--lsm-monitor` alone loads the gate and ships a `vsock_lsm_block` alert (`lsm_mode=monitor`,
-  `lsm_denied=false`) on every cgroup mismatch, but the program never returns a deny — this is the only way to
-  load the gate at all.
-- `--lsm-enforce` is rejected as a hard startup error unless `--lsm-monitor` is also set
-  (`cmd/cerberus-vsock-watch/main.go`'s `validateLSMFlags`) — enforcement is never silently auto-promoted.
-- An operator is expected to watch `--lsm-monitor` run clean — no `lsm_denied` (impossible in monitor mode
-  anyway) and, more importantly, no would-deny alert naming the legitimate `ssh-cert-api`'s own exe — across at
-  least one real `cerberus-api.service` restart before ever adding `--lsm-enforce`. `--lsm-enforce-state-file`
-  (default `/run/cerberus-vsock-watch/lsm-enforce`, in the unit's `RuntimeDirectory=`) also allows toggling
-  enforcement at runtime without a restart, polled the same interval as the cgroup pin.
+**`--lsm-enforce` is currently disabled — hard startup error if set.** Rollout was originally meant to be
+monitor-first (`--lsm-monitor` loads the gate and ships a `vsock_lsm_block` alert on every cgroup mismatch
+without ever denying; `--lsm-enforce` was gated behind having run `--lsm-monitor` clean first). Real hardware
+testing found a problem no amount of monitor-first practice would have caught, described below, so
+`cmd/cerberus-vsock-watch/main.go`'s `validateLSMFlags` now refuses `--lsm-enforce` unconditionally — not "only
+without `--lsm-monitor`," full stop — until the underlying race is actually closed. `--lsm-monitor` alone
+remains fully supported and safe: it never denies anything.
 
-**A requested-but-not-running enforcement guarantee is loud, not silent.** `--lsm-monitor` alone failing to
-attach is treated like any other optional detective enhancement failing (`--disable-ebpf`'s own graceful
-degradation) — logged, and the process keeps running on whatever detection is still up, per this codebase's
-general philosophy of degrading gracefully rather than crash-looping over an optional piece. But if
-`--lsm-enforce` was ALSO explicitly requested, the operator asked for an actual blocking guarantee, not just
-observability — so if the LSM gate ever stops running (fails to attach at startup, errors out later, or panics),
-`cmd/cerberus-vsock-watch/main.go`'s `lsmEnforceFatal` ships a `lsm_enforcement_down` critical alert and exits
-the whole process (for `Restart=on-failure` to retry) rather than silently continuing to report healthy with no
-enforcement active. This is deliberately a SEPARATE fatal path from `fatalShutdown`/`detectorHealth` (§4.4):
-folding it into `health.allDown()` would mean it never fires while auditd/eBPF stay healthy, which is exactly the
-scenario where an operator most needs to know their `--lsm-enforce` isn't actually enforcing anything.
+The `lsmEnforceFatal` mechanism (ships a `lsm_enforcement_down` critical alert and exits the process if
+`--lsm-enforce` was requested and the gate stops running) is still present in the code and still correct for
+when enforcement is eventually re-enabled — it's just unreachable for now, since `--lsm-enforce` can never be
+true past the startup check.
 
-**Why the restart race is a documented residual risk, not something this design eliminates.** This is
-structurally the same race `Allowlist`'s bounded cgroup-revalidation retry (§4.1) exists to paper over for the
-detective path — except here, a lost race means a REAL denied `connect()`, not just a noisy `Indeterminate`
-alert. `ssh-cert-api` has no dial retry on the signing path (`ssh-cert-api/internal/enclave/client.go`), so a
-false deny during a lost race surfaces immediately as a user-visible signing failure, not a silently-absorbed
-hiccup. The tight default poll interval and the mandatory monitor-mode practice above mitigate this; neither
-eliminates it.
+**Why `--lsm-enforce` is disabled: two real-hardware bugs, the second one architectural, not just a bug fix.**
+
+Bug 1 (fixed): `LSMGuard`'s poll loop was calling `Allowlist.CgroupID()`, the SAME cached cgroup resolution the
+detective path uses (`Allowlist.DefaultCacheTTL`, 5s). The poll loop's 250ms ticker was an illusion of tight
+refresh — the underlying value only actually changed every 5 seconds. `ssh-cert-api` dials the enclave (its own
+startup handshake) well within that 5-second window after every restart, so the LSM gate denied the legitimate,
+freshly-restarted process on effectively every restart. Fixed by adding `Allowlist.RefreshCgroupID` (uncached)
+and having the poll loop call that instead — zero change to the detective path, which still uses the cached
+path and tolerates its staleness via its own separate bounded retry on a mismatch
+(`cgroupRevalidateAttempts`/`Interval`), a fallback the preventive path never had.
+
+Bug 2 (NOT fixable by tightening the poll interval): with bug 1 fixed, real hardware still showed the LSM gate
+denying `ssh-cert-api` on effectively every restart. Correlating `cerberus-vsock-watch`'s alerts against
+`ssh-cert-api`'s own log showed why: after the cache fix, `ssh-cert-api`'s enclave dial fails with `operation
+not permitted` (an LSM deny — synchronous, before any network I/O, hence near-instant) roughly **1 millisecond**
+after the process starts. No poll interval, however tight, can be relied on to win a race against an event that
+happens in ~1ms — this is a structural mismatch between "resolve the cgroup pin on a fixed timer" and "the
+target event happens almost immediately," not an off-by-one or a cache bug. Tightening `--lsm-poll-interval`
+narrows the window but cannot close it. `ssh-cert-api` has no dial retry on the signing path
+(`ssh-cert-api/internal/enclave/client.go`), so a lost race is a real, user-visible signing failure every time,
+not a silently-absorbed hiccup — which is why this is disabled outright rather than left as a documented
+residual risk operators might reasonably accept.
+
+**What would actually fix this**: replace the fixed-interval poll with something that reacts to the cgroup
+appearing rather than discovering it up to one interval later — e.g. an inotify watch on the cgroup directory,
+or synchronizing with `cerberus-api.service`'s own lifecycle directly. That's a real design change, not
+attempted here; `validateLSMFlags`'s doc comment says exactly what to revisit before removing the block.
 
 **Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a
 new `CAP_MAC_ADMIN` grant (`packaging/*/cerberus-vsock-watch.service`). See `docs/RUNBOOK.md`'s "Preventive LSM
-gate prerequisites" for verification commands. Per this doc's top-of-file status note, whether this kernel
-exposes the `socket_connect` hook to `BPF_PROG_TYPE_LSM` at all, and whether its trampoline verification accepts
-this program's exact parameter types, is genuinely unconfirmed against a live kernel — see `vsock_lsm.c`'s header
-comment (the earlier draft of this file used the wrong attach-point name entirely, `security_socket_connect`
-instead of `socket_connect` — fixed, but a reminder that this class of mistake is easy to make and only a real
-kernel load attempt fully confirms it).
+gate prerequisites" for verification commands. A real load attempt confirmed the `socket_connect` hook IS
+exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but also caught a real bug in the process: the program declared
+the hook's three arguments as separate native parameters (`sock`, `address`, `addrlen`), which the kernel
+verifier rejects for a trampoline-attached (LSM/fentry/fexit) program — these programs are invoked with a
+single `ctx` pointer to an array of the hook's raw argument values, not the arguments passed natively in
+registers. Fixed by taking that single `ctx` parameter and manually unpacking `ctx[1]`/`ctx[2]` (see
+`vsock_lsm.c`'s header comment for the full mechanism). An earlier fix attempt addressed a different, plausible
+but wrong theory (BTF pointer-type matching) and made no difference on real hardware — the verifier error was
+byte-for-byte identical before and after, since the underlying instructions hadn't actually changed. This is the
+third real-hardware-only bug this feature has hit — the first was the wrong attach-point name,
+`security_socket_connect` instead of `socket_connect` — a reminder that this class of mistake is easy to make
+and only a real kernel load attempt fully confirms it's fixed.
 
 ## 5. False-positive inventory
 

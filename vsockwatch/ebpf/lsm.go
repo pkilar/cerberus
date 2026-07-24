@@ -31,7 +31,12 @@ var lsmProgramObject []byte
 // cgroupRevalidateInterval were empirically tuned against (see
 // vsockwatch/allowlist.go) — see LSMGuard's doc comment for why the restart
 // race this can lose is a documented residual risk, not something this
-// interval eliminates.
+// interval eliminates. This is only actually true because pollLoop calls
+// Allowlist.RefreshCgroupID (uncached) — an earlier version called the
+// cached CgroupID instead, which made this interval meaningless in practice
+// (its real responsiveness was bounded below by Allowlist.DefaultCacheTTL,
+// 5s, an order of magnitude slower than this comment claimed) until a real
+// hardware test caught it denying every single cerberus-api.service restart.
 const defaultLSMPollInterval = 250 * time.Millisecond
 
 // LSMGuard loads vsock_lsm.c, attaches it to the socket_connect LSM hook
@@ -247,6 +252,15 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 // a runtime toggle, every interval, until ctx is done. It tracks its own
 // last-known state locally (no locking needed: nothing else reads these
 // vars), publishing to pw only on an actual change.
+//
+// Calls Allowlist.RefreshCgroupID (uncached), NOT CgroupID (cached) — a real
+// load attempt confirmed on real hardware that using the cached path made
+// this poll loop's tight interval meaningless: CgroupID's cache
+// (Allowlist.DefaultCacheTTL, 5s) can outlast an entire cerberus-api.service
+// restart, so every single restart denied the legitimate, freshly-restarted
+// process for the whole 5-second staleness window regardless of how often
+// this loop ticked. See RefreshCgroupID's doc comment for why the detective
+// path can tolerate that staleness and this one can't.
 func (g *LSMGuard) pollLoop(ctx context.Context, pw policyMapWriter, interval time.Duration) {
 	activeSlot := uint32(0) // matches lsm_active_slot's zero-initialized kernel state
 	var lastCgroup uint64
@@ -265,7 +279,7 @@ func (g *LSMGuard) pollLoop(ctx context.Context, pw policyMapWriter, interval ti
 		case <-ticker.C:
 		}
 
-		if cg, err := g.Allowlist.CgroupID(); err == nil {
+		if cg, err := g.Allowlist.RefreshCgroupID(); err == nil {
 			if !lastPopulated || cg != lastCgroup {
 				next := 1 - activeSlot
 				if perr := pw.putPolicySlot(next, cg, true); perr != nil {

@@ -26,9 +26,7 @@
 // bpf_probe_read_user treats connect(2)'s userspace sockaddr argument — same
 // sockaddr_vm decode, same offsets, just a kernel-memory read instead of a
 // userspace one (the address is already kernel-copied by the time an LSM
-// hook sees it). The hook's two pointer parameters are declared as `void *`
-// rather than `struct socket *`/`struct sockaddr *` for the same
-// no-extra-headers reason.
+// hook sees it).
 //
 // SEC NAME: "lsm/socket_connect", NOT "lsm/security_socket_connect". BPF LSM
 // programs attach to the kernel's per-hook trampoline, which cilium/ebpf
@@ -43,27 +41,56 @@
 // dispatcher's name here would make cilium/ebpf look for a nonexistent
 // "bpf_lsm_security_socket_connect" BTF function and fail to attach.
 //
-// GENUINELY UNCONFIRMED — read before relying on this in production, in the
-// same spirit as vsock_connect.c's own top-of-file caveat: this file has
-// never been compiled against a live kernel's BTF or load-tested, because
-// this development sandbox has no CONFIG_BPF_LSM kernel, no active "bpf" LSM,
-// and no privilege to attempt the load. Specifically unconfirmed:
-//   1. That "socket_connect" is actually among the hooks this kernel exposes
-//      to BPF_PROG_TYPE_LSM (not every LSM_HOOK() entry necessarily is, and
-//      that set can vary by kernel version) — confirmed only by an actual
-//      load attempt on target hardware (`bpftool btf dump file
-//      /sys/kernel/btf/vmlinux | grep -w bpf_lsm_socket_connect` checks
-//      whether the trampoline exists before even trying to load).
-//   2. Whether the kernel's BTF-based trampoline verification accepts this
-//      program's `void *` parameter types, or requires the exact
-//      `struct socket *`/`struct sockaddr *` types the real hook declares.
-// Before deploying, a maintainer MUST complete the real-hardware items in
-// docs/vsock-connect-detection.md §6/§4.6 (automated by the
-// check_lsm_kernel_support / check_lsm_monitor_dry_run checks in
-// verify-vsock-watch-hardware.sh) — load in --lsm-monitor (never
-// --lsm-enforce) first, and confirm monitor-mode logging looks correct
-// across at least one real cerberus-api.service restart before ever
-// enabling enforcement.
+// CALLING CONVENTION: the exported SEC("lsm/...") function takes exactly ONE
+// parameter, `ctx` — a pointer to an array of `__u64` values, one per
+// argument of the underlying hook (here: sock, address, addrlen, in that
+// order) — NOT the hook's real arguments passed directly in registers r1,
+// r2, r3 as an ordinary multi-parameter C function. This is confirmed by
+// docs.ebpf.io's BPF_PROG_TYPE_LSM page: "LSM programs are invoked with an
+// array of __u64 values equal in length to the amount of arguments of the
+// LSM hook." libbpf's BPF_PROG() macro (tools/lib/bpf/bpf_tracing.h) exists
+// specifically to unwrap this ctx array into nicely typed local variables —
+// this file deliberately doesn't use that macro (same no-extra-headers
+// reason as everywhere else here), so it does the unwrapping by hand below:
+// `ctx[0]`/`ctx[1]`/`ctx[2]`, cast to the types documented in the function's
+// own comment. A FIRST REAL-HARDWARE LOAD ATTEMPT (2026-07-24) got this
+// wrong — the function was declared with three native parameters (`sock`,
+// `address`, `addrlen`) instead of the single `ctx` array — and the verifier
+// rejected it: "load program: permission denied: 0: (bf) r4 = r2: R2
+// !read_ok". That's the BPF verifier, not a capability/SELinux/AppArmor
+// denial (CAP_MAC_ADMIN was present and correct): with a 3-parameter native
+// signature, clang emits code expecting `address` in r2 per the ordinary BPF
+// calling convention, but the LSM trampoline only ever populates r1 (the
+// ctx-array pointer) — r2 is simply never written by the caller, hence
+// NOT_INIT ("R2 !read_ok"), regardless of what type that unread register was
+// declared as. An earlier attempt at this fix (changing `void *` parameters
+// to `struct socket *`/`struct sockaddr *`, still as 3 native params) also
+// failed identically on real hardware, because it addressed a plausible-but-
+// wrong theory (BTF type matching) rather than this actual mismatch — the
+// verifier error was byte-for-byte unchanged, which in hindsight makes sense
+// since the underlying instructions never changed either: void*-vs-struct*
+// only affects a C type annotation, not which registers a plain multi-
+// parameter function reads. This IS the fix; see the function definition
+// below.
+//
+// This whole saga incidentally confirms the OTHER item this file used to
+// flag as unconfirmed — whether "socket_connect" is even exposed to
+// BPF_PROG_TYPE_LSM on this kernel — resolves positively: the verifier could
+// only have compared argument types against a real target signature (3
+// hook arguments, matching security_socket_connect) if attach_btf_id
+// resolution had already succeeded. Had the bpf_lsm_socket_connect
+// trampoline not existed, cilium/ebpf's own client-side BTF lookup would
+// have failed before ever reaching the kernel's bpf(BPF_PROG_LOAD, ...)
+// syscall, and there would be no verifier log at all.
+//
+// STILL UNCONFIRMED as of this fix: whether the corrected ctx-array
+// signature actually loads AND attaches cleanly end-to-end on real
+// hardware — this fix has only been verified locally (disassembly/BTF
+// inspection, `go test`), NOT via another real load attempt. A maintainer
+// MUST re-run the real-hardware items in docs/vsock-connect-detection.md
+// §6/§4.6 (automated by the check_lsm_kernel_support /
+// check_lsm_monitor_dry_run checks in verify-vsock-watch-hardware.sh)
+// before ever enabling --lsm-enforce again.
 //
 // See vsock_connect.c's header comment for the shared conventions reused
 // here: hand-rolled helper declarations against stable numeric BPF_FUNC_*
@@ -178,9 +205,24 @@ struct {
     __uint(max_entries, 1 << 16);
 } lsm_events SEC(".maps");
 
+// ctx is the raw argument array the LSM trampoline actually provides — see
+// the file header's "CALLING CONVENTION" note. security_socket_connect's
+// real signature is (struct socket *sock, struct sockaddr *address, int
+// addrlen), in that order, so ctx[0]/ctx[1]/ctx[2] are exactly those three
+// values, each a plain u64 the trampoline copied out of the real call's
+// argument registers. sock (ctx[0]) is unused. address (ctx[1]) stays an
+// opaque `void *` deliberately (see "WHY THIS STILL NEEDS NO vmlinux.h"
+// above) — bpf_probe_read_kernel needs no more than that, and (unlike a
+// native-parameter signature) the verifier never tries to type-match a
+// ctx-array cast against the kernel's real argument types anyway, so there
+// is no reason to forward-declare struct names here. addrlen (ctx[2]) is
+// truncated to `int` via a plain C cast, which correctly recovers the
+// original 32-bit value's exact bit pattern regardless of how the upper 32
+// bits of the saved u64 slot were extended.
 SEC("lsm/socket_connect")
-int cerberus_lsm_check_connect(void *sock, void *address, int addrlen) {
-    (void)sock;
+int cerberus_lsm_check_connect(unsigned long long *ctx) {
+    void *address = (void *)ctx[1];
+    int addrlen = (int)ctx[2];
 
     if (addrlen < SOCKADDR_VM_SIZE) {
         return 0; // too short to be sockaddr_vm; not our concern, allow
