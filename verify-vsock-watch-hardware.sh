@@ -693,6 +693,10 @@ check_lsm_monitor_dry_run() {
 }
 
 # --- Item 10: --lsm-enforce actually denies a cgroup-mismatched connect() ---
+# With the LSM gate's cgroup check now pinning against a stable, dedicated
+# systemd slice (cerberus-api.slice, resolved once at startup), this check is
+# expected to pass reliably — a single disposable connect() outside the slice
+# is consistently denied.
 check_lsm_enforce_denies() {
     echo
     echo "=== 10. --lsm-enforce actually denies a cgroup-mismatched connect() ==="
