@@ -11,12 +11,19 @@
 // WHY CGROUP-ONLY: an LSM hook must decide allow/deny synchronously, entirely
 // in-kernel — there is no way to pause the connect() syscall and ask a Go
 // userspace process "does /proc/<pid>/exe match?" the way Allowlist.Classify
-// does for the detective path. bpf_get_current_cgroup_id() is the only
-// identity signal that's cheap and available entirely in-kernel, so this
-// control is DELIBERATELY NARROWER than the detective path: anything sharing
-// ssh-cert-api's cgroup — including a compromised ssh-cert-api itself —
-// still passes. See docs/vsock-connect-detection.md §4.6 and
-// docs/THREAT-MODEL.md's SIGN-1: this does not close SIGN-1.
+// does for the detective path. bpf_get_current_ancestor_cgroup_id() is the
+// only identity signal that's cheap, available entirely in-kernel, and
+// (checked against a stable ANCESTOR slice cgroup rather than
+// ssh-cert-api's own ever-recreated leaf cgroup) doesn't require chasing a
+// moving target across every cerberus-api.service restart — see
+// cgroup_slice.go's doc comment and
+// docs/vsock-connect-detection.md §4.6's history for why the leaf-cgroup
+// version of this check was fundamentally unwinnable as a poll-based race.
+// This control is still DELIBERATELY NARROWER than the detective path:
+// anything sharing ssh-cert-api's dedicated slice — including a
+// compromised ssh-cert-api itself — still passes. See
+// docs/vsock-connect-detection.md §4.6 and docs/THREAT-MODEL.md's SIGN-1:
+// this does not close SIGN-1.
 //
 // WHY THIS STILL NEEDS NO vmlinux.h FOR ITS OWN LOGIC: unlike a CO-RE program
 // that reads specific FIELDS of a kernel struct (requiring field-offset
@@ -113,7 +120,8 @@ static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pi
 static __u64 (*bpf_get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid;
 static long (*bpf_get_current_comm)(void *buf, __u32 size_of_buf) =
     (void *)BPF_FUNC_get_current_comm;
-static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)BPF_FUNC_get_current_cgroup_id;
+static __u64 (*bpf_get_current_ancestor_cgroup_id)(int ancestor_level) =
+    (void *)BPF_FUNC_get_current_ancestor_cgroup_id;
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) =
     (void *)BPF_FUNC_map_lookup_elem;
 static void *(*bpf_ringbuf_reserve)(void *ringbuf, __u64 size, __u64 flags) =
@@ -150,15 +158,21 @@ struct vsock_connect_event {
 };
 
 // lsm_policy_slot is one entry of the double-buffered lsm_policy map below.
-// allowed_cgroup_id is the cgroup v2 inode ssh-cert-api is currently expected
-// to run in; populated distinguishes "userspace has written this slot" from
-// the zero value, so an unpopulated or freshly-booted slot is never mistaken
-// for "expect cgroup 0" — this is what makes the fail-open bootstrap below
+// allowed_cgroup_id is the cgroup v2 inode of the DEDICATED systemd slice
+// ssh-cert-api's service is expected to run under (see cgroup_slice.go's
+// doc comment for why this is a stable ancestor slice, not ssh-cert-api's
+// own ever-recreated leaf cgroup). ancestor_level is how many cgroup levels
+// up from the connecting process bpf_get_current_ancestor_cgroup_id must
+// look to reach that slice -- computed on the Go side (cgroup_slice.go),
+// never hardcoded, since it depends on how the configured slice name nests.
+// populated distinguishes "userspace has written this slot" from the zero
+// value, so an unpopulated or freshly-booted slot is never mistaken for
+// "expect cgroup 0" -- this is what makes the fail-open bootstrap below
 // structural rather than a convention to remember.
 struct lsm_policy_slot {
     __u64 allowed_cgroup_id;
     __u32 populated;
-    __u32 _pad;
+    __u32 ancestor_level;
 };
 
 // lsm_policy is double-buffered (2 slots): the Go-side LSMGuard writes a
@@ -266,8 +280,12 @@ int cerberus_lsm_check_connect(unsigned long long *ctx) {
 
     // Fail-open bootstrap: an absent/unpopulated policy slot (before
     // userspace's first publish, or a lookup failure) means "no mismatch",
-    // never "deny everything" — see lsm_policy_slot's doc comment.
-    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    // never "deny everything" — see lsm_policy_slot's doc comment. The
+    // ancestor level defaults to 0 (the cgroup root) when unpopulated,
+    // which is harmless here since the populated check below already
+    // short-circuits mismatch to false in that case.
+    __u32 level = policy ? policy->ancestor_level : 0;
+    __u64 cgroup_id = bpf_get_current_ancestor_cgroup_id((int)level);
     int mismatch = (policy && policy->populated) ? (cgroup_id != policy->allowed_cgroup_id) : 0;
 
     if (mismatch) {

@@ -59,26 +59,68 @@ func TestDetectorHealth_AllDown_AuditdOnlyWhenEBPFDisabled(t *testing.T) {
 	}
 }
 
-// TestValidateLSMFlags verifies --lsm-enforce is unconditionally rejected as
-// a hard startup error (docs/vsock-connect-detection.md §4.6): real hardware
-// testing found LSMGuard's poll-based cgroup pin cannot reliably win the
-// race against ssh-cert-api's near-instant enclave dial after a
-// cerberus-api.service restart, so enforcement is disabled entirely for now
-// -- --lsm-monitor alone remains fully supported.
+// TestValidateLSMFlags verifies --lsm-enforce is rejected as a hard startup
+// error whenever --lsm-monitor isn't also set -- the structural half of the
+// monitor-first rollout (docs/vsock-connect-detection.md §4.6): enforcement
+// must never be silently auto-promoted, only explicitly opted into on top of
+// an already-running monitor mode. The unconditional refusal from the
+// restart-race era is gone now that the cgroup pin is race-free (see
+// docs/vsock-connect-detection.md §4.6's history) -- --lsm-enforce is once
+// again just "requires --lsm-monitor first", not "always refused".
 func TestValidateLSMFlags(t *testing.T) {
 	tests := []struct {
 		name    string
+		monitor bool
 		enforce bool
 		wantErr bool
 	}{
-		{"disabled", false, false},
-		{"enforce requested", true, true},
+		{"neither set", false, false, false},
+		{"monitor only", true, false, false},
+		{"monitor and enforce", true, true, false},
+		{"enforce without monitor", false, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateLSMFlags(tt.enforce)
+			err := validateLSMFlags(tt.monitor, tt.enforce)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateLSMFlags(%v) error = %v, wantErr %v", tt.enforce, err, tt.wantErr)
+				t.Errorf("validateLSMFlags(%v, %v) error = %v, wantErr %v", tt.monitor, tt.enforce, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestDeriveAPISlice verifies --api-slice derivation from --unit, and in
+// particular that a --lsm-monitor-requiring derivation failure is actually
+// caught. A prior version of this logic derived apiSlice by unconditionally
+// appending ".slice" to the trimmed --unit BEFORE checking whether the
+// result was empty -- since string concatenation with a non-empty literal
+// suffix can never produce "", that check was dead code, and a misconfigured
+// --unit (e.g. "") silently produced the nonsensical slice name ".slice"
+// instead of failing fast at startup (docs/vsock-connect-detection.md §4.6).
+func TestDeriveAPISlice(t *testing.T) {
+	tests := []struct {
+		name      string
+		apiSlice  string
+		unit      string
+		monitor   bool
+		wantSlice string
+		wantErr   bool
+	}{
+		{"explicit flag wins over unit", "custom.slice", "cerberus-api.service", true, "custom.slice", false},
+		{"derived from normal unit", "", "cerberus-api.service", true, "cerberus-api.slice", false},
+		{"derived from unit without .service suffix", "", "cerberus-api", true, "cerberus-api.slice", false},
+		{"empty unit without monitor is lenient", "", "", false, ".slice", false},
+		{"empty unit with monitor fails fast", "", "", true, "", true},
+		{"unit is bare .service with monitor fails fast", "", ".service", true, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := deriveAPISlice(tt.apiSlice, tt.unit, tt.monitor)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("deriveAPISlice(%q, %q, %v) error = %v, wantErr %v", tt.apiSlice, tt.unit, tt.monitor, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.wantSlice {
+				t.Errorf("deriveAPISlice(%q, %q, %v) = %q, want %q", tt.apiSlice, tt.unit, tt.monitor, got, tt.wantSlice)
 			}
 		})
 	}

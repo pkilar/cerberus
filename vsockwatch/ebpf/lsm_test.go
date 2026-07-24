@@ -2,17 +2,13 @@ package ebpf
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"os"
 	"testing"
-	"time"
 
 	cilium "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
-
-	"github.com/pkilar/cerberus/vsockwatch"
 )
 
 // TestLSMObject_ParsesAsValidELF is the LSM-object mirror of
@@ -127,13 +123,14 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 
 // TestEncodePolicySlot_MatchesCStructLayout verifies encodePolicySlot's
 // output matches struct lsm_policy_slot (vsock_lsm.c) field-for-field:
-// 8-byte allowed_cgroup_id, 4-byte populated, 4 bytes of explicit padding.
+// 8-byte allowed_cgroup_id, 4-byte populated, 4-byte ancestor_level (the
+// former _pad field, repurposed -- see vsock_lsm.c's struct doc comment).
 // lsmMapWriter.putPolicySlot (the only caller) cannot itself be exercised in
-// this sandbox — creating even a plain BPF_MAP_TYPE_ARRAY requires real BPF
-// privilege ("operation not permitted" here) — so this tests the encoding
+// this sandbox -- creating even a plain BPF_MAP_TYPE_ARRAY requires real BPF
+// privilege ("operation not permitted" here) -- so this tests the encoding
 // logic directly, which is the part that must match the C struct.
 func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
-	buf := encodePolicySlot(0xdeadbeefcafef00d, true)
+	buf := encodePolicySlot(0xdeadbeefcafef00d, 2, true)
 	if len(buf) != 16 {
 		t.Fatalf("len(buf) = %d, want 16", len(buf))
 	}
@@ -143,13 +140,16 @@ func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
 	if got := binary.NativeEndian.Uint32(buf[8:12]); got != 1 {
 		t.Errorf("populated = %d, want 1", got)
 	}
-	if got := binary.NativeEndian.Uint32(buf[12:16]); got != 0 {
-		t.Errorf("padding = %d, want 0", got)
+	if got := binary.NativeEndian.Uint32(buf[12:16]); got != 2 {
+		t.Errorf("ancestor_level = %d, want 2", got)
 	}
 
-	unpop := encodePolicySlot(999, false)
+	unpop := encodePolicySlot(999, 1, false)
 	if got := binary.NativeEndian.Uint32(unpop[8:12]); got != 0 {
 		t.Errorf("populated (false case) = %d, want 0", got)
+	}
+	if got := binary.NativeEndian.Uint32(unpop[12:16]); got != 1 {
+		t.Errorf("ancestor_level = %d, want 1", got)
 	}
 }
 
@@ -163,18 +163,23 @@ func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
 type fakePolicyWriter struct {
 	calls []string
 
-	// Recorded by putPolicySlot, valid once pollLoop has returned (this
-	// struct is not safe for concurrent use while pollLoop is still running
-	// in another goroutine -- callers in this file only inspect these after
-	// pollLoop has returned, never while it's still running).
+	// Recorded by putPolicySlot; this struct is not safe for concurrent use,
+	// but nothing in this file calls it from more than one goroutine.
 	lastCgroupID   uint64
+	lastLevel      uint32
 	lastPopulated  bool
+	lastPolicySlot uint32
 	policyWriteCnt int
+
+	// Recorded by putActiveSlot.
+	lastActiveSlot uint32
 }
 
-func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, populated bool) error {
+func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, level uint32, populated bool) error {
 	f.calls = append(f.calls, "policy")
+	f.lastPolicySlot = slot
 	f.lastCgroupID = cgroupID
+	f.lastLevel = level
 	f.lastPopulated = populated
 	f.policyWriteCnt++
 	return nil
@@ -182,6 +187,7 @@ func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, populated
 
 func (f *fakePolicyWriter) putActiveSlot(slot uint32) error {
 	f.calls = append(f.calls, "active")
+	f.lastActiveSlot = slot
 	return nil
 }
 
@@ -195,9 +201,9 @@ var _ policyMapWriter = (*fakePolicyWriter)(nil)
 func TestLSMGuard_PublishOrder_WritesSlotBeforeFlippingActive(t *testing.T) {
 	fw := &fakePolicyWriter{}
 
-	// Simulate exactly what pollLoop does on a cgroup change: write the new
-	// slot, then flip the active index.
-	if err := fw.putPolicySlot(1, 12345, true); err != nil {
+	// Simulate exactly what Run's one-time cgroup-pin seeding does: write
+	// the new slot, then flip the active index.
+	if err := fw.putPolicySlot(1, 12345, 2, true); err != nil {
 		t.Fatalf("putPolicySlot: %v", err)
 	}
 	if err := fw.putActiveSlot(1); err != nil {
@@ -209,81 +215,38 @@ func TestLSMGuard_PublishOrder_WritesSlotBeforeFlippingActive(t *testing.T) {
 	}
 }
 
-// TestLSMGuard_PollLoop_BypassesAllowlistCgroupCache reproduces the real-
-// hardware bug: cerberus-api.service restarted (systemd deletes and
-// recreates the unit's cgroup directory, changing its inode) while
-// LSMGuard's Allowlist still had the OLD inode cached from moments before --
-// well within Allowlist.DefaultCacheTTL (5s). pollLoop must still publish
-// the NEW inode within one poll tick; if it reads through the cache instead
-// (as an earlier version of this code did), it publishes the stale inode for
-// up to 5 seconds, during which every legitimate connect from the freshly-
-// restarted ssh-cert-api is denied -- confirmed on real hardware as a 100%,
-// every-single-restart failure, not a rare race.
-func TestLSMGuard_PollLoop_BypassesAllowlistCgroupCache(t *testing.T) {
-	dir := t.TempDir()
-	unitDir := dir + "/system.slice"
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	cgroupPath := unitDir + "/cerberus-api.service"
-	if err := os.Mkdir(cgroupPath, 0o755); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-
-	// al is what LSMGuard.Allowlist would be: its cache gets warmed with the
-	// PRE-restart inode, exactly as the detective path would have done
-	// moments before cerberus-api.service restarted.
-	al := vsockwatch.NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
-	al.CgroupRoot = dir
-	firstIno, err := al.CgroupID()
-	if err != nil {
-		t.Fatalf("CgroupID: %v", err)
-	}
-
-	// Simulate the restart: systemd deletes and recreates the cgroup
-	// directory, which changes its inode.
-	if err := os.Remove(cgroupPath); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if err := os.Mkdir(cgroupPath, 0o755); err != nil {
-		t.Fatalf("Mkdir (recreate): %v", err)
-	}
-
-	// probe is a SEPARATE Allowlist instance (its own, unwarmed cache) used
-	// only to independently learn the new inode -- calling RefreshCgroupID
-	// on al itself here would prematurely re-warm al's cache, defeating the
-	// point of this test (al's cache must still hold firstIno when pollLoop
-	// runs below).
-	probe := vsockwatch.NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
-	probe.CgroupRoot = dir
-	secondIno, err := probe.RefreshCgroupID()
-	if err != nil {
-		t.Fatalf("RefreshCgroupID: %v", err)
-	}
-	if secondIno == firstIno {
-		t.Skip("filesystem reused the same inode for the recreated directory; cannot distinguish stale from fresh here")
-	}
-
-	guard := &LSMGuard{Allowlist: al}
+// TestSeedInitialPolicy_WritesInactiveSlotNotSlotZero exercises Run's actual
+// one-time seeding call (seedInitialPolicy), not just a hand-simulated
+// re-enactment of it. The kernel zero-initializes lsm_active_slot to 0, so
+// slot 0 is already live the instant the LSM program is attached -- seeding
+// straight into slot 0 would be exactly the torn-write-against-a-live-reader
+// bug the double buffer exists to prevent. This guards against that
+// regression recurring: it fails if seedInitialPolicy is ever changed back
+// to seed slot 0.
+func TestSeedInitialPolicy_WritesInactiveSlotNotSlotZero(t *testing.T) {
 	fw := &fakePolicyWriter{}
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	guard.pollLoop(ctx, fw, 20*time.Millisecond)
 
-	if fw.policyWriteCnt == 0 {
-		t.Fatal("pollLoop never published a policy slot")
+	if err := seedInitialPolicy(fw, 12345, 2); err != nil {
+		t.Fatalf("seedInitialPolicy: %v", err)
 	}
-	if fw.lastCgroupID == firstIno {
-		t.Errorf("pollLoop published the STALE cached cgroup %d (Allowlist.CgroupID) instead of the fresh one %d "+
-			"(Allowlist.RefreshCgroupID) -- a preventive-control cgroup pin lagging a real cerberus-api.service "+
-			"restart by up to DefaultCacheTTL denies every legitimate connect for that entire window",
-			firstIno, secondIno)
+
+	if len(fw.calls) != 2 || fw.calls[0] != "policy" || fw.calls[1] != "active" {
+		t.Fatalf("call order = %v, want [policy active]", fw.calls)
 	}
-	if fw.lastCgroupID != secondIno {
-		t.Errorf("pollLoop published cgroup %d, want the fresh value %d", fw.lastCgroupID, secondIno)
+	if fw.lastPolicySlot != 1 {
+		t.Errorf("policy slot = %d, want 1 (the inactive slot at boot, not the live slot 0)", fw.lastPolicySlot)
+	}
+	if fw.lastActiveSlot != 1 {
+		t.Errorf("active slot flipped to = %d, want 1", fw.lastActiveSlot)
+	}
+	if fw.lastCgroupID != 12345 {
+		t.Errorf("cgroupID = %d, want 12345", fw.lastCgroupID)
+	}
+	if fw.lastLevel != 2 {
+		t.Errorf("level = %d, want 2", fw.lastLevel)
 	}
 	if !fw.lastPopulated {
-		t.Error("pollLoop published populated=false, want true")
+		t.Error("populated = false, want true")
 	}
 }
 

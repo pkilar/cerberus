@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -108,9 +109,10 @@ func run() int {
 	disableEBPF := flag.Bool("disable-ebpf", envBoolDefault("CERBERUS_VSOCK_WATCH_DISABLE_EBPF", false), "run only the auditd detector (for hosts where the eBPF probe can't load — see docs/vsock-connect-detection.md §7)")
 	block := flag.Bool("block", envBoolDefault("CERBERUS_VSOCK_WATCH_BLOCK", false), "opt-in: best-effort SIGKILL the offending process on a confirmed Anomalous classification (NOT true prevention — see docs/vsock-connect-detection.md §4.5/§7; requires CAP_KILL)")
 	lsmMonitor := flag.Bool("lsm-monitor", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_MONITOR", false), "opt-in: load the preventive LSM gate (socket_connect hook) in log-only mode — never denies a connect() by itself; see docs/vsock-connect-detection.md §4.6")
-	lsmEnforce := flag.Bool("lsm-enforce", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE", false), "CURRENTLY DISABLED, hard startup error if set — real hardware testing found LSMGuard's poll-based cgroup pin cannot reliably win the race against ssh-cert-api's near-instant enclave dial after a restart, denying the legitimate process on effectively every cerberus-api.service restart; see docs/vsock-connect-detection.md §4.6")
+	lsmEnforce := flag.Bool("lsm-enforce", envBoolDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE", false), "actually deny a cgroup-mismatched connect() via the LSM gate (NOT exe/uid-checked — narrower than --block; requires --lsm-monitor; run --lsm-monitor alone across a real cerberus-api.service restart first — see docs/vsock-connect-detection.md §4.6)")
+	lsmAPISlice := flag.String("api-slice", envDefault("CERBERUS_VSOCK_WATCH_API_SLICE", ""), "the dedicated systemd slice unit containing ONLY cerberus-api.service (e.g. \"cerberus-api.slice\") — required when --lsm-enforce is set; sharing this slice with any other service weakens the LSM gate's identity check, see docs/vsock-connect-detection.md §4.6. Defaults to <unit base name>.slice derived from --unit if not set")
 	lsmEnforceStateFile := flag.String("lsm-enforce-state-file", envDefault("CERBERUS_VSOCK_WATCH_LSM_ENFORCE_STATE_FILE", "/run/cerberus-vsock-watch/lsm-enforce"), `runtime toggle for the LSM gate's enforce mode: contents ("true"/"false") are polled every --lsm-poll-interval and override --lsm-enforce without a restart; missing/malformed content leaves the mode unchanged`)
-	lsmPollInterval := flag.Duration("lsm-poll-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL", 250*time.Millisecond), "how often the LSM gate's cgroup pin and enforce-state-file are refreshed")
+	lsmPollInterval := flag.Duration("lsm-poll-interval", envDurationDefault("CERBERUS_VSOCK_WATCH_LSM_POLL_INTERVAL", 250*time.Millisecond), "how often the LSM gate's --lsm-enforce-state-file runtime toggle is re-checked (the cgroup pin is resolved once at startup, not polled)")
 	showVersion := flag.Bool("V", false, "print version and exit")
 	flag.Parse()
 
@@ -119,12 +121,30 @@ func run() int {
 		return 0
 	}
 
-	if err := validateLSMFlags(*lsmEnforce); err != nil {
+	if err := validateLSMFlags(*lsmMonitor, *lsmEnforce); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	apiSlice, err := deriveAPISlice(*lsmAPISlice, *unit, *lsmMonitor)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 
 	allow := vsockwatch.NewAllowlist(*exePath, *username, *unit)
+	// The packaged cerberus-api.service now sets Slice=cerberus-api.slice
+	// unconditionally (see packaging/*/cerberus-api.service), so ssh-cert-api
+	// no longer lives under system.slice, NewAllowlist's default. Reuse the
+	// SAME derived slice LSMGuard pins its ancestor-cgroup check against,
+	// regardless of --lsm-monitor/--lsm-enforce -- this detective-path cgroup
+	// check (Allowlist.Slice) runs unconditionally too, and both consumers
+	// must agree on where ssh-cert-api's process actually lives. See
+	// Allowlist.Slice's doc comment for what silently degrades if this is
+	// wrong (the cgroup check just skips, same as any other unresolvable
+	// case -- not a crash, but a silent loss of the strongest identity
+	// signal for every classification).
+	allow.Slice = apiSlice
 
 	format, err := parseWebhookFormat(*webhookFormat)
 	if err != nil {
@@ -343,6 +363,7 @@ func run() int {
 			Shipper:          asyncShipper,
 			Blocker:          blocker,
 			Enforce:          *lsmEnforce,
+			APISlice:         apiSlice,
 			PollInterval:     *lsmPollInterval,
 			EnforceStatePath: *lsmEnforceStateFile,
 		}
@@ -394,27 +415,47 @@ func run() int {
 	return exitCode
 }
 
-// validateLSMFlags enforces that --lsm-enforce is never accepted — a hard
-// startup error, not a silent auto-promotion. This used to be conditional
-// ("--lsm-enforce requires --lsm-monitor first"), but real hardware testing
-// found a deeper problem no amount of monitor-first practice would catch:
-// LSMGuard's cgroup pin is refreshed on a poll timer, but ssh-cert-api's own
-// enclave dial after a cerberus-api.service restart happens in roughly a
-// millisecond — fast enough that no poll interval, however tight, can
-// reliably win that race. The observed result was --lsm-enforce denying the
-// LEGITIMATE, freshly-restarted ssh-cert-api on effectively every single
-// restart: a real self-inflicted signing outage, not a rare edge case. See
-// docs/vsock-connect-detection.md §4.6's restart-race note for the full
-// history.
+// validateLSMFlags enforces that --lsm-enforce is never accepted without
+// --lsm-monitor -- a hard startup error, not a silent auto-promotion. This
+// is the structural half of the monitor-first rollout: an operator must
+// explicitly opt into loading the LSM gate at all (--lsm-monitor) before
+// enforcement can even be considered, and is expected to have watched it run
+// clean (see docs/vsock-connect-detection.md §4.6) before ever adding
+// --lsm-enforce.
 //
-// Remove this block only once the cgroup pin is updated by something other
-// than a fixed-interval poll (e.g. reacting synchronously to the cgroup
-// appearing, rather than discovering it up to one interval later).
-func validateLSMFlags(enforce bool) error {
-	if enforce {
-		return fmt.Errorf("vsockwatch: --lsm-enforce is currently disabled — a poll-based cgroup pin cannot reliably win the race against ssh-cert-api's near-instant enclave dial after a cerberus-api.service restart, confirmed on real hardware to deny the legitimate process on effectively every restart; run --lsm-monitor alone for now (see docs/vsock-connect-detection.md §4.6)")
+// This used to unconditionally refuse --lsm-enforce regardless of
+// --lsm-monitor, because the cgroup pin was fundamentally unable to win its
+// restart race no matter what an operator did. That's fixed now (the pin is
+// resolved once against a stable ancestor slice, not polled against
+// ssh-cert-api's own ever-recreated leaf cgroup -- see
+// docs/vsock-connect-detection.md §4.6's history) -- monitor-first is
+// restored as a cheap operational habit, not a workaround for a structural
+// bug.
+func validateLSMFlags(monitor, enforce bool) error {
+	if enforce && !monitor {
+		return fmt.Errorf("vsockwatch: --lsm-enforce requires --lsm-monitor (run --lsm-monitor alone first and confirm it logs cleanly across a real cerberus-api.service restart — see docs/vsock-connect-detection.md §4.6)")
 	}
 	return nil
+}
+
+// deriveAPISlice resolves the effective --api-slice value: the explicit flag
+// if set, otherwise <unit base name>.slice derived from --unit (stripping a
+// trailing ".service"). The empty-derivation check must happen on the base
+// name BEFORE ".slice" is appended -- appending a non-empty literal suffix
+// guarantees the concatenated result is never "", so checking apiSlice == ""
+// afterwards can never fire, silently letting a misconfigured --unit produce
+// the nonsensical slice name ".slice" instead of failing fast. When
+// --lsm-monitor is set and the base name is empty, that's returned as an
+// error instead. See docs/vsock-connect-detection.md §4.6.
+func deriveAPISlice(apiSliceFlag, unit string, lsmMonitor bool) (string, error) {
+	if apiSliceFlag != "" {
+		return apiSliceFlag, nil
+	}
+	base := strings.TrimSuffix(unit, ".service")
+	if lsmMonitor && base == "" {
+		return "", fmt.Errorf("vsockwatch: --api-slice could not be derived from --unit; set it explicitly")
+	}
+	return base + ".slice", nil
 }
 
 // parseWebhookFormat validates the --webhook-format/CERBERUS_VSOCK_WATCH_WEBHOOK_FORMAT
