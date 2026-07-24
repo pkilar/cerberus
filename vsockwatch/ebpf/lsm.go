@@ -25,19 +25,61 @@ import (
 //go:embed src/vsock_lsm.bpf.o
 var lsmProgramObject []byte
 
-// defaultLSMPollInterval is used when LSMGuard.PollInterval is zero. It is
-// tight relative to the ~500ms (10x50ms) cerberus-api.service restart
-// settling window Allowlist's own cgroupRevalidateAttempts/
-// cgroupRevalidateInterval were empirically tuned against (see
-// vsockwatch/allowlist.go) — see LSMGuard's doc comment for why the restart
-// race this can lose is a documented residual risk, not something this
-// interval eliminates. This is only actually true because pollLoop calls
-// Allowlist.RefreshCgroupID (uncached) — an earlier version called the
-// cached CgroupID instead, which made this interval meaningless in practice
-// (its real responsiveness was bounded below by Allowlist.DefaultCacheTTL,
-// 5s, an order of magnitude slower than this comment claimed) until a real
-// hardware test caught it denying every single cerberus-api.service restart.
+// defaultLSMPollInterval is used when LSMGuard.PollInterval is zero. It
+// governs only how often the --lsm-enforce-state-file runtime toggle is
+// checked -- the cgroup pin is no longer polled at all (see Run's
+// resolveAPISliceCgroup, called once at startup) after a real-hardware test
+// found polling the leaf cgroup structurally unable to win the race against
+// ssh-cert-api's near-instant post-restart enclave dial. See
+// docs/vsock-connect-detection.md §4.6 for that history.
 const defaultLSMPollInterval = 250 * time.Millisecond
+
+// apiSliceResolveAttempts and apiSliceResolveInterval bound how long
+// resolveAPISliceCgroup retries the API slice's cgroup before giving up.
+// This covers ONLY the first-ever-boot ordering edge case (this process
+// starting before systemd has ever instantiated the slice) -- a materially
+// easier problem than the restart race this whole file exists to close,
+// since after the FIRST successful resolution the slice persists across
+// every subsequent cerberus-api.service restart untouched (confirmed by a
+// real-hardware check: create a throwaway slice + service, restart the
+// service a few times, and diff the slice's cgroup inode against the
+// service's own leaf cgroup inode -- the slice's stays constant, the leaf's
+// changes every time). Vars, not consts, so tests can shrink them rather
+// than waiting out the real interval -- same pattern as Allowlist's
+// cgroupRevalidateAttempts.
+var (
+	apiSliceResolveAttempts = 20
+	apiSliceResolveInterval = 250 * time.Millisecond
+)
+
+// resolveAPISliceCgroup resolves apiSlice's cgroup ID and ancestor level
+// ONCE. LSMGuard.Run calls this a single time at startup, never on a
+// recurring timer -- there is nothing to poll for, since the slice's cgroup
+// does not change across cerberus-api.service's own restarts.
+func resolveAPISliceCgroup(ctx context.Context, cgroupRoot, apiSlice string) (cgroupID uint64, level uint32, err error) {
+	path, level, err := sliceCgroupPath(cgroupRoot, apiSlice)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var lastErr error
+	for attempt := range apiSliceResolveAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, 0, ctx.Err()
+			case <-time.After(apiSliceResolveInterval):
+			}
+		}
+		cg, statErr := vsockwatch.StatCgroupID(path)
+		if statErr == nil {
+			return cg, level, nil
+		}
+		lastErr = statErr
+	}
+	return 0, 0, fmt.Errorf("vsockwatch/ebpf: resolving %s cgroup at %s after %d attempts: %w",
+		apiSlice, path, apiSliceResolveAttempts, lastErr)
+}
 
 // LSMGuard loads vsock_lsm.c, attaches it to the socket_connect LSM hook
 // (invoked via the kernel's security_socket_connect() dispatcher — see
@@ -54,12 +96,15 @@ const defaultLSMPollInterval = 250 * time.Millisecond
 //     identity signal available is cgroup membership. Anything sharing
 //     ssh-cert-api's cgroup — including a compromised ssh-cert-api itself —
 //     still passes. This does not close docs/THREAT-MODEL.md's SIGN-1.
-//   - Enforce must never be turned on without first having run in
-//     monitor-only mode (Enforce=false) across at least one real
-//     cerberus-api.service restart — a lost cgroup-pin race here means a
-//     real denied connect(), not just a noisy Indeterminate alert, and
-//     ssh-cert-api has no dial retry (ssh-cert-api/internal/enclave/client.go),
-//     so a false deny surfaces immediately as a user-visible signing failure.
+//   - Enforce checks the connecting process's cgroup ANCESTRY against a
+//     one-time-resolved, stable slice cgroup (see cgroup_slice.go and
+//     resolveAPISliceCgroup below) -- not ssh-cert-api's own leaf cgroup,
+//     which systemd destroys and recreates on every restart. This is what
+//     makes the check structurally race-free: there is nothing to poll for,
+//     since the compared-against value never changes across a restart. An
+//     earlier, leaf-cgroup-polling version of this check denied the
+//     legitimate, freshly-restarted ssh-cert-api on effectively every
+//     restart -- see docs/vsock-connect-detection.md §4.6's history.
 //
 // LSMGuard is NOT wired into cmd/cerberus-vsock-watch's readyGate or
 // detectorHealth/fatalShutdown: a successful attach here says nothing about
@@ -79,9 +124,17 @@ type LSMGuard struct {
 	// enforce if true) before the poll loop starts. See EnforceStatePath to
 	// change this at runtime without a restart.
 	Enforce bool
-	// PollInterval controls how often both the cgroup pin (via
-	// Allowlist.CgroupID) and EnforceStatePath are re-checked. Defaults to
-	// defaultLSMPollInterval if zero.
+	// APISlice is the systemd slice unit exclusively containing
+	// cerberus-api.service (e.g. "cerberus-api.slice") -- see
+	// cgroup_slice.go's sliceCgroupPath doc comment for why this must be a
+	// DEDICATED slice (nothing else may run in it: sharing it weakens the
+	// ancestry check back toward "any process in this slice") and how its
+	// on-disk path/ancestor level are computed, not assumed.
+	APISlice string
+	// PollInterval controls how often EnforceStatePath is re-checked.
+	// Defaults to defaultLSMPollInterval if zero. The cgroup pin itself is
+	// resolved once in Run (see resolveAPISliceCgroup), not on this
+	// interval -- there is nothing left to poll for.
 	PollInterval time.Duration
 	// EnforceStatePath, if non-empty, is polled every PollInterval: its
 	// content ("true"/"false", whitespace-trimmed) overrides the current
@@ -100,9 +153,10 @@ type LSMGuard struct {
 	enforceActive atomic.Bool
 }
 
-// Run loads and attaches the LSM program, seeds its policy maps, starts the
-// cgroup-pin/enforce-toggle poll loop, then blocks reading ring buffer
-// events until ctx is canceled or an unrecoverable error occurs. Load/attach
+// Run loads and attaches the LSM program, seeds its policy maps (resolving
+// the API slice's cgroup pin once via resolveAPISliceCgroup), starts the
+// enforce-toggle poll loop, then blocks reading ring buffer events until ctx
+// is canceled or an unrecoverable error occurs. Load/attach
 // failures (missing CONFIG_BPF_LSM / inactive "bpf" LSM, insufficient
 // privilege, or a verifier/BTF-attach rejection — see vsock_lsm.c's header
 // comment for what is genuinely unconfirmed here) are returned as an error,
@@ -162,11 +216,10 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 
 	pw := &lsmMapWriter{policy: policyMap, activeSlot: activeSlotMap, mode: modeMap}
 
-	// Seed the initial mode before the poll loop starts, so there is never a
+	// Seed the initial mode before anything else, so there is never a
 	// window where the program runs with an undefined mode (the map's own
 	// zero value is already 0/monitor, matching Enforce's zero value, but
-	// seed explicitly so --lsm-enforce takes effect immediately rather than
-	// waiting for the first poll tick).
+	// seed explicitly so --lsm-enforce takes effect immediately).
 	initialMode := uint32(0)
 	if g.Enforce {
 		initialMode = 1
@@ -175,6 +228,24 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_mode: %w", err)
 	}
 	g.enforceActive.Store(g.Enforce)
+
+	// Resolve the dedicated API slice's cgroup ID and ancestor level ONCE --
+	// see resolveAPISliceCgroup's doc comment for why this eliminates the
+	// restart race entirely rather than narrowing it. A failure here (the
+	// slice never appears within apiSliceResolveAttempts tries) is returned
+	// like any other LSM attach failure -- the caller in
+	// cmd/cerberus-vsock-watch/main.go's lsmEnforceFatal treats that the
+	// same as a load/attach failure when --lsm-enforce was requested.
+	cg, level, err := resolveAPISliceCgroup(ctx, g.Allowlist.CgroupRoot, g.APISlice)
+	if err != nil {
+		return fmt.Errorf("vsockwatch/ebpf: resolving API slice cgroup pin: %w", err)
+	}
+	if err := pw.putPolicySlot(0, cg, level, true); err != nil {
+		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_policy: %w", err)
+	}
+	if err := pw.putActiveSlot(0); err != nil {
+		return fmt.Errorf("vsockwatch/ebpf: seeding initial lsm_active_slot: %w", err)
+	}
 
 	pollInterval := g.PollInterval
 	if pollInterval <= 0 {
@@ -248,23 +319,12 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 	}
 }
 
-// pollLoop refreshes the pinned cgroup policy and checks EnforceStatePath for
-// a runtime toggle, every interval, until ctx is done. It tracks its own
-// last-known state locally (no locking needed: nothing else reads these
-// vars), publishing to pw only on an actual change.
-//
-// Calls Allowlist.RefreshCgroupID (uncached), NOT CgroupID (cached) — a real
-// load attempt confirmed on real hardware that using the cached path made
-// this poll loop's tight interval meaningless: CgroupID's cache
-// (Allowlist.DefaultCacheTTL, 5s) can outlast an entire cerberus-api.service
-// restart, so every single restart denied the legitimate, freshly-restarted
-// process for the whole 5-second staleness window regardless of how often
-// this loop ticked. See RefreshCgroupID's doc comment for why the detective
-// path can tolerate that staleness and this one can't.
+// pollLoop checks EnforceStatePath for a runtime toggle every interval,
+// until ctx is done. The cgroup pin itself is resolved once in Run, not
+// refreshed here -- see Run's resolveAPISliceCgroup call and
+// docs/vsock-connect-detection.md §4.6 for why polling the pin was the
+// actual, structurally unwinnable bug this design closes.
 func (g *LSMGuard) pollLoop(ctx context.Context, pw policyMapWriter, interval time.Duration) {
-	activeSlot := uint32(0) // matches lsm_active_slot's zero-initialized kernel state
-	var lastCgroup uint64
-	var lastPopulated bool
 	lastMode := uint32(0)
 	if g.Enforce {
 		lastMode = 1
@@ -278,26 +338,6 @@ func (g *LSMGuard) pollLoop(ctx context.Context, pw policyMapWriter, interval ti
 			return
 		case <-ticker.C:
 		}
-
-		if cg, err := g.Allowlist.RefreshCgroupID(); err == nil {
-			if !lastPopulated || cg != lastCgroup {
-				next := 1 - activeSlot
-				if perr := pw.putPolicySlot(next, cg, true); perr != nil {
-					slog.Error("vsockwatch.lsm.policy_write_failed", "error", perr)
-				} else if perr := pw.putActiveSlot(next); perr != nil {
-					slog.Error("vsockwatch.lsm.active_slot_write_failed", "error", perr)
-				} else {
-					activeSlot = next
-					lastCgroup = cg
-					lastPopulated = true
-				}
-			}
-		}
-		// A CgroupID() error is silently retried next tick — almost always
-		// a transient NSS/stat hiccup (Allowlist's own cache absorbs most of
-		// these). The LAST successfully published policy stays in effect;
-		// failing toward "keep the current pin" is safer than blanking the
-		// map on a transient resolution failure.
 
 		if enforce, ok := readEnforceOverride(g.EnforceStatePath); ok {
 			mode := uint32(0)

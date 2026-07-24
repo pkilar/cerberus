@@ -250,6 +250,17 @@ func (a *Allowlist) RefreshCgroupID() (uint64, error) {
 	return a.refreshCgroupID()
 }
 
+// StatCgroupID returns the cgroup v2 inode number of the cgroupfs directory
+// at path -- the same value bpf_get_current_cgroup_id()/
+// bpf_get_current_ancestor_cgroup_id() return for a process in that cgroup.
+// Exposed for LSMGuard's one-time API-slice cgroup resolution
+// (vsockwatch/ebpf/lsm.go), a different use of the same underlying stat that
+// Allowlist's own cgroupID()/RefreshCgroupID() use to resolve ssh-cert-api's
+// LEAF cgroup for the detective path.
+func StatCgroupID(path string) (uint64, error) {
+	return statCgroupIno(path)
+}
+
 // cgroupID resolves and caches the expected cgroup inode. See uid's doc
 // comment: the resolver call (os.Stat) runs unlocked for the same reason.
 func (a *Allowlist) cgroupID() (uint64, error) {
