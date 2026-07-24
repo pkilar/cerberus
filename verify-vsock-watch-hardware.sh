@@ -693,133 +693,45 @@ check_lsm_monitor_dry_run() {
 }
 
 # --- Item 10: --lsm-enforce actually denies a cgroup-mismatched connect() ---
+# --lsm-enforce is currently disabled at the code level (validateLSMFlags
+# hard-refuses it, cmd/cerberus-vsock-watch/main.go): real hardware testing
+# found the poll-based cgroup pin cannot reliably win the race against
+# ssh-cert-api's near-instant enclave dial after a restart (see
+# docs/vsock-connect-detection.md §4.6). A transient unit with
+# CERBERUS_VSOCK_WATCH_LSM_ENFORCE=true would now fail startup validation
+# every time -- expected behavior, not a finding -- so this check skips
+# rather than reporting a misleading FAIL. The full test logic (start a
+# transient --lsm-enforce unit, drive a real connect via cerberus-stress,
+# confirm it's denied) is preserved in git history and should be restored
+# once --lsm-enforce is re-enabled.
 check_lsm_enforce_denies() {
     echo
     echo "=== 10. --lsm-enforce actually denies a cgroup-mismatched connect() ==="
-    if ! unit_installed cerberus-vsock-watch.service; then
-        print_skip "cerberus-vsock-watch.service not installed -- skipping"
-        record lsm_enforce_denies SKIP
-        return 2
-    fi
-    if ! find_stress_binary; then
-        print_error "cerberus-stress binary not found and could not be built -- set CERBERUS_STRESS_BIN or run from a repo checkout with 'go' installed"
-        record lsm_enforce_denies FAIL
-        return 1
-    fi
-
-    print_warning "starting a transient cerberus-vsock-watch-lsm-verify.service with --lsm-monitor --lsm-enforce (does not modify the real unit); it WILL deny the disposable cerberus-stress connect() below."
-    systemctl stop cerberus-vsock-watch.service 2>/dev/null
-    systemd-run --unit=cerberus-vsock-watch-lsm-verify --uid=cerberus-audit --gid=cerberus-audit \
-        -p AmbientCapabilities='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
-        -p CapabilityBoundingSet='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
-        -p Environment='CERBERUS_VSOCK_WATCH_LSM_MONITOR=true CERBERUS_VSOCK_WATCH_LSM_ENFORCE=true' \
-        /usr/bin/cerberus-vsock-watch
-    sleep 2
-
-    if ! systemctl is-active --quiet cerberus-vsock-watch-lsm-verify.service; then
-        print_error "transient --lsm-enforce unit failed to start -- see: journalctl -u cerberus-vsock-watch-lsm-verify -n 50"
-        systemctl stop cerberus-vsock-watch-lsm-verify.service 2>/dev/null
-        systemctl start cerberus-vsock-watch.service 2>/dev/null
-        record lsm_enforce_denies FAIL
-        return 1
-    fi
-
-    print_status "using cerberus-stress at $CERBERUS_STRESS_BIN to drive a real VSOCK connect(2) that should now be DENIED"
-    local stress_status
-    timeout 10 "$CERBERUS_STRESS_BIN" signer -transport vsock -target "${ENCLAVE_CID}:${ENCLAVE_PORT}" -requests 1 -timeout 3s \
-        >/tmp/cstress-lsm-enforce-verify.out 2>&1
-    stress_status=$?
-
-    systemctl stop cerberus-vsock-watch-lsm-verify.service 2>/dev/null
-    systemctl start cerberus-vsock-watch.service 2>/dev/null
-
-    if [ "$stress_status" -eq 0 ]; then
-        print_error "cerberus-stress's connect() SUCCEEDED even with --lsm-enforce active -- the LSM gate did not deny it; see /tmp/cstress-lsm-enforce-verify.out and confirm CONFIG_BPF_LSM/lsm=bpf are actually active (the lsm-kernel-support check)"
-        record lsm_enforce_denies FAIL
-        return 1
-    fi
-    print_status "cerberus-stress's connect() was denied (exit $stress_status) -- --lsm-enforce confirmed working"
-    record lsm_enforce_denies PASS
+    print_skip "--lsm-enforce is currently disabled at the code level (docs/vsock-connect-detection.md §4.6) -- skipping until it's re-enabled"
+    record lsm_enforce_denies SKIP
+    return 2
 }
 
 # --- Item 11: cerberus-api restart under --lsm-enforce never denies the legitimate process ---
-# The single highest-stakes check in this script: a failure here means a
-# real, self-inflicted signing outage during every cerberus-api restart, not
-# just a noisy false-positive alert (see docs/vsock-connect-detection.md
-# §4.6's "restart race" discussion).
+# This is the check that actually FOUND the restart race documented in
+# docs/vsock-connect-detection.md §4.6: a transient --lsm-enforce unit denied
+# the legitimate, freshly-restarted ssh-cert-api on effectively every
+# restart. --lsm-enforce is now disabled at the code level
+# (cmd/cerberus-vsock-watch/main.go's validateLSMFlags) until that race is
+# actually closed, so a transient unit with
+# CERBERUS_VSOCK_WATCH_LSM_ENFORCE=true would now fail startup validation
+# immediately -- expected, not a finding. This check skips rather than
+# reporting a misleading FAIL. The full chaos-test logic (start a transient
+# --lsm-enforce unit, restart cerberus-api.service, confirm no denial of the
+# legitimate process, cross-check with a real signing request) is preserved
+# in git history and should be restored once --lsm-enforce is re-enabled --
+# at which point THIS is the check to run first.
 check_lsm_restart_chaos() {
     echo
     echo "=== 11. Chaos test: cerberus-api.service restart under --lsm-enforce ==="
-    if ! unit_installed cerberus-api.service || ! unit_installed cerberus-vsock-watch.service; then
-        print_skip "cerberus-api.service and/or cerberus-vsock-watch.service not installed -- skipping"
-        record lsm_restart_chaos SKIP
-        return 2
-    fi
-
-    print_warning "starting a transient cerberus-vsock-watch-lsm-verify.service with --lsm-monitor --lsm-enforce (does not modify the real unit) to watch cerberus-api's restart."
-    systemctl stop cerberus-vsock-watch.service 2>/dev/null
-    systemd-run --unit=cerberus-vsock-watch-lsm-verify --uid=cerberus-audit --gid=cerberus-audit \
-        -p AmbientCapabilities='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
-        -p CapabilityBoundingSet='CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_AUDIT_CONTROL CAP_DAC_READ_SEARCH CAP_KILL CAP_MAC_ADMIN' \
-        -p Environment='CERBERUS_VSOCK_WATCH_LSM_MONITOR=true CERBERUS_VSOCK_WATCH_LSM_ENFORCE=true' \
-        /usr/bin/cerberus-vsock-watch
-    sleep 2
-    if ! systemctl is-active --quiet cerberus-vsock-watch-lsm-verify.service; then
-        print_error "transient --lsm-enforce unit failed to start -- see: journalctl -u cerberus-vsock-watch-lsm-verify -n 50"
-        systemctl start cerberus-vsock-watch.service 2>/dev/null
-        record lsm_restart_chaos FAIL
-        return 1
-    fi
-
-    systemctl start cerberus-api.service || {
-        print_error "failed to start cerberus-api.service"
-        systemctl stop cerberus-vsock-watch-lsm-verify.service 2>/dev/null
-        systemctl start cerberus-vsock-watch.service 2>/dev/null
-        record lsm_restart_chaos FAIL
-        return 1
-    }
-    sleep 2
-    local restart_ts
-    restart_ts=$(date '+%Y-%m-%d %H:%M:%S')
-    print_status "restarting cerberus-api.service (new MainPID/cgroup) while the --lsm-enforce transient unit observes..."
-    systemctl restart cerberus-api.service
-    sleep 3
-
-    local ok=1
-
-    # (a) no lsm_denied=true alert naming ssh-cert-api's own exe -- exactly
-    # the self-inflicted-DoS case this check exists to catch. Matches on the
-    # exe= field specifically for the same reason check_api_restart_chaos
-    # does (see that function's comment).
-    if journalctl -u cerberus-vsock-watch-lsm-verify --since "$restart_ts" --no-pager 2>/dev/null \
-        | grep 'vsockwatch.alert' | grep -E 'exe=/usr/bin/ssh-cert-api([[:space:]]|$)' | grep -q 'lsm_denied=true'; then
-        print_error "the LSM gate DENIED the legitimate ssh-cert-api during its own restart -- a real, self-inflicted signing outage. See journalctl -u cerberus-vsock-watch-lsm-verify and consider raising --lsm-poll-interval's default, or investigate the cgroup-settling race (docs/vsock-connect-detection.md §4.6)"
-        ok=0
-    else
-        print_status "no lsm_denied=true alert naming ssh-cert-api's own exe during the restart"
-    fi
-
-    # (b) best-effort cross-check: a real signing request across the restart
-    # window should succeed too -- catches a denial that doesn't even surface
-    # as a clean alert line. Not fatal on its own (may need Kerberos/SPNEGO
-    # setup this script doesn't manage), so a failure here only warns.
-    if find_stress_binary; then
-        print_status "issuing a real signing request through the restarted cerberus-api to cross-check (a) above..."
-        if timeout 10 "$CERBERUS_STRESS_BIN" api -requests 1 -timeout 5s >/tmp/cstress-lsm-restart-verify.out 2>&1; then
-            print_status "signing request succeeded across the restart window"
-        else
-            print_warning "signing request failed -- inspect /tmp/cstress-lsm-restart-verify.out; may be an unrelated cerberus-stress/API-auth setup issue rather than the LSM gate (cross-check against (a) above)"
-        fi
-    fi
-
-    systemctl stop cerberus-vsock-watch-lsm-verify.service 2>/dev/null
-    systemctl start cerberus-vsock-watch.service 2>/dev/null
-
-    if [ "$ok" -eq 1 ]; then
-        record lsm_restart_chaos PASS
-    else
-        record lsm_restart_chaos FAIL
-    fi
+    print_skip "--lsm-enforce is currently disabled at the code level (docs/vsock-connect-detection.md §4.6) -- skipping until it's re-enabled"
+    record lsm_restart_chaos SKIP
+    return 2
 }
 
 print_summary() {
