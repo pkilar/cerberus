@@ -22,13 +22,15 @@
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
 > §4.6) carries the SAME caveat, plus its own history: a real load attempt confirmed the `socket_connect` LSM
 > hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
-> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, but the verifier rejected the program because its
-> function signature declared the hook's three arguments as separate native parameters instead of the single
-> `ctx` array pointer an LSM trampoline actually provides (fixed — see that file's header comment; an earlier
-> attempted fix addressed a different, wrong theory and made no difference on real hardware). This fix has only
-> been verified locally (disassembly/BTF inspection, `go test`), NOT via another real load attempt. Never enable
-> `--lsm-enforce` without first running `--lsm-monitor` alone across at least one real `cerberus-api.service`
-> restart.
+> turn) IS exposed to `BPF_PROG_TYPE_LSM` on a live kernel, and — after two attempted fixes, the first wrong —
+> the program now loads and attaches successfully on real hardware (see that file's header comment for the full
+> history). A THIRD real-hardware bug then surfaced with enforcement actually running: `LSMGuard`'s cgroup-pin
+> poll loop read through `Allowlist`'s cached cgroup resolution (5s TTL), so it denied the legitimate,
+> freshly-restarted `ssh-cert-api` on every single `cerberus-api.service` restart, not as a rare race — fixed by
+> having the poll loop use an uncached resolution instead (see §4.6's restart-race note). This latest fix has
+> only been verified locally (`go test`), NOT via another real restart-chaos test. Never enable `--lsm-enforce`
+> without first running `--lsm-monitor` alone across at least one real `cerberus-api.service` restart, and
+> re-confirm the restart-chaos check specifically after this fix.
 
 ## 1. Problem statement
 
@@ -338,6 +340,18 @@ alert. `ssh-cert-api` has no dial retry on the signing path (`ssh-cert-api/inter
 false deny during a lost race surfaces immediately as a user-visible signing failure, not a silently-absorbed
 hiccup. The tight default poll interval and the mandatory monitor-mode practice above mitigate this; neither
 eliminates it.
+
+A real load attempt caught this race being lost on EVERY SINGLE `cerberus-api.service` restart — not a rare
+edge case, a 100% failure rate. Root cause: `LSMGuard`'s poll loop was calling `Allowlist.CgroupID()`, the
+SAME cached resolution the detective path uses (`Allowlist.DefaultCacheTTL`, 5s) — so the "tight" 250ms poll
+interval was meaningless in practice; its real responsiveness was bounded below by that 5-second cache, an
+order of magnitude slower than the poll interval implied. `ssh-cert-api` dials the enclave (as part of its own
+startup handshake) well within that 5-second window after every restart, so the LSM gate denied every single
+one. Fixed by adding `Allowlist.RefreshCgroupID` (uncached) and having the poll loop call that instead — the
+detective path can tolerate the cached staleness because `Classify` has its own separate bounded uncached
+retry specifically for a cgroup mismatch; the preventive path has no such fallback, so staleness itself was
+the bug, not something a retry could paper over afterward. With that fixed, the residual race window is
+genuinely just one poll tick (default 250ms) as originally intended, not up to 5 seconds every time.
 
 **Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a

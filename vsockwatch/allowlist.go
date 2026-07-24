@@ -221,12 +221,33 @@ func (a *Allowlist) refreshUID() (uint32, error) {
 }
 
 // CgroupID exposes the same cached cgroup-inode resolution Classify uses
-// (see cgroupID/refreshCgroupID below), so a preventive control (the LSM
-// gate's cgroup pin, vsockwatch/ebpf/lsm.go) and this detective
-// classification always derive the expected cgroup from one source of
-// truth, inheriting the same DefaultCacheTTL.
+// (see cgroupID/refreshCgroupID below). Suitable for a consumer that can
+// tolerate up to DefaultCacheTTL of staleness, the same trade-off Classify
+// itself accepts on its non-mismatch path. NOT suitable for a consumer that
+// needs to track a cerberus-api.service restart promptly — see
+// RefreshCgroupID below, which vsockwatch/ebpf/lsm.go's LSMGuard uses
+// instead for exactly that reason.
 func (a *Allowlist) CgroupID() (uint64, error) {
 	return a.cgroupID()
+}
+
+// RefreshCgroupID exposes the same uncached cgroup-inode resolution Classify
+// uses on its mismatch-retry path (see refreshCgroupID below), bypassing the
+// cache entirely. LSMGuard's poll loop (vsockwatch/ebpf/lsm.go) calls this,
+// not CgroupID, specifically so its cgroup pin can actually track a real
+// cerberus-api.service restart within one poll tick: CgroupID's cache
+// (DefaultCacheTTL, 5s) can outlast an entire restart, which -- confirmed on
+// real hardware -- meant the preventive LSM gate denied the legitimate,
+// freshly-restarted ssh-cert-api for the whole 5-second staleness window
+// every single time, regardless of how tight the poll interval was. The
+// detective path can tolerate that staleness because Classify has its own
+// separate bounded uncached retry specifically for a cgroup mismatch
+// (cgroupRevalidateAttempts/cgroupRevalidateInterval); the preventive path
+// has no such fallback -- a mismatch there is an immediate real denial, so
+// staleness itself is the bug, not something a retry can paper over after
+// the fact.
+func (a *Allowlist) RefreshCgroupID() (uint64, error) {
+	return a.refreshCgroupID()
 }
 
 // cgroupID resolves and caches the expected cgroup inode. See uid's doc

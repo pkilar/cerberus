@@ -2,13 +2,17 @@ package ebpf
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"os"
 	"testing"
+	"time"
 
 	cilium "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
+
+	"github.com/pkilar/cerberus/vsockwatch"
 )
 
 // TestLSMObject_ParsesAsValidELF is the LSM-object mirror of
@@ -158,10 +162,21 @@ func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
 // torn write), and it is fully testable without a kernel via this seam.
 type fakePolicyWriter struct {
 	calls []string
+
+	// Recorded by putPolicySlot, valid once pollLoop has returned (this
+	// struct is not safe for concurrent use while pollLoop is still running
+	// in another goroutine -- callers in this file only inspect these after
+	// pollLoop has returned, never while it's still running).
+	lastCgroupID   uint64
+	lastPopulated  bool
+	policyWriteCnt int
 }
 
 func (f *fakePolicyWriter) putPolicySlot(slot uint32, cgroupID uint64, populated bool) error {
 	f.calls = append(f.calls, "policy")
+	f.lastCgroupID = cgroupID
+	f.lastPopulated = populated
+	f.policyWriteCnt++
 	return nil
 }
 
@@ -191,6 +206,84 @@ func TestLSMGuard_PublishOrder_WritesSlotBeforeFlippingActive(t *testing.T) {
 
 	if len(fw.calls) != 2 || fw.calls[0] != "policy" || fw.calls[1] != "active" {
 		t.Fatalf("call order = %v, want [policy active]", fw.calls)
+	}
+}
+
+// TestLSMGuard_PollLoop_BypassesAllowlistCgroupCache reproduces the real-
+// hardware bug: cerberus-api.service restarted (systemd deletes and
+// recreates the unit's cgroup directory, changing its inode) while
+// LSMGuard's Allowlist still had the OLD inode cached from moments before --
+// well within Allowlist.DefaultCacheTTL (5s). pollLoop must still publish
+// the NEW inode within one poll tick; if it reads through the cache instead
+// (as an earlier version of this code did), it publishes the stale inode for
+// up to 5 seconds, during which every legitimate connect from the freshly-
+// restarted ssh-cert-api is denied -- confirmed on real hardware as a 100%,
+// every-single-restart failure, not a rare race.
+func TestLSMGuard_PollLoop_BypassesAllowlistCgroupCache(t *testing.T) {
+	dir := t.TempDir()
+	unitDir := dir + "/system.slice"
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cgroupPath := unitDir + "/cerberus-api.service"
+	if err := os.Mkdir(cgroupPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	// al is what LSMGuard.Allowlist would be: its cache gets warmed with the
+	// PRE-restart inode, exactly as the detective path would have done
+	// moments before cerberus-api.service restarted.
+	al := vsockwatch.NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
+	al.CgroupRoot = dir
+	firstIno, err := al.CgroupID()
+	if err != nil {
+		t.Fatalf("CgroupID: %v", err)
+	}
+
+	// Simulate the restart: systemd deletes and recreates the cgroup
+	// directory, which changes its inode.
+	if err := os.Remove(cgroupPath); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := os.Mkdir(cgroupPath, 0o755); err != nil {
+		t.Fatalf("Mkdir (recreate): %v", err)
+	}
+
+	// probe is a SEPARATE Allowlist instance (its own, unwarmed cache) used
+	// only to independently learn the new inode -- calling RefreshCgroupID
+	// on al itself here would prematurely re-warm al's cache, defeating the
+	// point of this test (al's cache must still hold firstIno when pollLoop
+	// runs below).
+	probe := vsockwatch.NewAllowlist("/usr/bin/ssh-cert-api", "cerberus", "cerberus-api.service")
+	probe.CgroupRoot = dir
+	secondIno, err := probe.RefreshCgroupID()
+	if err != nil {
+		t.Fatalf("RefreshCgroupID: %v", err)
+	}
+	if secondIno == firstIno {
+		t.Skip("filesystem reused the same inode for the recreated directory; cannot distinguish stale from fresh here")
+	}
+
+	guard := &LSMGuard{Allowlist: al}
+	fw := &fakePolicyWriter{}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	guard.pollLoop(ctx, fw, 20*time.Millisecond)
+
+	if fw.policyWriteCnt == 0 {
+		t.Fatal("pollLoop never published a policy slot")
+	}
+	if fw.lastCgroupID == firstIno {
+		t.Errorf("pollLoop published the STALE cached cgroup %d (Allowlist.CgroupID) instead of the fresh one %d "+
+			"(Allowlist.RefreshCgroupID) -- a preventive-control cgroup pin lagging a real cerberus-api.service "+
+			"restart by up to DefaultCacheTTL denies every legitimate connect for that entire window",
+			firstIno, secondIno)
+	}
+	if fw.lastCgroupID != secondIno {
+		t.Errorf("pollLoop published cgroup %d, want the fresh value %d", fw.lastCgroupID, secondIno)
+	}
+	if !fw.lastPopulated {
+		t.Error("pollLoop published populated=false, want true")
 	}
 }
 
