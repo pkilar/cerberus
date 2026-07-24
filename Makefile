@@ -53,6 +53,21 @@ vsock-watch-bpf:
 		-c vsock_connect.c -o vsock_connect.bpf.o
 	@echo "  -> vsockwatch/ebpf/src/vsock_connect.bpf.o (verify with: go test ./vsockwatch/ebpf/...)"
 
+# Regenerate vsockwatch/ebpf/src/vsock_lsm.bpf.o from source — the opt-in
+# preventive LSM gate (docs/vsock-connect-detection.md §4.6), a SEPARATE
+# object from vsock_connect.bpf.o above (different program type, different
+# attach mechanism, independent failure domain). Same minimal-header build as
+# vsock-watch-bpf; see vsock_lsm.c's header comment for what's genuinely
+# unconfirmed against a live kernel (BTF attach-point naming, parameter type
+# compatibility) and MUST be verified on real hardware before enabling
+# --lsm-monitor/--lsm-enforce.
+vsock-watch-lsm-bpf:
+	@echo "Regenerating vsockwatch/ebpf/src/vsock_lsm.bpf.o..."
+	cd vsockwatch/ebpf/src && clang -target bpf -O2 -g -Wall -Wextra \
+		$$(test -d /usr/include/$$(uname -m)-linux-gnu && echo -I/usr/include/$$(uname -m)-linux-gnu) \
+		-c vsock_lsm.c -o vsock_lsm.bpf.o
+	@echo "  -> vsockwatch/ebpf/src/vsock_lsm.bpf.o (verify with: go test ./vsockwatch/ebpf/...)"
+
 # Run all tests
 test:
 	@echo "Running tests for ssh-cert-api..."

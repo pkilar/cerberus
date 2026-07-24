@@ -15,12 +15,12 @@ import (
 // acts on. By the time a Blocker runs, the connect() (and any request the
 // offending process already sent to the enclave over it) may have already
 // completed. Its value is cutting off a persistent attacker's ability to
-// retry, not stopping the first attempt. True prevention would require a
-// kernel LSM BPF hook on security_socket_connect, which can actually deny
-// the connect — tracked separately in §8 as a larger follow-up, since it
-// turns this control from detective into (also) preventive and needs
-// real-hardware verification this sandbox cannot provide (same caveat as
-// the existing tracepoint probe, per the doc's top-of-file status note).
+// retry, not stopping the first attempt. True prevention requires a kernel
+// LSM BPF hook on the socket_connect hook, which can actually deny the
+// connect — built as the separate, narrower, cgroup-only preventive control
+// in vsockwatch/ebpf/lsm.go (§4.6), opt-in and monitor-first, and still
+// needing real-hardware verification (same caveat as the existing
+// tracepoint probe, per the doc's top-of-file status note).
 
 // Blocker attempts to stop the process behind a Blockworthy Event from doing
 // further harm. Both AuditWatcher and ebpf.Watcher call this, if configured,

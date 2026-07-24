@@ -59,6 +59,33 @@ func TestDetectorHealth_AllDown_AuditdOnlyWhenEBPFDisabled(t *testing.T) {
 	}
 }
 
+// TestValidateLSMFlags verifies --lsm-enforce is rejected as a hard startup
+// error whenever --lsm-monitor isn't also set -- the structural half of the
+// monitor-first rollout (docs/vsock-connect-detection.md §4.6): enforcement
+// must never be silently auto-promoted, only explicitly opted into on top of
+// an already-running monitor mode.
+func TestValidateLSMFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		monitor bool
+		enforce bool
+		wantErr bool
+	}{
+		{"neither set", false, false, false},
+		{"monitor only", true, false, false},
+		{"monitor and enforce", true, true, false},
+		{"enforce without monitor", false, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLSMFlags(tt.monitor, tt.enforce)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateLSMFlags(%v, %v) error = %v, wantErr %v", tt.monitor, tt.enforce, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseWebhookFormat(t *testing.T) {
 	tests := []struct {
 		in      string
