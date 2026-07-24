@@ -136,12 +136,17 @@ A `connect()` to `(CID=16, port=5000)` is **expected** iff all of:
 - `exe` resolves to the packaged binary path (`/usr/bin/ssh-cert-api`; configurable per §4.3)
 - `uid` matches the `cerberus` service account's uid, resolved dynamically at the watcher's startup (not
   hardcoded — differs per install)
-- *(stronger, optional)* the process's cgroup matches `system.slice/cerberus-api.service` — catches an attacker
-  who copies the binary to the same path outside systemd, or spoofs `argv[0]`
+- *(stronger, optional)* the process's cgroup matches `<Allowlist.Slice>/cerberus-api.service` — catches an
+  attacker who copies the binary to the same path outside systemd, or spoofs `argv[0]`
 
 Anything else connecting to `CID 16, port 5000` is an **anomaly** → alert at `critical` severity immediately.
 
-The expected uid (`os/user.Lookup`) and cgroup inode (`os.Stat` on `system.slice/<Unit>`) are each resolved
+`Allowlist.Slice` defaults to `system.slice` (pre-dating the dedicated-slice packaging change below), but
+`cmd/cerberus-vsock-watch/main.go` overrides it to the same derived slice (`cerberus-api.slice` by default, via
+`deriveAPISlice`) that §4.6's LSM gate pins its ancestor-cgroup check against — so the detective and preventive
+paths always agree on where `ssh-cert-api` actually lives, and both track `--api-slice` if it's overridden. A
+caller that leaves `Slice` at its zero value gets the pre-existing `system.slice` behavior unchanged. The
+expected uid (`os/user.Lookup`) and cgroup inode (`os.Stat` on `SliceCgroupPath(Slice)/<Unit>`) are each resolved
 dynamically and cached for `DefaultCacheTTL` (5s) rather than fixed at watcher startup, so a service-account
 change or unit reinstall is picked up without restarting the watcher.
 
@@ -154,15 +159,15 @@ object, so a real mismatch there isn't a timing artifact.
 **Bounded retry on a cache-derived cgroup mismatch**: a `cerberus-api.service` restart can change its cgroup —
 systemd may `rmdir`+recreate a unit's cgroup once it briefly becomes empty between stop and start — and, unlike
 uid, this can still be *in progress* by the time an event is classified: the kernel can assign the newly-started
-process to its new cgroup before the well-known `system.slice/<unit>` path `stat()`s to that same inode. A single
-immediate recheck (tried first, in an earlier version of this fix) isn't reliably enough to win that race — real
-hardware testing (`verify-vsock-watch-hardware.sh`'s `api-restart` chaos test, §6) showed it still produced an
-occasional false `Anomalous`. `Classify` now retries `refreshCgroupID` up to `cgroupRevalidateAttempts` times
-(default 10, `cgroupRevalidateInterval` apart, default 50ms — vars, not consts, so tests can shrink them), giving
-systemd's settling a bounded window to finish before giving up. This only runs on the mismatch path — in
-practice, only right around a restart — so a few hundred milliseconds of retry here is a materially different
-cost than blocking the hot path on every event the way an unconditional retry would (the same problem
-`AsyncShipper`, §4.2, exists to avoid on the delivery side).
+process to its new cgroup before the configured slice's well-known `<Slice>/<unit>` path `stat()`s to that same
+inode. A single immediate recheck (tried first, in an earlier version of this fix) isn't reliably enough to win
+that race — real hardware testing (`verify-vsock-watch-hardware.sh`'s `api-restart` chaos test, §6) showed it
+still produced an occasional false `Anomalous`. `Classify` now retries `refreshCgroupID` up to
+`cgroupRevalidateAttempts` times (default 10, `cgroupRevalidateInterval` apart, default 50ms — vars, not consts,
+so tests can shrink them), giving systemd's settling a bounded window to finish before giving up. This only
+runs on the mismatch path — in practice, only right around a restart — so a few hundred milliseconds of retry
+here is a materially different cost than blocking the hot path on every event the way an unconditional retry
+would (the same problem `AsyncShipper`, §4.2, exists to avoid on the delivery side).
 
 **Why a cgroup mismatch that survives the full retry budget downgrades to `Indeterminate`, not `Anomalous`**: the
 retry budget is generous but can't be unbounded, and can't guarantee it always wins the race on every host under
