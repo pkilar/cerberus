@@ -30,20 +30,30 @@
 // rather than `struct socket *`/`struct sockaddr *` for the same
 // no-extra-headers reason.
 //
+// SEC NAME: "lsm/socket_connect", NOT "lsm/security_socket_connect". BPF LSM
+// programs attach to the kernel's per-hook trampoline, which cilium/ebpf
+// resolves as the BTF function "bpf_lsm_" + <the SEC("lsm/...") suffix> (see
+// github.com/cilium/ebpf's prog.go, findProgramTargetInKernel: `case
+// match{LSM, AttachLSMMac}: typeName = "bpf_lsm_" + name`). The kernel only
+// ever generates a bpf_lsm_<hookname> trampoline for the hook's bare name as
+// declared in include/linux/lsm_hook_defs.h's LSM_HOOK(...) list (here,
+// "socket_connect") — never for security_socket_connect(), which is just the
+// C-level dispatcher in security/security.c that calls every registered
+// LSM's hook (SELinux's, AppArmor's, and this one) in turn. Using the
+// dispatcher's name here would make cilium/ebpf look for a nonexistent
+// "bpf_lsm_security_socket_connect" BTF function and fail to attach.
+//
 // GENUINELY UNCONFIRMED — read before relying on this in production, in the
 // same spirit as vsock_connect.c's own top-of-file caveat: this file has
 // never been compiled against a live kernel's BTF or load-tested, because
 // this development sandbox has no CONFIG_BPF_LSM kernel, no active "bpf" LSM,
 // and no privilege to attempt the load. Specifically unconfirmed:
-//   1. The exact BTF function name a BPF_PROG_TYPE_LSM program must name in
-//      its SEC("lsm/...") string to attach to this hook. This file uses
-//      "security_socket_connect" for consistency with this project's own
-//      design doc, but kernel LSM-hook BTF naming conventions are NOT
-//      something this sandbox can check against a live
-//      /sys/kernel/btf/vmlinux. If the load fails citing an unresolved BTF
-//      ID, try "lsm/socket_connect" instead (`bpftool btf dump file
-//      /sys/kernel/btf/vmlinux | grep -w socket_connect` on the target host
-//      tells you which name is actually valid there).
+//   1. That "socket_connect" is actually among the hooks this kernel exposes
+//      to BPF_PROG_TYPE_LSM (not every LSM_HOOK() entry necessarily is, and
+//      that set can vary by kernel version) — confirmed only by an actual
+//      load attempt on target hardware (`bpftool btf dump file
+//      /sys/kernel/btf/vmlinux | grep -w bpf_lsm_socket_connect` checks
+//      whether the trampoline exists before even trying to load).
 //   2. Whether the kernel's BTF-based trampoline verification accepts this
 //      program's `void *` parameter types, or requires the exact
 //      `struct socket *`/`struct sockaddr *` types the real hook declares.
@@ -168,7 +178,7 @@ struct {
     __uint(max_entries, 1 << 16);
 } lsm_events SEC(".maps");
 
-SEC("lsm/security_socket_connect")
+SEC("lsm/socket_connect")
 int cerberus_lsm_check_connect(void *sock, void *address, int addrlen) {
     (void)sock;
 

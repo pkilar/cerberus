@@ -29,6 +29,15 @@ const (
 	// detective path's full exe/uid/cgroup classification, and conflating
 	// them under one Kind would mislead anyone triaging alerts.
 	KindVSockLSMBlock Kind = "vsock_lsm_block"
+	// KindLSMEnforcementDown fires when the preventive LSM gate was explicitly
+	// requested to enforce (--lsm-enforce) but is no longer running — whether
+	// it never attached at startup, or stopped later. Distinct from both
+	// KindDetectorTamper (an already-running detector being interfered with)
+	// and KindVSockLSMBlock (a specific connect event): this alert means "the
+	// blocking guarantee the operator explicitly asked for is not currently
+	// active," which is a materially different and higher-stakes condition
+	// than either — see cmd/cerberus-vsock-watch/main.go's wiring.
+	KindLSMEnforcementDown Kind = "lsm_enforcement_down"
 )
 
 // Alert is the structured payload shipped on every alert-worthy Event or
@@ -117,6 +126,19 @@ func NewTamperAlert(detector Source, reason string) Alert {
 		Kind:     KindDetectorTamper,
 		Reason:   reason,
 		Detector: detector,
+	}
+}
+
+// NewLSMEnforcementDownAlert builds a KindLSMEnforcementDown alert — used
+// when --lsm-enforce was explicitly requested but the LSM gate is not
+// currently running (see cmd/cerberus-vsock-watch/main.go). reason should
+// explain why (e.g. the underlying LSMGuard.Run error).
+func NewLSMEnforcementDownAlert(reason string) Alert {
+	return Alert{
+		Time:     time.Now(),
+		Severity: "critical",
+		Kind:     KindLSMEnforcementDown,
+		Reason:   reason,
 	}
 }
 

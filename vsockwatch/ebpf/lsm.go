@@ -34,8 +34,11 @@ var lsmProgramObject []byte
 // interval eliminates.
 const defaultLSMPollInterval = 250 * time.Millisecond
 
-// LSMGuard loads vsock_lsm.c, attaches it to the security_socket_connect LSM
-// hook, and enforces (or, in monitor mode, only logs) a cgroup-based
+// LSMGuard loads vsock_lsm.c, attaches it to the socket_connect LSM hook
+// (invoked via the kernel's security_socket_connect() dispatcher — see
+// vsock_lsm.c's header comment on why the BPF attach point is always named
+// after the bare hook, never the dispatcher), and enforces (or, in monitor
+// mode, only logs) a cgroup-based
 // allow/deny decision for AF_VSOCK connects to the enclave. See
 // docs/vsock-connect-detection.md §4.6 for the full design rationale — most
 // importantly:
@@ -125,7 +128,7 @@ func (g *LSMGuard) Run(ctx context.Context, onReady func()) error {
 
 	lnk, err := link.AttachLSM(link.LSMOptions{Program: prog})
 	if err != nil {
-		return fmt.Errorf("vsockwatch/ebpf: attaching to security_socket_connect LSM hook: %w", err)
+		return fmt.Errorf("vsockwatch/ebpf: attaching to socket_connect LSM hook: %w", err)
 	}
 	defer func() { _ = lnk.Close() }()
 

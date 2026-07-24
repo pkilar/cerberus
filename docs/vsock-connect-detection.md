@@ -20,10 +20,11 @@
 > covered by an in-process integration test. Before relying on the eBPF detector in production, a maintainer
 > must complete the real-hardware items in §6 — automated by `verify-vsock-watch-hardware.sh` (repo root) and
 > walked through in `docs/vsock-connect-verification-runbook.md`. The LSM gate (`vsockwatch/ebpf/src/vsock_lsm.c`,
-> §4.6) carries the SAME caveat, plus its own: it has never been attached to a live kernel's
-> `security_socket_connect` hook, and even the exact BTF attach-point name and parameter-type compatibility are
-> unconfirmed — see that file's header comment. Never enable `--lsm-enforce` without first running
-> `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
+> §4.6) carries the SAME caveat, plus its own: it has never been attached to a live kernel's `socket_connect` LSM
+> hook (invoked via the kernel's `security_socket_connect()` dispatcher, which calls every registered LSM in
+> turn), and even whether this kernel exposes that hook to `BPF_PROG_TYPE_LSM` at all, or accepts this program's
+> parameter types, is unconfirmed — see that file's header comment. Never enable `--lsm-enforce` without first
+> running `--lsm-monitor` alone across at least one real `cerberus-api.service` restart.
 
 ## 1. Problem statement
 
@@ -163,9 +164,9 @@ which the bounded retry above now resolves in the common case without changing t
 ### 4.2 Event pipeline
 
 1. **eBPF collector** (`cerberus-vsock-watch`, a small Go binary + embedded object) attaches to the
-   `sys_enter_connect` **tracepoint** (§3B; not the `security_socket_connect` LSM hook — see §4.5/§7 for why this
-   is deliberately a detective, not a preventive, attach point), filters in-kernel, and pushes one ring-buffer
-   event per matching connect.
+   `sys_enter_connect` **tracepoint** (§3B; not the `socket_connect` LSM hook — see §4.5/§7 for why this is
+   deliberately a detective, not a preventive, attach point), filters in-kernel, and pushes one ring-buffer event
+   per matching connect.
 2. **Userspace consumer** (same binary) enriches each event: resolves `/proc/<pid>/exe` (best-effort — a process
    that's already gone by read time is itself suspicious and logged as such), checks against the allowlist
    (§4.1), and classifies expected vs. anomalous.
@@ -265,18 +266,20 @@ is deliberately **not** the same thing as prevention:
   to an already-dead PID the common case rather than the exception.
 
 **True kernel-level prevention is now built — see §4.6.** Actually denying a non-allowlisted `connect()` before
-it succeeds requires a BPF program attached to the `security_socket_connect` **LSM** hook (not a tracepoint),
-which can return a nonzero value the kernel treats as a deny — unlike the reactive kill above, which cannot stop
-the first attempt. §4.6 covers the design, its narrower (cgroup-only) scope, and why it still does not close
-`SIGN-1`.
+it succeeds requires a BPF program attached to the `socket_connect` **LSM** hook (not a tracepoint), which can
+return a nonzero value the kernel treats as a deny — unlike the reactive kill above, which cannot stop the first
+attempt. §4.6 covers the design, its narrower (cgroup-only) scope, and why it still does not close `SIGN-1`.
 
 ### 4.6 Preventive LSM gate (opt-in, monitor-first, default off)
 
 `CERBERUS_VSOCK_WATCH_LSM_MONITOR=true` (or `--lsm-monitor`) loads a second, independent eBPF program
 (`vsockwatch/ebpf/src/vsock_lsm.c`, loaded by `vsockwatch/ebpf/lsm.go`'s `LSMGuard`) attached to the
-`security_socket_connect` **LSM** hook rather than a tracepoint. Unlike `sys_enter_connect`, an LSM hook's return
-value IS acted on by the kernel: a nonzero return denies the `connect()` before it succeeds. This is the one
-piece of this design that is genuinely preventive, not just detective.
+`socket_connect` **LSM** hook (`SEC("lsm/socket_connect")` — the kernel's `security_socket_connect()` is the
+dispatcher that invokes this hook, along with every other registered LSM's; the BPF attach point is always named
+after the bare hook, never the dispatcher — see `vsock_lsm.c`'s header comment) rather than a tracepoint. Unlike
+`sys_enter_connect`, an LSM hook's return value IS acted on by the kernel: a nonzero return denies the
+`connect()` before it succeeds. This is the one piece of this design that is genuinely preventive, not just
+detective.
 
 **Why this is narrower than the detective path, not a superset of it.** An LSM hook must decide allow/deny
 synchronously, entirely in-kernel — there is no way to pause the syscall and ask a Go userspace process "does
@@ -312,6 +315,18 @@ at all, which the detective path could previously only alert on after the fact.
   (default `/run/cerberus-vsock-watch/lsm-enforce`, in the unit's `RuntimeDirectory=`) also allows toggling
   enforcement at runtime without a restart, polled the same interval as the cgroup pin.
 
+**A requested-but-not-running enforcement guarantee is loud, not silent.** `--lsm-monitor` alone failing to
+attach is treated like any other optional detective enhancement failing (`--disable-ebpf`'s own graceful
+degradation) — logged, and the process keeps running on whatever detection is still up, per this codebase's
+general philosophy of degrading gracefully rather than crash-looping over an optional piece. But if
+`--lsm-enforce` was ALSO explicitly requested, the operator asked for an actual blocking guarantee, not just
+observability — so if the LSM gate ever stops running (fails to attach at startup, errors out later, or panics),
+`cmd/cerberus-vsock-watch/main.go`'s `lsmEnforceFatal` ships a `lsm_enforcement_down` critical alert and exits
+the whole process (for `Restart=on-failure` to retry) rather than silently continuing to report healthy with no
+enforcement active. This is deliberately a SEPARATE fatal path from `fatalShutdown`/`detectorHealth` (§4.4):
+folding it into `health.allDown()` would mean it never fires while auditd/eBPF stay healthy, which is exactly the
+scenario where an operator most needs to know their `--lsm-enforce` isn't actually enforcing anything.
+
 **Why the restart race is a documented residual risk, not something this design eliminates.** This is
 structurally the same race `Allowlist`'s bounded cgroup-revalidation retry (§4.1) exists to paper over for the
 detective path — except here, a lost race means a REAL denied `connect()`, not just a noisy `Indeterminate`
@@ -323,9 +338,12 @@ eliminates it.
 **Kernel prerequisites** (materially higher bar than the tracepoint path): `CONFIG_BPF_LSM=y` and `bpf` present
 in the kernel's active `lsm=` list (append, never replace — replacing silently drops SELinux/AppArmor), plus a
 new `CAP_MAC_ADMIN` grant (`packaging/*/cerberus-vsock-watch.service`). See `docs/RUNBOOK.md`'s "Preventive LSM
-gate prerequisites" for verification commands. Per this doc's top-of-file status note, whether the kernel's
-BTF-based LSM attach machinery accepts this program's exact section name and parameter types is genuinely
-unconfirmed against a live kernel — see `vsock_lsm.c`'s header comment.
+gate prerequisites" for verification commands. Per this doc's top-of-file status note, whether this kernel
+exposes the `socket_connect` hook to `BPF_PROG_TYPE_LSM` at all, and whether its trampoline verification accepts
+this program's exact parameter types, is genuinely unconfirmed against a live kernel — see `vsock_lsm.c`'s header
+comment (the earlier draft of this file used the wrong attach-point name entirely, `security_socket_connect`
+instead of `socket_connect` — fixed, but a reminder that this class of mistake is easy to make and only a real
+kernel load attempt fully confirms it).
 
 ## 5. False-positive inventory
 

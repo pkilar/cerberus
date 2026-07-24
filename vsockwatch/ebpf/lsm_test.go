@@ -31,11 +31,16 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 	if prog.AttachType != cilium.AttachLSMMac {
 		t.Errorf("attach type = %v, want AttachLSMMac", prog.AttachType)
 	}
-	if prog.AttachTo != "security_socket_connect" {
-		t.Errorf("attach to = %q, want security_socket_connect", prog.AttachTo)
+	// "socket_connect", not "security_socket_connect": the kernel only
+	// exposes a bpf_lsm_<hookname> BTF trampoline for the hook's bare name
+	// (see vsock_lsm.c's header comment) -- cilium/ebpf resolves the target
+	// as "bpf_lsm_" + AttachTo, which would be a nonexistent symbol for the
+	// dispatcher's own name.
+	if prog.AttachTo != "socket_connect" {
+		t.Errorf("attach to = %q, want socket_connect", prog.AttachTo)
 	}
-	if prog.SectionName != "lsm/security_socket_connect" {
-		t.Errorf("section name = %q, want lsm/security_socket_connect", prog.SectionName)
+	if prog.SectionName != "lsm/socket_connect" {
+		t.Errorf("section name = %q, want lsm/socket_connect", prog.SectionName)
 	}
 
 	wantMaps := map[string]struct {
