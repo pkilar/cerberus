@@ -346,7 +346,7 @@ func readEnforceOverride(path string) (enforce bool, ok bool) {
 // never observe a torn write straddling allowed_cgroup_id/populated. See
 // vsock_lsm.c's lsm_policy_slot/lsm_active_slot doc comments.
 type policyMapWriter interface {
-	putPolicySlot(slot uint32, cgroupID uint64, populated bool) error
+	putPolicySlot(slot uint32, cgroupID uint64, level uint32, populated bool) error
 	putActiveSlot(slot uint32) error
 	putMode(mode uint32) error
 }
@@ -362,16 +362,16 @@ var _ policyMapWriter = (*lsmMapWriter)(nil)
 
 // putPolicySlot writes a struct lsm_policy_slot (vsock_lsm.c) to the given
 // map slot; see encodePolicySlot for the byte layout.
-func (w *lsmMapWriter) putPolicySlot(slot uint32, cgroupID uint64, populated bool) error {
-	return w.policy.Put(slot, encodePolicySlot(cgroupID, populated))
+func (w *lsmMapWriter) putPolicySlot(slot uint32, cgroupID uint64, level uint32, populated bool) error {
+	return w.policy.Put(slot, encodePolicySlot(cgroupID, level, populated))
 }
 
 // encodePolicySlot encodes a struct lsm_policy_slot (vsock_lsm.c)
-// byte-for-byte: 8-byte allowed_cgroup_id, 4-byte populated, 4 bytes of
-// explicit padding. A standalone function so its exact layout is
-// unit-testable without a real BPF map (this sandbox cannot create one —
+// byte-for-byte: 8-byte allowed_cgroup_id, 4-byte populated, 4-byte
+// ancestor_level. A standalone function so its exact layout is
+// unit-testable without a real BPF map (this sandbox cannot create one --
 // see lsm_test.go).
-func encodePolicySlot(cgroupID uint64, populated bool) []byte {
+func encodePolicySlot(cgroupID uint64, level uint32, populated bool) []byte {
 	var pop uint32
 	if populated {
 		pop = 1
@@ -379,6 +379,7 @@ func encodePolicySlot(cgroupID uint64, populated bool) []byte {
 	buf := make([]byte, 16)
 	binary.NativeEndian.PutUint64(buf[0:8], cgroupID)
 	binary.NativeEndian.PutUint32(buf[8:12], pop)
+	binary.NativeEndian.PutUint32(buf[12:16], level)
 	return buf
 }
 

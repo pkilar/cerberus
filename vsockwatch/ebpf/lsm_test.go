@@ -127,13 +127,14 @@ func TestLSMObject_ParsesAsValidELF(t *testing.T) {
 
 // TestEncodePolicySlot_MatchesCStructLayout verifies encodePolicySlot's
 // output matches struct lsm_policy_slot (vsock_lsm.c) field-for-field:
-// 8-byte allowed_cgroup_id, 4-byte populated, 4 bytes of explicit padding.
+// 8-byte allowed_cgroup_id, 4-byte populated, 4-byte ancestor_level (the
+// former _pad field, repurposed -- see vsock_lsm.c's struct doc comment).
 // lsmMapWriter.putPolicySlot (the only caller) cannot itself be exercised in
-// this sandbox — creating even a plain BPF_MAP_TYPE_ARRAY requires real BPF
-// privilege ("operation not permitted" here) — so this tests the encoding
+// this sandbox -- creating even a plain BPF_MAP_TYPE_ARRAY requires real BPF
+// privilege ("operation not permitted" here) -- so this tests the encoding
 // logic directly, which is the part that must match the C struct.
 func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
-	buf := encodePolicySlot(0xdeadbeefcafef00d, true)
+	buf := encodePolicySlot(0xdeadbeefcafef00d, 2, true)
 	if len(buf) != 16 {
 		t.Fatalf("len(buf) = %d, want 16", len(buf))
 	}
@@ -143,13 +144,16 @@ func TestEncodePolicySlot_MatchesCStructLayout(t *testing.T) {
 	if got := binary.NativeEndian.Uint32(buf[8:12]); got != 1 {
 		t.Errorf("populated = %d, want 1", got)
 	}
-	if got := binary.NativeEndian.Uint32(buf[12:16]); got != 0 {
-		t.Errorf("padding = %d, want 0", got)
+	if got := binary.NativeEndian.Uint32(buf[12:16]); got != 2 {
+		t.Errorf("ancestor_level = %d, want 2", got)
 	}
 
-	unpop := encodePolicySlot(999, false)
+	unpop := encodePolicySlot(999, 1, false)
 	if got := binary.NativeEndian.Uint32(unpop[8:12]); got != 0 {
 		t.Errorf("populated (false case) = %d, want 0", got)
+	}
+	if got := binary.NativeEndian.Uint32(unpop[12:16]); got != 1 {
+		t.Errorf("ancestor_level = %d, want 1", got)
 	}
 }
 
