@@ -11,7 +11,7 @@ require (
 	github.com/mdlayher/vsock v1.3.0
 	github.com/pkilar/cerberus v0.0.0-20260625235846-2d24a56dc262
 	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -31,7 +31,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/mdlayher/socket v0.6.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
