@@ -12,11 +12,13 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Dependabot-triggered runs are handed only Dependabot-scoped secrets, so
+    # secrets.CLAUDE_CODE_OAUTH_TOKEN resolves to an empty string and the action
+    # dies with "Environment variable validation failed". Skip those runs rather
+    # than copy the OAuth token into a second secret scope that bot-triggered
+    # workflows can reach. Gate on github.actor rather than the PR author so a
+    # human pushing to a dependabot branch still gets a review.
+    if: github.actor != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:
@@ -36,7 +38,6 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: 'dependabot[bot]'
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
