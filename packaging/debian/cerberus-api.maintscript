@@ -3,4 +3,10 @@
 # always refresh it; dpkg will not drop a conffile on its own, so retire the old
 # path explicitly. rm_conffile preserves the file (as .dpkg-bak) if the admin
 # modified it, and is a no-op if they had already removed it.
-rm_conffile /etc/cerberus/config.yaml.example 0.10.4~ cerberus-api
+#
+# The version is 0.10.5~, NOT 0.10.4~. dpkg-maintscript-helper only acts when the
+# version being upgraded FROM is older than or equal to this value, and 0.10.4~
+# sorts *before* 0.10.4 -- so an upgrade from the very release that shipped the
+# conffile would have skipped the removal entirely. 0.10.5~ sorts just below the
+# release that drops it, covering 0.10.4 and everything earlier.
+rm_conffile /etc/cerberus/config.yaml.example 0.10.5~ cerberus-api
