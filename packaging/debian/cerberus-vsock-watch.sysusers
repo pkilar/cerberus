@@ -3,6 +3,8 @@
 # docs/vsock-connect-detection.md §4.3: a compromise of the cerberus account
 # alone must not also blind this watcher. dh_installsysusers installs this to
 # /usr/lib/sysusers.d/cerberus-vsock-watch.conf and invokes systemd-sysusers
-# from the postinst.
+# from the postinst. Home is "-" (sysusers.d's no-home default) rather than
+# /etc/cerberus: that directory belongs to the cerberus account, and two service
+# accounts sharing a home undercuts the very isolation this account exists for.
 #Type Name           ID GECOS                             Home          Shell
-u     cerberus-audit -  "Cerberus VSOCK-watch detective control" /etc/cerberus /usr/sbin/nologin
+u     cerberus-audit -  "Cerberus VSOCK-watch detective control" - /usr/sbin/nologin
