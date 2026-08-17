@@ -483,7 +483,7 @@ When installed via RPM, files are placed at standard FHS paths:
 | Signer systemd unit   | `/usr/lib/systemd/system/cerberus-signer.service` | —                                                        |
 | API sysconfig         | `/etc/sysconfig/cerberus-api`                     | `%config(noreplace)`                                     |
 | Signer sysconfig      | `/etc/sysconfig/cerberus-signer`                  | `%config(noreplace)`                                     |
-| Example config        | `/etc/cerberus/config.yaml.example`               | Copy to `config.yaml`                                    |
+| Example config        | `/usr/share/cerberus/config.yaml.example`               | Copy to `config.yaml`                                    |
 | Enclave wrapper       | `/usr/libexec/cerberus/run-enclave.sh`            | Used by systemd                                          |
 | Dockerfile            | `/usr/share/cerberus/Dockerfile`                  | For building EIFs                                        |
 | EIF                   | `/usr/share/cerberus/ssh-cert-signer.eif`         | Operator copies post-install, **or** shipped by the optional `cerberus-signer-eif` package |
@@ -497,7 +497,7 @@ When installed via RPM, files are placed at standard FHS paths:
 
 1. Copy and edit the configuration:
    ```bash
-   sudo cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+   sudo cp /usr/share/cerberus/config.yaml.example /etc/cerberus/config.yaml
    sudo vim /etc/cerberus/config.yaml
    ```
 2. Place the Kerberos keytab:
@@ -1055,7 +1055,7 @@ There is no longer a VSOCK KMS proxy. The host calls `kms:Decrypt` directly over
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `cerberus` user doesn't exist after install | `%pre` scriptlet failed                                                                                                   | Run `sudo useradd -r -g cerberus -d /etc/cerberus -s /sbin/nologin cerberus`                                         |
 | Config overwritten on upgrade               | Config not marked `noreplace`                                                                                             | Reinstall; configs use `%config(noreplace)` so this should not happen                                                |
-| Service won't start after RPM install       | Missing config.yaml                                                                                                       | Copy `/etc/cerberus/config.yaml.example` to `/etc/cerberus/config.yaml` and edit it                                  |
+| Service won't start after RPM install       | Missing config.yaml                                                                                                       | Copy `/usr/share/cerberus/config.yaml.example` to `/etc/cerberus/config.yaml` and edit it                                  |
 | `run-enclave.sh: EIF file not found`        | EIF not placed at `/usr/share/cerberus/ssh-cert-signer.eif` (the default RPM does not ship it — it bakes in the encrypted CA key) | Copy and rename the matching arch's EIF: `sudo cp ssh-cert-signer-amd64.eif /usr/share/cerberus/ssh-cert-signer.eif` — or install the optional `cerberus-signer-eif` package |
 | `refusing to generate a new CA key … already exists` | `make encrypt-ca-key` guards against clobbering existing CA key material (`ca_key`/`ca_key.pub`/`ca_key.enc`) | Intended for a deliberate rotation only. Remove the old material first: `make -C ssh-cert-signer clean-ca-key`, then re-run |
 | Permission denied on keytab                 | Wrong ownership                                                                                                           | `sudo chown root:cerberus /etc/cerberus/krb5.keytab && sudo chmod 640 /etc/cerberus/krb5.keytab`                     |

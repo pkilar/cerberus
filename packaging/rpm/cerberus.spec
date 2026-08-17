@@ -215,8 +215,18 @@ install -D -m 0644 packaging/rpm/cerberus-api.service \
 install -D -m 0640 packaging/rpm/cerberus-api.sysconfig \
     %{buildroot}%{_sysconfdir}/sysconfig/cerberus-api
 
-install -D -m 0640 ssh-cert-api/configs/config-example.yaml \
-    %{buildroot}%{_sysconfdir}/cerberus/config.yaml.example
+# The config template lives in %{_datadir}, not %{_sysconfdir}: nothing reads
+# it, operators copy it to config.yaml. Shipping it as configuration froze it --
+# once an admin touched it, upgrades stopped refreshing it and new options never
+# surfaced. As read-only package data it is replaced on every upgrade, and 0644
+# is unremarkable there (it carries no secrets and is public in the repo).
+install -D -m 0644 ssh-cert-api/configs/config-example.yaml \
+    %{buildroot}%{_datadir}/cerberus/config.yaml.example
+
+# /etc/cerberus is where operators put the config.yaml they derive from that
+# template, so the package still owns the directory even though it no longer
+# ships a file into it.
+install -d -m 0750 %{buildroot}%{_sysconfdir}/cerberus
 
 install -d -m 0750 %{buildroot}%{_localstatedir}/log/cerberus
 
@@ -337,7 +347,8 @@ exit 0
 %{_unitdir}/cerberus-api.service
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/sysconfig/cerberus-api
 %dir %attr(0750,root,cerberus) %{_sysconfdir}/cerberus
-%config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/cerberus/config.yaml.example
+%dir %{_datadir}/cerberus
+%{_datadir}/cerberus/config.yaml.example
 %dir %attr(0750,cerberus,cerberus) %{_localstatedir}/log/cerberus
 # Ghost-declare the optional LDAP simple-bind password file so `rpm -V` flags
 # accidentally world-readable rotations. The file is NOT shipped — operators
@@ -381,6 +392,17 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Mon Aug 17 2026 Paul Kilar <pkilar@gmail.com> - 0.10.5-1
+- Ship the config template as %{_datadir}/cerberus/config.yaml.example instead
+  of %%config(noreplace) %{_sysconfdir}/cerberus/config.yaml.example. Nothing
+  reads the file -- operators copy it to config.yaml -- so marking it
+  noreplace froze it: once an admin touched it, upgrades left it alone and
+  newly added options never surfaced. As ordinary package data it is refreshed
+  on every upgrade. Mode is now 0644; a restricted mode is anomalous under
+  %{_datadir} and the template carries no secrets.
+- cerberus-api still owns %{_sysconfdir}/cerberus (0750 root:cerberus). It was
+  previously created only as a side effect of installing the template into it,
+  and remains where the operator's config.yaml belongs.
 * Thu Jul 23 2026 Paul Kilar <pkilar@gmail.com> - 0.10.4-1
 - Reduce cerberus-vsock-watch alert noise on a cerberus-api.service
   restart: a third real restart chaos test on the same RHEL 10 host

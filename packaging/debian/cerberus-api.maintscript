@@ -1,0 +1,6 @@
+# /etc/cerberus/config.yaml.example was a conffile up to and including 0.10.4.
+# The template now ships at /usr/share/cerberus/config.yaml.example so upgrades
+# always refresh it; dpkg will not drop a conffile on its own, so retire the old
+# path explicitly. rm_conffile preserves the file (as .dpkg-bak) if the admin
+# modified it, and is a no-op if they had already removed it.
+rm_conffile /etc/cerberus/config.yaml.example 0.10.4~ cerberus-api

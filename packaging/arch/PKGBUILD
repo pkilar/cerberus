@@ -82,12 +82,17 @@ package_cerberus-api() {
         "$pkgdir/usr/lib/systemd/system/cerberus-api.service"
     install -Dm640 packaging/rpm/cerberus-api.sysconfig \
         "$pkgdir/etc/conf.d/cerberus-api"
-    # 0640 (not world-readable) mirrors the RPM's %attr on this template. Group
-    # ownership stays root (the sysusers-created cerberus group does not exist
-    # at build time); the RPM's root:cerberus is not buildable here, and 0640
-    # root:root preserves the "not world-readable" intent.
-    install -Dm640 ssh-cert-api/configs/config-example.yaml \
-        "$pkgdir/etc/cerberus/config.yaml.example"
+    # The config template lives in /usr/share, not /etc: nothing reads it,
+    # operators copy it to config.yaml. Keeping it under /etc invited it into
+    # backup=()/conffile territory, which freezes a file that should always be
+    # refreshed so new options surface on upgrade. 0644 is unremarkable for
+    # read-only package data -- it carries no secrets and is public in the repo.
+    install -Dm644 ssh-cert-api/configs/config-example.yaml \
+        "$pkgdir/usr/share/cerberus/config.yaml.example"
+
+    # Still own /etc/cerberus: it is where the operator puts the config.yaml
+    # derived from that template, and nothing else creates it now.
+    install -dm750 "$pkgdir/etc/cerberus"
 
     # The cerberus system user/group and the log directory are created
     # declaratively by systemd-sysusers / systemd-tmpfiles, which pacman runs

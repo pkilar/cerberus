@@ -10,7 +10,7 @@ metadata are Debian-specific.
 
 | Package               | Contents                                                                       | Architecture |
 | --------------------- | ------------------------------------------------------------------------------ | ------------ |
-| `cerberus-api`        | `ssh-cert-api` binary, systemd unit, `config.yaml.example`, sysusers/tmpfiles  | amd64/arm64  |
+| `cerberus-api`        | `ssh-cert-api` binary, systemd unit, `config.yaml.example` (in `/usr/share`), sysusers/tmpfiles  | amd64/arm64  |
 | `cerberus-signer`     | `ssh-cert-signer` binary, systemd unit, `run-enclave.sh`, `Dockerfile`         | amd64/arm64  |
 | `cerberus-vsock-watch`| VSOCK-connect detective control (`docs/vsock-connect-detection.md`): binary, systemd unit, auditd rule, sysusers | amd64/arm64  |
 | `cerberus-client`     | the `cssh` shell wrapper (`/etc/profile.d/`)                                    | all          |
@@ -47,7 +47,7 @@ upload to a Debian archive.)
 | system user + logdir | `useradd` + `install -d` scriptlet | `sysusers.d` + `tmpfiles.d`        |
 | config-noreplace     | `%config(noreplace)`              | dpkg conffiles (automatic for `/etc`) |
 
-Files under `/etc` (the env files, `config.yaml.example`, `cssh.sh`,
+Files under `/etc` (the env files, `cssh.sh`,
 `cerberus-env.sh`) are automatically dpkg **conffiles**: operator edits are
 preserved (dpkg prompts / saves `.dpkg-dist`), and an unmodified file is updated
 on upgrade. `cssh.sh` is program code shipped as a conffile so fixes still apply
