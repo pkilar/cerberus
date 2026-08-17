@@ -147,7 +147,7 @@ sudo yum install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
 sudo yum install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
 
 # Configure
-sudo cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+sudo cp /usr/share/cerberus/config.yaml.example /etc/cerberus/config.yaml
 sudo vim /etc/cerberus/config.yaml
 
 # Place keytab, TLS certs, and EIF (see docs/RUNBOOK.md for details)

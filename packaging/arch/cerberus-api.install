@@ -7,7 +7,7 @@ post_install() {
     cat <<'MSG'
 ==> cerberus-api installed.
     1. Create the config from the example and lock it down:
-         cp /etc/cerberus/config.yaml.example /etc/cerberus/config.yaml
+         cp /usr/share/cerberus/config.yaml.example /etc/cerberus/config.yaml
          chown root:cerberus /etc/cerberus/config.yaml
          chmod 0640 /etc/cerberus/config.yaml
     2. Install the Kerberos keytab referenced by keytab_path (mode 0600 or 0400).

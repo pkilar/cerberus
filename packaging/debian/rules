@@ -53,8 +53,16 @@ override_dh_auto_install-arch:
 		debian/cerberus-api/usr/bin/ssh-cert-api
 	install -D -m 0640 packaging/rpm/cerberus-api.sysconfig \
 		debian/cerberus-api/etc/default/cerberus-api
-	install -D -m 0640 ssh-cert-api/configs/config-example.yaml \
-		debian/cerberus-api/etc/cerberus/config.yaml.example
+	# The config template lives in /usr/share, not /etc: nothing reads it,
+	# operators copy it to config.yaml. Under /etc debhelper made it a conffile,
+	# which froze it -- once an admin touched it, upgrades stopped refreshing it
+	# and new options never surfaced. See cerberus-api.maintscript for the
+	# migration that retires the old path.
+	install -D -m 0644 ssh-cert-api/configs/config-example.yaml \
+		debian/cerberus-api/usr/share/cerberus/config.yaml.example
+	# Still own /etc/cerberus: it is where the operator puts the config.yaml
+	# derived from that template, and nothing else creates it now.
+	install -d -m 0750 debian/cerberus-api/etc/cerberus
 	install -D -m 0755 ssh-cert-signer/ssh-cert-signer \
 		debian/cerberus-signer/usr/bin/ssh-cert-signer
 	install -D -m 0640 packaging/rpm/cerberus-signer.sysconfig \
@@ -88,7 +96,7 @@ override_dh_auto_install-indep:
 # to 0644. These files carry no secrets, but the not-world-readable intent is
 # kept; systemd reads the EnvironmentFiles as root regardless.
 override_dh_fixperms:
-	dh_fixperms -Xetc/default/cerberus-api -Xetc/default/cerberus-signer -Xetc/default/cerberus-vsock-watch -Xetc/cerberus/config.yaml.example
+	dh_fixperms -Xetc/default/cerberus-api -Xetc/default/cerberus-signer -Xetc/default/cerberus-vsock-watch
 
 # Go static binaries carry no DWARF for dwz and are already stripped (-s -w);
 # skip dwz and the automatic -dbgsym package.

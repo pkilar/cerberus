@@ -1,3 +1,21 @@
+cerberus (0.10.5) unstable; urgency=medium
+
+  * Ship the config template at /usr/share/cerberus/config.yaml.example
+    instead of /etc/cerberus/config.yaml.example. Nothing reads the file --
+    operators copy it to config.yaml -- so shipping it under /etc made it a
+    dpkg conffile, which froze it: once an admin touched it, upgrades stopped
+    refreshing it and newly added options never surfaced. As read-only package
+    data under /usr/share it is replaced on every upgrade, matching the RPM
+    and Arch packaging. cerberus-api.maintscript retires the old conffile;
+    a locally modified copy is preserved as .dpkg-bak.
+  * The template now ships 0644 rather than 0640. A restricted mode is
+    anomalous under /usr/share and bought nothing here: the file carries no
+    secrets and is public in the source repository. Its lintian override is
+    dropped accordingly; the env files keep 0640 and their override.
+  * cerberus-api continues to own /etc/cerberus (0750 root:cerberus), which
+    was previously created only as a side effect of installing the template
+    into it. That is still where the operator's config.yaml belongs.
+
 cerberus (0.10.4) unstable; urgency=medium
 
   * Reduce cerberus-vsock-watch alert noise on a cerberus-api.service
