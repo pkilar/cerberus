@@ -133,7 +133,12 @@ package_cerberus-signer() {
 package_cerberus-vsock-watch() {
     pkgdesc="VSOCK-connect detective control for the Cerberus enclave boundary"
     depends=('audit' 'systemd')
-    backup=('etc/conf.d/cerberus-vsock-watch')
+    # The auditd rule fragment is shipped straight into /etc/audit/rules.d with
+    # no vendor/override split, and its own header invites operator edits, so it
+    # needs backup=() or pacman overwrites those edits with no .pacnew. RPM and
+    # Debian both already protect this file; Arch was the odd one out.
+    backup=('etc/conf.d/cerberus-vsock-watch'
+            'etc/audit/rules.d/61-cerberus-vsock.rules')
     install=cerberus-vsock-watch.install
 
     cd "${pkgbase}-${pkgver}"

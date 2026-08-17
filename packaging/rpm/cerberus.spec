@@ -1,4 +1,13 @@
 %global goipath     cerberus
+
+# Fedora requires a written reason whenever debuginfo generation is disabled.
+# These binaries are linked with `-s -w` (see %build), so they carry neither a
+# symbol table nor DWARF, and find-debuginfo would emit an empty -debuginfo
+# subpackage. It would in fact fail outright: Go's internal linker emits no
+# NT_GNU_BUILD_ID note, and find-debuginfo runs --strict-build-id.
+# Producing usable debuginfo would mean dropping -s -w and forcing
+# -linkmode=external (what Fedora's own %%gobuild macro does), which pulls in a
+# C toolchain. Not worth it for these binaries.
 %global debug_package %{nil}
 
 Name:           cerberus
@@ -11,10 +20,12 @@ URL:            https://github.com/pkilar/cerberus
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  golang >= 1.26
-BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 
-ExclusiveArch:  x86_64 aarch64
+# `noarch` belongs in this list even though the daemons are arch-specific: the
+# cerberus-client subpackage is BuildArch: noarch, and without it here that
+# subpackage cannot be built on any host outside the allowlist.
+ExclusiveArch:  x86_64 aarch64 noarch
 
 %description
 Cerberus is an SSH Certificate Authority that runs inside an AWS Nitro Enclave.
@@ -299,8 +310,11 @@ exit 0
 # above): a compromise of the cerberus account alone must not also blind this
 # watcher. See docs/vsock-connect-detection.md §4.3.
 getent group cerberus-audit >/dev/null || groupadd -r cerberus-audit
+# Home is `/`, not /etc/cerberus: that directory belongs to the cerberus
+# account, and two service accounts sharing a home undercuts the isolation
+# this separate account exists to provide. Neither daemon uses $HOME.
 getent passwd cerberus-audit >/dev/null || \
-    useradd -r -g cerberus-audit -d /etc/cerberus -s /sbin/nologin \
+    useradd -r -g cerberus-audit -d / -s /sbin/nologin \
     -c "Cerberus VSOCK-watch detective control" cerberus-audit
 exit 0
 
@@ -322,6 +336,7 @@ exit 0
 %{_bindir}/ssh-cert-api
 %{_unitdir}/cerberus-api.service
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/sysconfig/cerberus-api
+%dir %attr(0750,root,cerberus) %{_sysconfdir}/cerberus
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/cerberus/config.yaml.example
 %dir %attr(0750,cerberus,cerberus) %{_localstatedir}/log/cerberus
 # Ghost-declare the optional LDAP simple-bind password file so `rpm -V` flags
@@ -335,6 +350,7 @@ exit 0
 %{_bindir}/ssh-cert-signer
 %{_unitdir}/cerberus-signer.service
 %config(noreplace) %attr(0640,root,root) %{_sysconfdir}/sysconfig/cerberus-signer
+%dir %{_libexecdir}/cerberus
 %{_libexecdir}/cerberus/run-enclave.sh
 %dir %{_datadir}/cerberus
 %{_datadir}/cerberus/Dockerfile

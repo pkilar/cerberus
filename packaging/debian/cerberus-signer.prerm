@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+    # debian/rules passes dh_installsystemd --no-enable --no-start, and that flag
+    # combination also suppresses debhelper's generated stop-on-remove snippet.
+    # Without this, a unit the operator enabled by hand keeps running against a
+    # deleted binary after `apt remove`. Mirrors the RPM's %systemd_preun.
+    #
+    # Guarded on "remove" specifically: on upgrade the generated preinst already
+    # stops the unit for file-replacement safety and cerberus-signer.postinst
+    # try-restarts it afterwards, so stopping here would be wrong.
+    deb-systemd-invoke stop cerberus-signer.service >/dev/null || true
+fi
+
+#DEBHELPER#

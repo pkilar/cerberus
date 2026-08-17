@@ -18,7 +18,7 @@ Rules-Requires-Root: no
 
 Package: cerberus-api
 Architecture: amd64 arm64
-Depends: ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Recommends: krb5-user
 Description: SSH certificate authority API service for AWS Nitro Enclaves
  Cerberus is an SSH Certificate Authority whose CA private key lives only
@@ -33,8 +33,12 @@ Description: SSH certificate authority API service for AWS Nitro Enclaves
 
 Package: cerberus-signer
 Architecture: amd64 arm64
-Depends: ${misc:Depends}
-Recommends: aws-nitro-enclaves-cli
+Depends: ${shlibs:Depends}, ${misc:Depends}
+# No Recommends on aws-nitro-enclaves-cli: AWS ships it for Amazon Linux only,
+# so on Debian/Ubuntu the name never resolves and apt reports it unsatisfiable
+# forever. The requirement is real and is documented in
+# cerberus-signer.README.Debian, which also covers building nitro-cli from
+# source.
 Description: SSH certificate signer that runs inside an AWS Nitro Enclave
  Cerberus is an SSH Certificate Authority whose CA private key lives only
  inside an AWS Nitro Enclave. This package provides the signer service: the
@@ -49,7 +53,10 @@ Description: SSH certificate signer that runs inside an AWS Nitro Enclave
 
 Package: cerberus-vsock-watch
 Architecture: amd64 arm64
-Depends: ${misc:Depends}, audit
+# `auditd`, not `audit`: `audit` is the Arch package name and does not exist in
+# Debian, which made this package uninstallable (`Depends: audit but it is not
+# installable`).
+Depends: ${shlibs:Depends}, ${misc:Depends}, auditd
 Description: VSOCK-connect detective control for the Cerberus enclave boundary
  Detects an AF_VSOCK connect() to the Cerberus enclave from any process other
  than the legitimate cerberus-api — the signal that something on the host
