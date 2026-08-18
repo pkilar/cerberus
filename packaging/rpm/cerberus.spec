@@ -1,5 +1,13 @@
 %global goipath     cerberus
 
+# build-rpm.sh passes --define "rpm_version <VERSION>". This fallback exists so a
+# bare `rpmbuild -ba cerberus.spec`, with no --define, fails in an obvious place
+# instead of a confusing one: without it rpmbuild only warns about an unexpanded
+# macro, carries the literal "%%{rpm_version}" into Version:, and then dies much
+# later in %%setup when the tarball's directory name does not match. 0.0.0 is
+# unmistakably not a release.
+%{!?rpm_version: %global rpm_version 0.0.0}
+
 # Fedora requires a written reason whenever debuginfo generation is disabled.
 # These binaries are linked with `-s -w` (see %build), so they carry neither a
 # symbol table nor DWARF, and find-debuginfo would emit an empty -debuginfo
