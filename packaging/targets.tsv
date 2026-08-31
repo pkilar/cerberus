@@ -1,0 +1,28 @@
+# Build targets: what can be built, and on which architectures.
+#
+# Consumed by targets.sh and build-in-container.sh. Columns are tab-separated:
+#   id            short name, used as `build-in-container.sh <id>`
+#   format        rpm | deb | arch
+#   image         container image supplying the DISTRIBUTION
+#   arches        architectures this target is built for
+#
+# The container supplies the distribution; the host supplies the architecture.
+# An arm64 package is built on arm64 hardware, never cross-compiled or emulated,
+# so cgo and shared-library dependency generation stay correct.
+#
+# The RPM set matches the spec's own "Supported distributions" line. Go 1.26 is
+# available from each of their default repositories, which is what the spec's
+# BuildRequires: golang >= 1.26 needs.
+#
+# debian uses a Go-provided image rather than plain debian:stable: Debian ships
+# golang-go 1.24, below the go.mod floor of 1.26, and debian/control deliberately
+# declares no Go build-dependency for exactly that reason. The result is still a
+# bookworm-built package -- only the toolchain differs.
+#
+# id              format  image                                    arches
+fedora            rpm     fedora:latest                            amd64,arm64
+rhel9             rpm     registry.access.redhat.com/ubi9/ubi      amd64,arm64
+rhel10            rpm     registry.access.redhat.com/ubi10/ubi     amd64,arm64
+amazonlinux2023   rpm     amazonlinux:2023                         amd64,arm64
+debian-bookworm   deb     golang:1.26-bookworm                     amd64,arm64
+arch              arch    archlinux:latest                         amd64
