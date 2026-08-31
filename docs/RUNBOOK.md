@@ -70,7 +70,7 @@ Services communicate using JSON-encoded messages over VSOCK:
 ### EC2 Host Requirements
 
 - **Nitro-capable EC2 instance** (e.g., `m5.xlarge`, `c5.xlarge`, or any `.metal` instance)
-- **Supported OS**: Amazon Linux 2, Amazon Linux 2023, RHEL 8+, or Fedora
+- **Supported OS**: Amazon Linux 2023, RHEL 9+, or Fedora
 - **Nitro Enclaves enabled** on the instance (set during launch or via `modify-instance-attribute`)
 - **nitro-cli** installed and configured
 - **AWS IAM role** attached to the instance with KMS Decrypt permissions for the CA key
@@ -412,7 +412,7 @@ make clean
 
 ## RPM Packaging
 
-Cerberus provides RPM packaging for Amazon Linux 2, Amazon Linux 2023, RHEL, and Fedora. The spec produces two subpackages by default, plus one optional package:
+Cerberus provides RPM packaging for Amazon Linux 2023, RHEL 9+, and Fedora. The spec produces two subpackages by default, plus one optional package:
 
 | Package               | Contents                                                                                                                              |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -429,11 +429,8 @@ Cerberus provides RPM packaging for Amazon Linux 2, Amazon Linux 2023, RHEL, and
 **Prerequisites:**
 
 ```bash
-# Amazon Linux 2023 / Fedora / RHEL 8+
-sudo dnf install rpm-build rpmdevtools golang make
-
-# Amazon Linux 2 / RHEL 7
-sudo yum install rpm-build rpmdevtools golang make
+# Amazon Linux 2023 / Fedora / RHEL 9+
+sudo dnf install rpm-build rpmdevtools golang make rsync
 ```
 
 **Build locally:**
@@ -462,13 +459,9 @@ Output RPMs are placed in `rpmbuild/RPMS/<arch>/`.
 ### Installing
 
 ```bash
-# Amazon Linux 2023 / Fedora / RHEL 8+
+# Amazon Linux 2023 / Fedora / RHEL 9+
 sudo dnf install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
 sudo dnf install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
-
-# Amazon Linux 2 / RHEL 7
-sudo yum install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
-sudo yum install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
 ```
 
 ### RPM File Locations
@@ -650,10 +643,7 @@ See [RPM Packaging](#rpm-packaging) above. After installing the RPMs, follow the
 2. Attach an IAM role with KMS Decrypt permissions.
 3. Install `nitro-cli` and allocate enclave resources:
    ```bash
-   # Amazon Linux 2
-   sudo amazon-linux-extras install aws-nitro-enclaves-cli
-
-   # Amazon Linux 2023 / RHEL / Fedora
+   # Amazon Linux 2023 / RHEL 9+ / Fedora
    sudo dnf install aws-nitro-enclaves-cli
 
    # All distributions
