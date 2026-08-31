@@ -14,8 +14,8 @@
 # a local build; it is incompatible with --mock's clean chroot.
 #
 # Prerequisites:
-#   dnf install rpm-build rpmdevtools golang make    # Fedora / RHEL / Amazon Linux 2023
-#   yum install rpm-build rpmdevtools golang make    # Amazon Linux 2 / RHEL 7
+#   dnf install rpm-build rpmdevtools golang make rsync    # Fedora / RHEL 9+ /
+#                                                          # Amazon Linux 2023
 set -euo pipefail
 
 # --- Parse arguments -------------------------------------------------------

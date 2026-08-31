@@ -124,7 +124,7 @@ This is a minimal, secure service that runs inside the AWS Nitro Enclave.
 
 **Runtime host (where the enclave actually runs):**
 
-- An EC2 instance with Nitro Enclaves enabled (Amazon Linux 2, Amazon Linux 2023, RHEL, or Fedora)
+- An EC2 instance with Nitro Enclaves enabled (Amazon Linux 2023, RHEL 9+, or Fedora)
 - `aws-nitro-enclaves-cli` and the `nitro-enclaves-allocator` service
 - A Kerberos Key Distribution Center (KDC) and a keytab file for the API service
 
@@ -138,13 +138,9 @@ Build and install the RPM packages:
 # Build RPMs (requires rpm-build, rpmdevtools, golang, make)
 ./packaging/rpm/build-rpm.sh
 
-# Amazon Linux 2023 / Fedora / RHEL 8+
+# Amazon Linux 2023 / Fedora / RHEL 9+
 sudo dnf install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
 sudo dnf install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
-
-# Amazon Linux 2 / RHEL 7
-sudo yum install rpmbuild/RPMS/x86_64/cerberus-api-*.rpm
-sudo yum install rpmbuild/RPMS/x86_64/cerberus-signer-*.rpm
 
 # Configure
 sudo cp /usr/share/cerberus/config.yaml.example /etc/cerberus/config.yaml

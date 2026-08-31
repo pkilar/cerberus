@@ -488,7 +488,7 @@ Cerberus supports regulatory and compliance requirements through:
 
 ### Software Requirements
 
-1. **Operating System**: Amazon Linux 2023, Ubuntu 20.04+, or RHEL 8+
+1. **Operating System**: Amazon Linux 2023, Ubuntu 20.04+, or RHEL 9+
 2. **Nitro Enclaves CLI**: Provided by AWS
 3. **Kerberos Infrastructure**: Active Directory or MIT Kerberos KDC
 4. **DNS**: For hostname resolution

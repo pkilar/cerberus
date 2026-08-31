@@ -46,7 +46,10 @@ Cerberus is an SSH Certificate Authority that runs inside an AWS Nitro Enclave.
 The CA private key is KMS-encrypted and only decrypted inside the enclave,
 ensuring the key never exists in plaintext on the host.
 
-Supported distributions: Amazon Linux 2023, Amazon Linux 2, Fedora, RHEL 8+.
+Supported distributions: Amazon Linux 2023, Fedora, RHEL 9+.
+Amazon Linux 2 and RHEL 8 are not supported: both are end-of-life, and
+neither can satisfy this spec's BuildRequires: systemd-rpm-macros, which is
+not available in their default repositories.
 
 # ---------------------------------------------------------------------------
 # Subpackage: cerberus-api
@@ -103,7 +106,7 @@ Requires:       audit
 # TamperWatch's AuditRulePresent, vsockwatch/tamper.go, to verify the auditd
 # rule is still installed) ships in audit-rules there, not the base audit
 # package -- confirmed via `dnf provides '*/auditctl'` on a RHEL 10 host.
-# Gated on the rhel macro (>= 10) so Amazon Linux 2/2023, Fedora, and RHEL 8/9
+# Gated on the rhel macro (>= 10) so Amazon Linux 2023, Fedora, and RHEL 9
 # (which leave it undefined, or define it below 10) are unaffected -- audit
 # alone is sufficient there, and audit-rules isn't guaranteed to exist as a
 # distinct package on those distributions.
@@ -315,8 +318,9 @@ install -D -m 0644 packaging/profile.d/cerberus-env.sh \
 # But shipping it is not sufficient. On RHEL 9 %%sysusers_create_compat expands to
 # nothing and rpm 4.16 has no native sysusers handling, so nothing creates the
 # account and every %%attr file lands root-owned ("warning: user cerberus does not
-# exist - using root") -- verified by installing on Rocky 9. On RHEL 8 the macro
-# is undefined entirely. So create the account explicitly as well.
+# exist - using root") -- verified by installing on Rocky 9. Amazon Linux 2023
+# behaves the same way. So create the account explicitly as well. The %%{?...}
+# guard also keeps the scriptlet valid where the macro is undefined outright.
 #
 # Both paths are idempotent: the getent guards make the useradd a no-op when
 # sysusers already ran. Never invoked from %%postun, so the account survives erase.
@@ -360,7 +364,7 @@ exit 0
 # Ships a sysusers.d fragment (Source2) *and* creates the account explicitly, for
 # the reasons spelled out in %%pre api above: the shipped file is what satisfies
 # rpm >= 6's generated group(cerberus-audit) dependency, and the explicit creation
-# is what actually makes the account exist on RHEL 8/9.
+# is what actually makes the account exist on RHEL 9 and Amazon Linux 2023.
 %{?sysusers_create_compat:%sysusers_create_compat %{SOURCE2}}
 getent group cerberus-audit >/dev/null || groupadd -r cerberus-audit
 getent passwd cerberus-audit >/dev/null || \
@@ -513,7 +517,7 @@ exit 0
   AuditRulePresent check, vsockwatch/tamper.go) ships in a separate
   audit-rules package rather than the base audit package. The vsock-watch
   subpackage now also Requires audit-rules when %{rhel} >= 10; Amazon Linux
-  2/2023, Fedora, and RHEL 8/9 are unaffected (audit alone is still
+  2023, Fedora, and RHEL 9 are unaffected (audit alone is still
   sufficient there). No functional change to any other subpackage.
 * Wed Jul 22 2026 Paul Kilar <pkilar@gmail.com> - 0.10.0-1
 - New cerberus-vsock-watch subpackage: a detective control for SIGN-1
