@@ -200,6 +200,32 @@ build-rpm.sh --eif.
     export GOARCH=arm64
 %endif
 export GOOS=linux
+# Fedora's Go macros set GOTOOLCHAIN=local so a distro build never downloads a
+# toolchain. That is the right default for packages built in Fedora's own
+# network-isolated buildsystem, but it is not how these packages are produced:
+# they are built in an ephemeral container by packaging/build-in-container.sh,
+# which already needs the network because the Go module dependencies are not
+# vendored. go.mod requires Go 1.27 and no supported distribution ships it yet
+# (Fedora stable, RHEL 9/10 and Amazon Linux 2023 are all on 1.26.7), so allow
+# the toolchain to be fetched.
+#
+# This is safe for what is shipped: CGO_ENABLED=0 below makes the binaries
+# statically linked, so the compiler version leaves no trace in the package --
+# rpm generates no library dependencies from them at all. The fetched toolchain
+# lives and dies inside the build container.
+#
+# The cost is that this spec can no longer be rebuilt in a network-isolated
+# builder such as mock or Koji. That was already true for the unvendored module
+# dependencies; this does not make it newly true, but it does mean vendoring
+# alone would not restore it.
+export GOTOOLCHAIN=auto
+# Amazon Linux 2023's golang package additionally sets GOSUMDB=off, and a
+# toolchain download is a module fetch that must be checksum-verified -- with the
+# sum database disabled Go refuses it outright ("checksum database disabled by
+# GOSUMDB=off"). Restore the upstream default. This strengthens the fetch rather
+# than weakening it: the alternative would be disabling verification, not
+# avoiding it.
+export GOSUMDB=sum.golang.org
 export CGO_ENABLED=0
 
 # Build the API binary.

@@ -4,6 +4,14 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export GOOS = linux
 export CGO_ENABLED = 0
+# debian/control deliberately declares no Go build-dependency, because go.mod's
+# floor is above any golang-go Debian ships -- so the builder supplies Go. Allow
+# the exact toolchain go.mod asks for to be fetched when the supplied one is
+# older: the official golang:* images pin GOTOOLCHAIN=local, which would
+# otherwise fail the build with "go.mod requires go >= 1.27.0". Matches the
+# GOTOOLCHAIN/GOSUMDB handling in packaging/rpm/cerberus.spec %build.
+export GOTOOLCHAIN = auto
+export GOSUMDB = sum.golang.org
 export GOFLAGS = -mod=readonly -trimpath
 # Confine the module cache and build cache to the build tree.
 export GOPATH = $(CURDIR)/_build/gopath
