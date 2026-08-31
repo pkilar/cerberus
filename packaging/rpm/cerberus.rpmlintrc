@@ -1,0 +1,36 @@
+# rpmlint filters for the Cerberus packages.
+#
+# Each entry states why the finding does not apply here. A filter without a
+# reason is indistinguishable from hiding a real bug, so anything added needs
+# one. Warnings are deliberately NOT filtered: `build-in-container.sh --lint`
+# gates on errors only, and the remaining warnings are worth continuing to see
+# (missing man pages, and a suggestion to build position-independent, which the
+# Arch packaging already does and the RPM does not).
+
+# The binaries are pure Go built with CGO_ENABLED=0, so they are static by
+# construction. That is the intended shape for a service that runs beside -- and
+# for the signer, inside -- a Nitro Enclave, not an accident of linking.
+addFilter(r"statically-linked-binary")
+
+# Domain vocabulary and product names absent from rpmlint's en_US dictionary.
+# All are spelled correctly for the things they name.
+addFilter(r"spelling-error.*\b(api|auditd|eBPF|tracepoint|webhook|md|decrypts|cssh|zsh|howto|plaintext|spec|enclave|enclaves|Casbin|SPNEGO|VSOCK|Nitro|KMS|keytab|noarch|systemd|sysusers|conffile|dbus)\b")
+
+# The service env files and the API config template are shipped 0640, not
+# world-readable, on purpose. systemd reads the EnvironmentFile as root and the
+# service account reads its config via the cerberus group; restricting the mode
+# is defense-in-depth, and the Debian and Arch packaging make the same choice.
+addFilter(r"non-readable.*/etc/(sysconfig|cerberus)/")
+
+# /etc/cerberus is 0750 root:cerberus and /var/log/cerberus 0750 cerberus:cerberus
+# for the same reason: the config directory holds the operator's config.yaml and
+# the optional LDAP bind password, and neither should be world-traversable.
+addFilter(r"non-standard-dir-perm.*(/etc/cerberus|/var/log/cerberus) 750")
+
+# rpmlint flags an explicit Requires on a library package because automatic
+# dependency generation normally finds it. That heuristic does not apply here:
+# ssh-cert-api is a static Go binary using the pure-Go gokrb5 client, so it links
+# nothing from krb5-libs and autodeps could never infer the dependency. It is
+# required for the CONFIGURATION that package owns -- /etc/krb5.conf and
+# /etc/krb5.conf.d -- which gokrb5 reads for realm and KDC settings.
+addFilter(r"explicit-lib-dependency krb5-libs")

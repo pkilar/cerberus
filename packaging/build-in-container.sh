@@ -92,7 +92,15 @@ rpm)
 	# rpmlint in its repositories at all. A distribution's tooling gap must not
 	# make the target unbuildable -- but it must not read as a clean lint
 	# either, which is what the LINT UNAVAILABLE notice below is for.
-	BOOTSTRAP='dnf install -y -q rpm-build make git "dnf-command(builddep)" && { dnf install -y -q rpmlint || echo "note: rpmlint unavailable"; }'
+	# rpmlint's TagsCheck spell-checks Summary and %description through enchant and
+	# raises DefaultLanguageNotFoundError when no en_US dictionary resolves, having
+	# checked nothing -- it installs fine and then crashes. Amazon Linux 2023 needs
+	# BOTH halves: hunspell-en-US for the dictionary, and enchant2 for a backend
+	# that can read it. Its default enchant is 1.6, whose only provider is
+	# libenchant_myspell.so, which does not look in /usr/share/hunspell. Installing
+	# the dictionary alone leaves the crash in place. Both are tolerated as missing,
+	# the same way rpmlint's own absence is.
+	BOOTSTRAP='dnf install -y -q rpm-build make git "dnf-command(builddep)" && { dnf install -y -q rpmlint || echo "note: rpmlint unavailable"; }; { dnf install -y -q hunspell-en-US enchant2 || dnf install -y -q hunspell-en || echo "note: en_US dictionary unavailable, rpmlint spell checks may fail"; }'
 	BUILDDEP='dnf builddep -y -q packaging/rpm/cerberus.spec'
 	BUILDCMD='./packaging/rpm/build-rpm.sh'
 	GLOB='rpmbuild/RPMS/*/*.rpm rpmbuild/SRPMS/*.rpm'
