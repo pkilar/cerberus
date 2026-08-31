@@ -26,6 +26,12 @@ Summary:        SSH Certificate Authority for AWS Nitro Enclaves
 License:        MIT
 URL:            https://github.com/pkilar/cerberus
 Source0:        %{name}-%{version}.tar.gz
+# sysusers.d fragments. These are not optional: %files entries carry
+# %%attr(...,cerberus,...) / %%attr(...,cerberus-audit,...), and rpm's dependency
+# generator turns those into Requires: user()/group(). Only a packaged sysusers.d
+# file emits the matching Provides -- see the comment in cerberus.sysusers.
+Source1:        cerberus.sysusers
+Source2:        cerberus-vsock-watch.sysusers
 
 BuildRequires:  golang >= 1.26
 BuildRequires:  systemd-rpm-macros
@@ -50,6 +56,7 @@ Summary:        Cerberus SSH Certificate API service
 Requires:       krb5-libs
 Requires(pre):  shadow-utils
 %{?systemd_requires}
+%{?sysusers_requires_compat}
 
 %description api
 The HTTPS API service for Cerberus. Runs on the EC2 host and provides
@@ -105,6 +112,7 @@ Requires:       audit-rules
 %endif
 Requires(pre):  shadow-utils
 %{?systemd_requires}
+%{?sysusers_requires_compat}
 
 %description vsock-watch
 Detects an AF_VSOCK connect() to the Cerberus enclave from any process other
@@ -236,6 +244,9 @@ install -D -m 0644 ssh-cert-api/configs/config-example.yaml \
 # ships a file into it.
 install -d -m 0750 %{buildroot}%{_sysconfdir}/cerberus
 
+install -D -m 0644 %{SOURCE1} %{buildroot}%{_sysusersdir}/cerberus.conf
+install -D -m 0644 %{SOURCE2} %{buildroot}%{_sysusersdir}/cerberus-vsock-watch.conf
+
 install -d -m 0750 %{buildroot}%{_localstatedir}/log/cerberus
 
 # --- cerberus-signer ---
@@ -293,6 +304,23 @@ install -D -m 0644 packaging/profile.d/cerberus-env.sh \
 # cerberus-api scriptlets
 # ---------------------------------------------------------------------------
 %pre api
+# Belt AND braces, because neither mechanism alone covers every supported target.
+#
+# The sysusers.d file (Source1) is what makes the package installable at all on
+# rpm >= 6: %%files carries %%attr(...,cerberus,...), so rpm generates
+# Requires: user(cerberus)/group(cerberus), and only a packaged sysusers.d emits
+# the matching Provides. Without it dnf and rpm both refuse ("nothing provides
+# user(cerberus)") -- confirmed on rpm 6.0.2.
+#
+# But shipping it is not sufficient. On RHEL 9 %%sysusers_create_compat expands to
+# nothing and rpm 4.16 has no native sysusers handling, so nothing creates the
+# account and every %%attr file lands root-owned ("warning: user cerberus does not
+# exist - using root") -- verified by installing on Rocky 9. On RHEL 8 the macro
+# is undefined entirely. So create the account explicitly as well.
+#
+# Both paths are idempotent: the getent guards make the useradd a no-op when
+# sysusers already ran. Never invoked from %%postun, so the account survives erase.
+%{?sysusers_create_compat:%sysusers_create_compat %{SOURCE1}}
 getent group cerberus >/dev/null || groupadd -r cerberus
 getent passwd cerberus >/dev/null || \
     useradd -r -g cerberus -d /etc/cerberus -s /sbin/nologin \
@@ -324,13 +352,17 @@ exit 0
 # cerberus-vsock-watch scriptlets
 # ---------------------------------------------------------------------------
 %pre vsock-watch
-# A DIFFERENT account than cerberus-api's own "cerberus" user (see %pre api
-# above): a compromise of the cerberus account alone must not also blind this
-# watcher. See docs/vsock-connect-detection.md §4.3.
+# A DIFFERENT account than cerberus-api's own "cerberus" user: a compromise of the
+# cerberus account alone must not also blind this watcher. See
+# docs/vsock-connect-detection.md §4.3. Home is "/" rather than /etc/cerberus for
+# the same reason -- that directory belongs to the other account.
+#
+# Ships a sysusers.d fragment (Source2) *and* creates the account explicitly, for
+# the reasons spelled out in %%pre api above: the shipped file is what satisfies
+# rpm >= 6's generated group(cerberus-audit) dependency, and the explicit creation
+# is what actually makes the account exist on RHEL 8/9.
+%{?sysusers_create_compat:%sysusers_create_compat %{SOURCE2}}
 getent group cerberus-audit >/dev/null || groupadd -r cerberus-audit
-# Home is `/`, not /etc/cerberus: that directory belongs to the cerberus
-# account, and two service accounts sharing a home undercuts the isolation
-# this separate account exists to provide. Neither daemon uses $HOME.
 getent passwd cerberus-audit >/dev/null || \
     useradd -r -g cerberus-audit -d / -s /sbin/nologin \
     -c "Cerberus VSOCK-watch detective control" cerberus-audit
@@ -355,6 +387,7 @@ exit 0
 %{_unitdir}/cerberus-api.service
 %config(noreplace) %attr(0640,root,cerberus) %{_sysconfdir}/sysconfig/cerberus-api
 %dir %attr(0750,root,cerberus) %{_sysconfdir}/cerberus
+%{_sysusersdir}/cerberus.conf
 %dir %{_datadir}/cerberus
 %{_datadir}/cerberus/config.yaml.example
 %dir %attr(0750,cerberus,cerberus) %{_localstatedir}/log/cerberus
@@ -380,6 +413,7 @@ exit 0
 %{_bindir}/cerberus-vsock-watch
 %{_unitdir}/cerberus-vsock-watch.service
 %config(noreplace) %attr(0640,root,cerberus-audit) %{_sysconfdir}/sysconfig/cerberus-vsock-watch
+%{_sysusersdir}/cerberus-vsock-watch.conf
 %config(noreplace) %{_sysconfdir}/audit/rules.d/61-cerberus-vsock.rules
 
 %files client

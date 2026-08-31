@@ -1,0 +1,19 @@
+# Cerberus system user for the API service. Installed to
+# /usr/lib/sysusers.d/cerberus.conf and applied by %sysusers_create_compat in
+# the spec's %pre.
+#
+# Shipping this file is not merely the modern idiom -- it is required. Several
+# %files entries carry %attr(...,cerberus,cerberus,...), and rpm's dependency
+# generator turns those into `Requires: user(cerberus)` and
+# `Requires: group(cerberus)`. A packaged sysusers.d file is the only thing that
+# emits the matching Provides, so a hand-rolled useradd in %pre leaves the
+# package uninstallable: dnf and rpm alike refuse with "nothing provides
+# user(cerberus)". Confirmed on rpm 6.0.2; older rpm (4.16, 4.20) does not
+# generate the dependency, which is why this went unnoticed.
+#
+# The 'u' type creates both the group and the user. The home directory
+# (/etc/cerberus) is shipped by the package. Shell is /sbin/nologin here --
+# Debian uses /usr/sbin/nologin and Arch /usr/bin/nologin, which is why this
+# fragment is per-format rather than shared.
+#Type Name     ID GECOS             Home          Shell
+u     cerberus -  "Cerberus SSH CA" /etc/cerberus /sbin/nologin
