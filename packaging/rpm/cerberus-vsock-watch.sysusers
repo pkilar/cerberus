@@ -1,0 +1,14 @@
+# Cerberus system user for the vsock-watch detective control. Installed to
+# /usr/lib/sysusers.d/cerberus-vsock-watch.conf and applied by
+# %sysusers_create_compat in the spec's %pre. See cerberus.sysusers for why
+# shipping this file is required rather than optional.
+#
+# A DIFFERENT account than cerberus-api's "cerberus" user: a compromise of the
+# cerberus account alone must not also blind this watcher. See
+# docs/vsock-connect-detection.md §4.3.
+#
+# Home is "-" (sysusers.d's no-home default) rather than /etc/cerberus: that
+# directory belongs to the cerberus account, and two service accounts sharing a
+# home undercuts the very isolation this account exists for.
+#Type Name           ID GECOS                                    Home Shell
+u     cerberus-audit -  "Cerberus VSOCK-watch detective control" -    /sbin/nologin

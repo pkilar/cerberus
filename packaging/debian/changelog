@@ -16,6 +16,8 @@ cerberus (0.10.5) unstable; urgency=medium
     was previously created only as a side effect of installing the template
     into it. That is still where the operator's config.yaml belongs.
 
+ -- Paul Kilar <pkilar@gmail.com>  Mon, 17 Aug 2026 18:00:00 -0400
+
 cerberus (0.10.4) unstable; urgency=medium
 
   * Reduce cerberus-vsock-watch alert noise on a cerberus-api.service
