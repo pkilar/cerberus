@@ -434,6 +434,22 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Mon Aug 31 2026 Paul Kilar <pkilar@gmail.com> - 0.10.6-1
+- Ship sysusers.d fragments so the packages install on rpm >= 6. Six %%files
+  entries carry %%attr(...,cerberus,...) / %%attr(...,cerberus-audit,...), which
+  rpm 6 turns into Requires: user()/group(); only a packaged sysusers.d file
+  emits the matching Provides, so cerberus-api and cerberus-vsock-watch were
+  uninstallable on current Fedora ("nothing provides user(cerberus)"). Older rpm
+  (4.16, 4.20) does not generate the dependency, which is why this went
+  unnoticed. The explicit account creation in %%pre is retained alongside the
+  shipped file: on RHEL 9 %%sysusers_create_compat expands to nothing and rpm has
+  no native sysusers handling, so the file alone would leave the account
+  uncreated and every %%attr path root-owned.
+- Committed Version/pkgver fields are now obvious placeholders rather than stale
+  real-looking versions, so a bare rpmbuild fails visibly rather than carrying an
+  unexpanded macro into %%setup.
+- Repair the malformed 0.10.5 entry in the Debian changelog (missing trailer).
+- Dependency updates: aws-sdk group bumped in ssh-cert-api and ssh-cert-signer.
 * Mon Aug 17 2026 Paul Kilar <pkilar@gmail.com> - 0.10.5-1
 - Ship the config template as %{_datadir}/cerberus/config.yaml.example instead
   of %%config(noreplace) %{_sysconfdir}/cerberus/config.yaml.example. Nothing

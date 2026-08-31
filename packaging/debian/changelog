@@ -1,3 +1,24 @@
+cerberus (0.10.6) unstable; urgency=medium
+
+  * Repair the 0.10.5 changelog entry, which was missing its trailer line. dpkg
+    parsed it with no Date or Maintainer field and warned, and lintian reported
+    syntax-error-in-debian-changelog against all four binary packages, each of
+    which ships this file as changelog.gz.
+  * RPM-side fix carried in the same release for version parity: the RPM
+    packages were uninstallable on rpm >= 6 (current Fedora) because %files
+    entries naming the cerberus/cerberus-audit accounts generate
+    Requires: user()/group(), and only a packaged sysusers.d file provides them.
+    The RPM now ships sysusers.d fragments as Debian already did. No change to
+    the Debian packages themselves.
+  * Committed version fields in the RPM spec and the Arch PKGBUILD are now
+    obvious placeholders rather than stale real-looking versions, so a build run
+    without the wrapper scripts fails visibly instead of producing a package
+    labelled with a previous release.
+  * Dependency updates: aws-sdk group bumped in ssh-cert-api and
+    ssh-cert-signer.
+
+ -- Paul Kilar <pkilar@gmail.com>  Mon, 31 Aug 2026 12:00:00 -0400
+
 cerberus (0.10.5) unstable; urgency=medium
 
   * Ship the config template at /usr/share/cerberus/config.yaml.example
