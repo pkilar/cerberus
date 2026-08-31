@@ -61,7 +61,7 @@ jobs:
           # Must be built with Go >= our toolchain directive, otherwise
           # the action errors with "Go language version ... lower than
           # the targeted Go version".
-          version: v2.12.2
+          version: v2.13.2
           working-directory: ${{ matrix.module }}
 
   vuln:
