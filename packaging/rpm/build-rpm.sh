@@ -109,6 +109,15 @@ tar -czf "${RPMBUILD_DIR}/SOURCES/${TARBALL}.tar.gz" \
 # Copy spec file.
 cp "${SCRIPT_DIR}/cerberus.spec" "${RPMBUILD_DIR}/SPECS/"
 
+# Every SourceN other than Source0 (the tarball built above) has to be present in
+# SOURCES/ as its own file, or %install fails with "cannot stat". Derive the list
+# from the spec rather than naming files here, so adding a Source3 later does not
+# silently break the build.
+while read -r src; do
+    [[ -n "${src}" ]] || continue
+    cp "${SCRIPT_DIR}/${src}" "${RPMBUILD_DIR}/SOURCES/"
+done < <(awk '/^Source[1-9][0-9]*:/ { print $2 }' "${SCRIPT_DIR}/cerberus.spec")
+
 # Build the RPM.
 if [[ "${MOCK}" -eq 1 ]]; then
     echo "==> Building SRPM for mock..."
