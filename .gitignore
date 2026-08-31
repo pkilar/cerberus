@@ -42,6 +42,9 @@ ssh-cert-signer/pcr-manifest-*.json
 # Debian build tree and built packages (produced by packaging/debian/build-deb.sh).
 # The optional cerberus-signer-eif package carries CA key material — never commit.
 /debbuild/
+
+# Multi-distribution package output (packaging/build-in-container.sh --out dist)
+/dist/
 *.deb
 *.ddeb
 *.buildinfo

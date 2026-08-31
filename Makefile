@@ -179,4 +179,29 @@ run-enclave-debug:
 		--debug-mode \
 		--attach-console
 
-.PHONY: all build stress test test-coverage upgrade-deps upgrade-deps-patch clean eif eif-amd64 eif-arm64 run-api run-enclave-debug
+# --- Multi-distribution package builds -------------------------------------
+# Build packages for a distribution you are not running, in a clean container.
+# `make package-targets` lists what is available; packaging/targets.tsv is the
+# manifest. The container supplies the distribution, this machine supplies the
+# architecture -- nothing is cross-compiled or emulated.
+#
+# Builds COMMITTED state (git archive HEAD), so commit before running.
+
+package-targets:
+	@./packaging/targets.sh list
+
+# make package-fedora / package-rhel9 / package-debian-bookworm / ...
+package-%:
+	./packaging/build-in-container.sh $*
+
+# make lint-package-fedora / ...  builds and lints in one pass
+lint-package-%:
+	./packaging/build-in-container.sh $* --lint
+
+# Every target in the manifest, sequentially. Stops at the first failure.
+packages-all:
+	@for t in $$(./packaging/targets.sh list); do \
+		echo "==> $$t"; ./packaging/build-in-container.sh $$t --lint || exit 1; \
+	done
+
+.PHONY: all build stress test test-coverage upgrade-deps upgrade-deps-patch clean eif eif-amd64 eif-arm64 run-api run-enclave-debug package-targets packages-all
