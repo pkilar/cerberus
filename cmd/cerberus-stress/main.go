@@ -12,6 +12,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -19,7 +20,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -244,7 +245,7 @@ func (s *stats) printFinal() {
 		for m, n := range s.errors {
 			ranked = append(ranked, kv{m, n})
 		}
-		sort.Slice(ranked, func(i, j int) bool { return ranked[i].count > ranked[j].count })
+		slices.SortFunc(ranked, func(a, b kv) int { return cmp.Compare(b.count, a.count) })
 		for i, e := range ranked {
 			if i >= 10 {
 				fmt.Printf("  ...and %d more error types\n", len(ranked)-10)

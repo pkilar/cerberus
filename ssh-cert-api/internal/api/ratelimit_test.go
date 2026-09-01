@@ -74,19 +74,17 @@ func TestPrincipalLimiter_Concurrent(t *testing.T) {
 		allowed[principalName(i)] = new(atomic.Int64)
 	}
 
-	for i := range goroutines {
+	for range goroutines {
 		for pIdx := range principals {
-			wg.Add(1)
-			go func(who string) {
-				defer wg.Done()
+			who := principalName(pIdx)
+			wg.Go(func() {
 				for range perGoroutine {
 					if p.allow(who) {
 						allowed[who].Add(1)
 					}
 				}
-			}(principalName(pIdx))
+			})
 		}
-		_ = i
 	}
 	wg.Wait()
 

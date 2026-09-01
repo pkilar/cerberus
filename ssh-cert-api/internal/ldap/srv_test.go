@@ -44,7 +44,7 @@ func TestRFC2782Order_WeightedWithinTier(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2)) // seeded -> reproducible
 	const N = 20000
 	firstA := 0
-	for i := 0; i < N; i++ {
+	for range N {
 		if rfc2782OrderWith(recs, r.IntN)[0].host == "a" {
 			firstA++
 		}
@@ -117,7 +117,7 @@ func TestRFC2782Order_CrossTier(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("want 4, got %+v", got)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got[i].host != "lo1" && got[i].host != "lo2" {
 			t.Fatalf("position %d should be a priority-0 target, got %+v", i, got)
 		}
