@@ -395,12 +395,10 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 	errs := make(chan error, N)
 
 	for i := range N {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
 			conn, err := net.Dial("tcp", addr)
 			if err != nil {
-				errs <- fmt.Errorf("goroutine %d: dial: %w", idx, err)
+				errs <- fmt.Errorf("goroutine %d: dial: %w", i, err)
 				return
 			}
 			defer conn.Close()
@@ -409,13 +407,13 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 			req := messages.Request{
 				SignSshKey: &messages.EnclaveSigningRequest{
 					SSHKey:     pubStr,
-					KeyID:      fmt.Sprintf("concurrent-user-%d", idx),
+					KeyID:      fmt.Sprintf("concurrent-user-%d", i),
 					Principals: []string{"admin"},
 					Validity:   "1h",
 				},
 			}
 			if err := json.NewEncoder(conn).Encode(req); err != nil {
-				errs <- fmt.Errorf("goroutine %d: encode: %w", idx, err)
+				errs <- fmt.Errorf("goroutine %d: encode: %w", i, err)
 				return
 			}
 
@@ -424,23 +422,23 @@ func TestIntegration_ConcurrentSigning(t *testing.T) {
 			// short-read on any path with MTU-sensitive framing.
 			responseBytes, err := bufio.NewReader(conn).ReadBytes('\n')
 			if err != nil {
-				errs <- fmt.Errorf("goroutine %d: read: %w", idx, err)
+				errs <- fmt.Errorf("goroutine %d: read: %w", i, err)
 				return
 			}
 			var resp messages.Response
 			if err := json.Unmarshal(bytes.TrimSpace(responseBytes), &resp); err != nil {
-				errs <- fmt.Errorf("goroutine %d: unmarshal: %w", idx, err)
+				errs <- fmt.Errorf("goroutine %d: unmarshal: %w", i, err)
 				return
 			}
 			if resp.Error != nil {
-				errs <- fmt.Errorf("goroutine %d: enclave error: %s", idx, *resp.Error)
+				errs <- fmt.Errorf("goroutine %d: enclave error: %s", i, *resp.Error)
 				return
 			}
 			if resp.SignSshKey == nil || resp.SignSshKey.SignedKey == "" {
-				errs <- fmt.Errorf("goroutine %d: empty signed key", idx)
+				errs <- fmt.Errorf("goroutine %d: empty signed key", i)
 				return
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(errs)

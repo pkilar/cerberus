@@ -113,16 +113,15 @@ func parseProcMeminfo(data []byte) (messages.EnclaveMemoryStats, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		line := scanner.Text()
-		colon := strings.IndexByte(line, ':')
-		if colon < 0 {
-			continue
-		}
-		key := line[:colon]
-		dst, ok := wanted[key]
+		key, value, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
 		}
-		fields := strings.Fields(line[colon+1:])
+		dst, wantedKey := wanted[key]
+		if !wantedKey {
+			continue
+		}
+		fields := strings.Fields(value)
 		if len(fields) == 0 {
 			return messages.EnclaveMemoryStats{}, fmt.Errorf("%s has no value", key)
 		}

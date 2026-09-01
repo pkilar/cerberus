@@ -171,8 +171,7 @@ func TestAuditWatcher_Run_AlertsOnAnomalousConnect(t *testing.T) {
 		Shipper:      shipper,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = w.Run(ctx, nil) }()
 
 	// Give Run a moment to open the file at EOF before we append, so this
@@ -219,8 +218,7 @@ func TestAuditWatcher_Run_LineSplitAcrossPollTicks(t *testing.T) {
 		Shipper:      shipper,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
@@ -279,8 +277,7 @@ func TestAuditWatcher_Run_NoAlertForExpectedCaller(t *testing.T) {
 		Shipper:      shipper,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
@@ -320,8 +317,7 @@ func TestAuditWatcher_Run_BlocksOnAnomalousConnect(t *testing.T) {
 		Blocker:      blocker,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
@@ -367,8 +363,7 @@ func TestAuditWatcher_Run_DoesNotBlockOnIndeterminate(t *testing.T) {
 		Blocker:      blocker,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = w.Run(ctx, nil) }()
 	time.Sleep(30 * time.Millisecond)
 
@@ -432,8 +427,7 @@ func TestAuditWatcher_Run_CallsOnReadyAfterFileOpen(t *testing.T) {
 		Shipper:      &fakeShipper{},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ready := &readyCounter{}
 	go func() { _ = w.Run(ctx, ready.mark) }()
