@@ -53,6 +53,12 @@ ssh-cert-signer/pcr-manifest-*.json
 # Local configuration files
 # These often contain secrets or local paths and should not be committed.
 # A template or example file (e.g., config.example.yaml) should be committed instead.
+# ca_key.* needs the bare name too: `ssh-keygen -f ca_key` and a failed
+# `make encrypt-ca-key` (which preserves the plaintext rather than destroying an
+# un-backed-up key) both leave a plaintext `ca_key` with no extension, which the
+# glob above does not match. Without this line `git add -A` commits a CA private
+# key.
+ca_key
 ca_key.*
 config.yaml
 *.key

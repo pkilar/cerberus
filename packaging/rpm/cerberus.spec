@@ -176,13 +176,14 @@ Requires:       cerberus-signer = %{version}-%{release}
 
 %description signer-eif
 Prebuilt Nitro Enclave Image File for the Cerberus signer, installed at
-%{_datadir}/cerberus/ssh-cert-signer.eif. OPT-IN and per-deployment: the EIF
+%{_datadir}/cerberus/ssh-cert-signer.eif. CONDITIONAL and per-deployment: the EIF
 bakes in the KMS-encrypted CA private key and the PCR0-pinned CA public key, so
 this package carries CA key material and pins a deployment-specific PCR0. It is
 per-architecture and must be distributed only over an operator-controlled
 channel, never a shared or public repository. Built only when the RPM build is
-invoked with --define "eif_file <path>" (note the space, not '='), normally via
-build-rpm.sh --eif.
+invoked with --define "eif_file <path>" (note the space, not '='). build-rpm.sh
+sets that automatically when the tree holds ca_key.enc + ca_key.pub, or from an
+explicit --eif; --no-eif suppresses it.
 %endif
 
 # ---------------------------------------------------------------------------

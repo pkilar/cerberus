@@ -418,11 +418,11 @@ Cerberus provides RPM packaging for Amazon Linux 2023, RHEL 9+, and Fedora. The 
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `cerberus-api`        | API binary, systemd unit, sysconfig, example config, `cerberus` user/group                                                            |
 | `cerberus-signer`     | Signer binary, Dockerfile, systemd unit, sysconfig, enclave lifecycle script                                                          |
-| `cerberus-signer-eif` | **Optional, opt-in.** A prebuilt Enclave Image File. Built only with `--eif` (see below); carries CA key material — per-deployment, per-arch |
+| `cerberus-signer-eif` | **Conditional.** A prebuilt Enclave Image File. Built automatically when the tree holds CA key material (see below); carries CA key material — per-deployment, per-arch |
 
 > By default the `cerberus-signer` RPM does **not** ship the Enclave Image File. The EIF bakes in the KMS-encrypted CA key (the `Dockerfile` `COPY`s `ca_key.enc` into the image) and pins a deployment-specific PCR0, so it is a per-deployment artifact rather than a redistributable one. The default flow is to build it with `make eif-<arch>` and drop it into `/usr/share/cerberus/` after installing the RPM (see [Post-Install Setup](#post-install-setup-rpm), step 4).
 >
-> If you prefer to ship a deployment as a single artifact, build the **optional** `cerberus-signer-eif` package (`build-rpm.sh --eif <path>`, below). It bundles one prebuilt EIF at `/usr/share/cerberus/ssh-cert-signer.eif`. Because that EIF carries the KMS-encrypted CA private key **and** the PCR0-pinned public key, this package is **per-deployment and per-architecture** — treat it as sensitive and distribute it **only over an operator-controlled channel, never a shared or public repository** (see the [Threat Model](THREAT-MODEL.md) note on the RPM channel).
+> If you prefer to ship a deployment as a single artifact, the `cerberus-signer-eif` package does that. It is built **automatically** when the working tree holds the CA key material the EIF is made from — `ssh-cert-signer/ca_key.enc` and `ca_key.pub` — so a deployment tree produces a complete deployment. A tree without them (a CI or upstream build) is unaffected and produces exactly the packages it always did; `--no-eif` opts out, and `--eif <path>` names an EIF explicitly. It bundles one prebuilt EIF at `/usr/share/cerberus/ssh-cert-signer.eif`. Because that EIF carries the KMS-encrypted CA private key **and** the PCR0-pinned public key, this package is **per-deployment and per-architecture** — treat it as sensitive and distribute it **only over an operator-controlled channel, never a shared or public repository** (see the [Threat Model](THREAT-MODEL.md) note on the RPM channel).
 
 ### Building RPMs
 
@@ -445,16 +445,21 @@ sudo dnf install rpm-build rpmdevtools golang make rsync
 ./packaging/rpm/build-rpm.sh --mock
 ```
 
-**Also bundle the EIF (optional `cerberus-signer-eif` package):**
+**Bundling the EIF (`cerberus-signer-eif`):**
+
+On a deployment tree this needs no flag. `build-rpm.sh` looks for `ssh-cert-signer/ca_key.enc` and `ca_key.pub`; when both are present it builds the EIF package too, using `ssh-cert-signer/ssh-cert-signer-<arch>.eif` for the host architecture — building it first via `make -C ssh-cert-signer eif-<arch>` if that file is missing and the host has `nitro-cli` and `docker`. A host without enclave tooling says so and builds the ordinary packages without the EIF.
 
 ```bash
-# Build the EIF first (see "Build Enclave Image Files (EIF)"), then:
-./packaging/rpm/build-rpm.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif
+./packaging/rpm/build-rpm.sh                                          # EIF package if CA material is present
+./packaging/rpm/build-rpm.sh --no-eif                                 # never build it
+./packaging/rpm/build-rpm.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # name one explicitly
 ```
 
-`--eif` is incompatible with `--mock` (the per-deployment EIF must be built on a trusted host, not a clean chroot), and the EIF's architecture must match the RPM build architecture. The resulting `cerberus-signer-eif` RPM carries CA key material — see the note under [RPM Packaging](#rpm-packaging).
+The build **refuses** if `ca_key.enc` turns out to be a plaintext private key rather than KMS ciphertext — the state a failed `make encrypt-ca-key` leaves behind, since it preserves the plaintext rather than destroying an un-backed-up key. Packaging that would publish an unencrypted CA key inside the EIF.
 
-Output RPMs are placed in `rpmbuild/RPMS/<arch>/`.
+`--eif` is incompatible with `--mock` (the per-deployment EIF must be built on a trusted host, not a clean chroot), and detection is skipped under `--mock` for the same reason. The EIF's architecture must match the RPM build architecture. The resulting `cerberus-signer-eif` RPM carries CA key material — see the note under [RPM Packaging](#rpm-packaging).
+
+Output RPMs are placed in `rpmbuild/RPMS/<arch>/`. When an EIF is bundled, the **PCR manifest** (`pcr-manifest-<arch>.json`) is copied there too, so the measurements travel with the artifacts they describe — a PCR-conditioned KMS key policy has to be updated to the new PCR0 **before** the new EIF is deployed (see [KMS attestation policy](kms-attestation-policy.md)).
 
 ### Installing
 
@@ -605,27 +610,27 @@ echo "1.0.0" > VERSION
 
 ### Arch Linux packages
 
-The repo also ships Arch Linux packaging in [`packaging/arch/`](../packaging/arch/) — a `makepkg` split package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (noarch), and the opt-in `cerberus-signer-eif`. Build it as a **regular user** (`makepkg` refuses to run as root), with `base-devel` and `go` installed:
+The repo also ships Arch Linux packaging in [`packaging/arch/`](../packaging/arch/) — a `makepkg` split package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (noarch), and the conditional `cerberus-signer-eif`. Build it as a **regular user** (`makepkg` refuses to run as root), with `base-devel` and `go` installed:
 
 ```bash
 ./packaging/arch/build-arch.sh                                   # → ./archbuild/*.pkg.tar.zst
-./packaging/arch/build-arch.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # opt-in EIF package
+./packaging/arch/build-arch.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # or let CA material auto-detect
 sudo pacman -U ./archbuild/cerberus-client-*.pkg.tar.zst
 ```
 
-`build-arch.sh` stages the same source-tarball snapshot as `build-rpm.sh` and pins `pkgver` from `VERSION`. The Arch packages follow Arch/systemd conventions: service env files live in `/etc/conf.d/` (not `/etc/sysconfig/`), the enclave wrapper is at `/usr/lib/cerberus/run-enclave.sh`, and the `cerberus` user plus `/var/log/cerberus` are created declaratively via `sysusers.d`/`tmpfiles.d` (pacman hooks) rather than a scriptlet. The opt-in `cerberus-signer-eif` package carries per-deployment CA key material — the same distribution caveat as the RPM applies. See [`packaging/arch/README.md`](../packaging/arch/README.md).
+`build-arch.sh` stages the same source-tarball snapshot as `build-rpm.sh` and pins `pkgver` from `VERSION`. The Arch packages follow Arch/systemd conventions: service env files live in `/etc/conf.d/` (not `/etc/sysconfig/`), the enclave wrapper is at `/usr/lib/cerberus/run-enclave.sh`, and the `cerberus` user plus `/var/log/cerberus` are created declaratively via `sysusers.d`/`tmpfiles.d` (pacman hooks) rather than a scriptlet. The `cerberus-signer-eif` package carries per-deployment CA key material — the same distribution caveat as the RPM applies. See [`packaging/arch/README.md`](../packaging/arch/README.md).
 
 ### Debian / Ubuntu packages
 
-The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: all`), and the opt-in `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
+The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: all`), and the conditional `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
 
 ```bash
 ./packaging/debian/build-deb.sh                                    # → ./debbuild/*.deb
-./packaging/debian/build-deb.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # opt-in EIF package
+./packaging/debian/build-deb.sh --eif ssh-cert-signer/ssh-cert-signer-amd64.eif   # or let CA material auto-detect
 sudo apt install ./debbuild/cerberus-client_*.deb
 ```
 
-`build-deb.sh` stages the same source snapshot as `build-rpm.sh` and pins the `debian/changelog` version from `VERSION` (`3.0 (native)` format, so no orig tarball). The Debian packages follow Debian/systemd conventions: service env files live in `/etc/default/` (not `/etc/sysconfig/`), the enclave wrapper is `/usr/lib/cerberus/run-enclave.sh`, files under `/etc` are dpkg conffiles, and the `cerberus` user plus `/var/log/cerberus` are created via `sysusers.d`/`tmpfiles.d` (needs debhelper ≥ 13.6, i.e. Debian 12 / Ubuntu 22.04+). Units are installed **without** being enabled/started (they need site config and a Nitro host). The opt-in `cerberus-signer-eif` package carries per-deployment CA key material — same distribution caveat as the RPM. See [`packaging/debian/README.md`](../packaging/debian/README.md).
+`build-deb.sh` stages the same source snapshot as `build-rpm.sh` and pins the `debian/changelog` version from `VERSION` (`3.0 (native)` format, so no orig tarball). The Debian packages follow Debian/systemd conventions: service env files live in `/etc/default/` (not `/etc/sysconfig/`), the enclave wrapper is `/usr/lib/cerberus/run-enclave.sh`, files under `/etc` are dpkg conffiles, and the `cerberus` user plus `/var/log/cerberus` are created via `sysusers.d`/`tmpfiles.d` (needs debhelper ≥ 13.6, i.e. Debian 12 / Ubuntu 22.04+). Units are installed **without** being enabled/started (they need site config and a Nitro host). The `cerberus-signer-eif` package carries per-deployment CA key material — same distribution caveat as the RPM. See [`packaging/debian/README.md`](../packaging/debian/README.md).
 
 ---
 
@@ -1092,7 +1097,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - Use **attestation-based KMS policies** (PCR conditions) so only the specific enclave image can decrypt the key.
 - **CRITICAL — KMS key policy requirement:** Because the host now holds `ca_key.enc` and calls `kms:Decrypt` itself, the KMS key policy **must** require a `kms:RecipientAttestation:ImageSha384` condition (PCR0) on every `Decrypt` action for the instance role. The policy must **not** grant the instance role any unconditioned `kms:Decrypt` — a compromised host that can call a plaintext Decrypt would read the CA private key. The calling principal (the instance IAM role) is unchanged from the previous design. See `docs/kms-attestation-policy.md` for the recommended policy template.
 - **Protected against accidental loss/regeneration.** The public CA key must be trusted by every `sshd` (`TrustedUserCAKeys`), so regenerating the CA is expensive — do it only on suspected private-key compromise. The signer `Makefile` enforces this: `make encrypt-ca-key` **refuses** to overwrite an existing `ca_key`/`ca_key.pub`/`ca_key.enc`, and `make clean` never deletes them. Deliberate rotation requires an explicit `make -C ssh-cert-signer clean-ca-key` first (see [Rotating the CA Key](#rotating-the-ca-key)).
-- **The optional `cerberus-signer-eif` RPM carries CA key material.** If you build it (`build-rpm.sh --eif`), that package embeds the KMS-encrypted CA key and the PCR0-pinned public key. It is per-deployment and per-architecture — distribute it only over an operator-controlled channel, never a shared or public repository.
+- **The `cerberus-signer-eif` RPM carries CA key material.** It is built automatically on a tree holding `ca_key.enc` + `ca_key.pub` (or explicitly with `build-rpm.sh --eif`; `--no-eif` opts out), and embeds the KMS-encrypted CA key and the PCR0-pinned public key. It is per-deployment and per-architecture — distribute it only over an operator-controlled channel, never a shared or public repository.
 
 ### Network Security
 

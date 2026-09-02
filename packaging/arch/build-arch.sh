@@ -3,8 +3,14 @@
 #
 # Usage:
 #   ./packaging/arch/build-arch.sh                      # build from current tree
-#   ./packaging/arch/build-arch.sh --eif <path-to-eif>  # ALSO build the OPT-IN
-#                                                       # cerberus-signer-eif package
+#   ./packaging/arch/build-arch.sh --eif <path-to-eif>  # bundle THIS EIF
+#   ./packaging/arch/build-arch.sh --no-eif             # never build the EIF package
+#
+# The cerberus-signer-eif package is produced automatically when the working
+# tree holds CA key material -- ssh-cert-signer/ca_key.enc and ca_key.pub, the
+# two files the EIF is built from. A tree without them (CI, upstream) is
+# unaffected. --eif names an EIF explicitly and skips detection; --no-eif opts
+# out. See packaging/eif-detect.sh.
 #
 # This is the supported entry point (analogous to build-rpm.sh): it stages a
 # source tarball from the working tree, injects the version from VERSION into
@@ -22,8 +28,11 @@ set -euo pipefail
 
 # --- Parse arguments -------------------------------------------------------
 EIF_FILE=""
+EIF_PCR_MANIFEST=""
+NO_EIF=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --no-eif) NO_EIF=1; shift ;;
         --eif)
             [[ $# -ge 2 ]] || { echo "ERROR: --eif requires a path argument" >&2; exit 2; }
             EIF_FILE="$2"; shift 2 ;;
@@ -31,19 +40,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$0"; exit 0 ;;
         *)
             echo "Unknown argument: $1" >&2
-            echo "Usage: $0 [--eif <path-to-eif>]" >&2
+            echo "Usage: $0 [--eif <path-to-eif>] [--no-eif]" >&2
             exit 2 ;;
     esac
 done
-
-if [[ -n "${EIF_FILE}" ]]; then
-    if [[ ! -f "${EIF_FILE}" ]]; then
-        echo "ERROR: EIF file not found: ${EIF_FILE}" >&2
-        exit 2
-    fi
-    # Absolutize: package_cerberus-signer-eif reads this path directly.
-    EIF_FILE="$(cd "$(dirname "${EIF_FILE}")" && pwd)/$(basename "${EIF_FILE}")"
-fi
 
 if [[ "$(id -u)" -eq 0 ]]; then
     echo "ERROR: makepkg refuses to run as root. Run this as a regular user." >&2
@@ -55,6 +55,23 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION")"
 PKG_BASE="cerberus"
 TARBALL="${PKG_BASE}-${VERSION}"
+
+# shellcheck source=../eif-detect.sh
+. "${PROJECT_ROOT}/packaging/eif-detect.sh"
+
+# An explicit --eif wins; otherwise let the CA key material decide.
+if [[ -z "${EIF_FILE}" && "${NO_EIF}" -eq 0 ]]; then
+    cerberus_eif_autodetect "${PROJECT_ROOT}" || exit 2
+fi
+
+if [[ -n "${EIF_FILE}" ]]; then
+    if [[ ! -f "${EIF_FILE}" ]]; then
+        echo "ERROR: EIF file not found: ${EIF_FILE}" >&2
+        exit 2
+    fi
+    # Absolutize: package_cerberus-signer-eif reads this path directly.
+    EIF_FILE="$(cd "$(dirname "${EIF_FILE}")" && pwd)/$(basename "${EIF_FILE}")"
+fi
 
 echo "==> Building ${PKG_BASE} ${VERSION} Arch package"
 
@@ -95,16 +112,18 @@ sed -i "s/^pkgver=.*/pkgver=${VERSION}/" "${ARCHBUILD_DIR}/PKGBUILD"
 
 echo "==> Running makepkg..."
 if [[ -n "${EIF_FILE}" ]]; then
-    echo "    Bundling EIF into the opt-in cerberus-signer-eif package: ${EIF_FILE}"
-    echo "    WARNING: this package carries the KMS-encrypted CA key + PCR0-pinned"
-    echo "             public key. It is per-deployment; publish only to an"
-    echo "             operator-controlled channel."
+    echo "    Bundling EIF into the cerberus-signer-eif package: ${EIF_FILE}"
+    cerberus_eif_warn
 fi
 (
     cd "${ARCHBUILD_DIR}"
     CERBERUS_EIF_FILE="${EIF_FILE}" makepkg --force --noconfirm --clean
 )
 
+# Keep the PCR measurements with the packages they describe.
+cerberus_save_pcr_manifest "${EIF_PCR_MANIFEST}" "${ARCHBUILD_DIR}"
+
 echo ""
 echo "==> Build complete. Packages:"
 find "${ARCHBUILD_DIR}" -maxdepth 1 -name '*.pkg.tar.*' 2>/dev/null | sort
+find "${ARCHBUILD_DIR}" -maxdepth 1 -name 'pcr-manifest-*.json' 2>/dev/null | sort
