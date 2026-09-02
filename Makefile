@@ -126,12 +126,16 @@ clean:
 	@echo "Cleaning integration test artifacts..."
 	rm -f integration-coverage.out integration-coverage.html
 
-# Build the enclave image files for both architectures
+# Build the Enclave Image File for THIS host's architecture. An EIF can only be
+# built on hardware of the architecture it targets -- nitro-cli assembles it
+# around blobs that exist only for the host arch -- so this no longer attempts
+# both and fails on the foreign half.
 eif:
-	@echo "Building Enclave Image Files for both architectures..."
+	@echo "Building the Enclave Image File for this host's architecture..."
 	$(MAKE) -C ssh-cert-signer eif
 
-# Build EIF for specific architectures
+# Force a specific architecture. Off-native these refuse with an explanation
+# rather than failing inside nitro-cli.
 eif-amd64:
 	@echo "Building AMD64 Enclave Image File..."
 	$(MAKE) -C ssh-cert-signer eif-amd64
