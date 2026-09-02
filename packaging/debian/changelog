@@ -1,3 +1,57 @@
+cerberus (0.11.0) unstable; urgency=medium
+
+  Packaging is the theme of this release: the container build layer, automatic
+  EIF packaging, and two repairs to build entry points that were broken.
+
+  * build-rpm.sh was BROKEN on 0.10.6 and is repaired. 0.10.6 added Source1 and
+    Source2 (the sysusers.d fragments) to the spec but the script never staged
+    them into SOURCES/, so rpmbuild failed with "cannot stat". The script now
+    derives the list from the spec itself, so adding a Source3 later cannot
+    silently break it again.
+  * New multi-distro container build layer: packaging/build-in-container.sh
+    builds a target's packages in a clean container and optionally lints them,
+    driven by packaging/targets.tsv (fedora, rhel9, rhel10, amazonlinux2023,
+    debian-bookworm, arch). The container supplies the distribution and the host
+    supplies the architecture -- nothing is emulated or cross-compiled, which is
+    what keeps dependency generation correct. Exposed as make package-<target>,
+    make lint-package-<target> and make packages-all.
+  * The cerberus-signer-eif package is now built automatically when the working
+    tree holds the CA key material the EIF is made from (ssh-cert-signer/
+    ca_key.enc and ca_key.pub), rather than only when --eif was passed. A tree
+    without them -- CI, upstream, a clean checkout -- is unaffected and builds
+    exactly the packages it always did. --no-eif opts out; --eif still names an
+    EIF explicitly. Detection is shared by all three packagings via
+    packaging/eif-detect.sh so it cannot drift between them.
+  * The build now REFUSES a ca_key.enc that is really a plaintext private key.
+    make encrypt-ca-key preserves the plaintext when the KMS call fails, so a
+    tree can hold one, and nothing downstream re-checked -- it would have been
+    baked into the EIF and published inside the package.
+  * The PCR manifest (pcr-manifest-<arch>.json) is saved alongside the built
+    packages, and collected into dist/<target>/<arch>/ by the container build
+    driver. A PCR-conditioned KMS key policy must be updated to the new PCR0
+    before the new EIF is deployed.
+  * make eif builds the EIF for the host architecture instead of attempting
+    both. An EIF can only be built on hardware of the architecture it targets,
+    so the previous eif-amd64 + eif-arm64 default always produced one image and
+    one error; off-native targets now refuse with an explanation instead of
+    failing inside nitro-cli. The enclave binary is no longer cross-compiled for
+    the architecture this host cannot package (make build-all still does both).
+  * .gitignore now covers the bare plaintext ca_key, not just ca_key.*, which
+    ssh-keygen -f ca_key and a failed encrypt-ca-key both leave behind.
+  * Built with Go 1.27. No distro ships it yet, so the RPM and Debian recipes
+    set GOTOOLCHAIN=auto to fetch it, overriding the GOTOOLCHAIN=local baked
+    into the official golang images. The binaries remain statically linked with
+    no new library dependencies.
+  * Dependency refresh across all three modules: AWS SDK v2 (config 1.32.40 ->
+    1.33.1, KMS 1.56.0 -> 1.57.1 plus the indirect set), golang.org/x/net
+    0.57.0 -> 0.58.0, x/sync 0.21.0 -> 0.22.0, protobuf 1.36.11 -> 1.36.12,
+    prometheus client_model/common/procfs, and fxamacker/cbor 2.9.2 -> 2.9.3 in
+    the signer's CMS envelope parser. govulncheck reports no vulnerabilities.
+  * Documentation: the RPM supported-distribution claim no longer lists RHEL 8,
+    which is EOL. Supported targets are Amazon Linux 2023, Fedora and RHEL 9+.
+
+ -- Paul Kilar <pkilar@gmail.com>  Wed, 02 Sep 2026 13:58:18 -0400
+
 cerberus (0.10.6) unstable; urgency=medium
 
   * Repair the 0.10.5 changelog entry, which was missing its trailer line. dpkg

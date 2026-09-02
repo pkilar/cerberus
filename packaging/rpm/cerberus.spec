@@ -465,6 +465,62 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Wed Sep 02 2026 Paul Kilar <pkilar@gmail.com> - 0.11.0-1
+- build-rpm.sh was BROKEN in 0.10.6 and is repaired. 0.10.6 added Source1 and
+  Source2 (the sysusers.d fragments) to the spec, but build-rpm.sh never staged
+  them into SOURCES/, so rpmbuild failed with "cannot stat". The script now
+  derives the SourceN list from the spec itself, so adding a Source3 later cannot
+  silently break the build again.
+- New multi-distro container build layer: packaging/build-in-container.sh builds
+  a target's packages in a clean container and optionally lints them, driven by
+  packaging/targets.tsv (fedora, rhel9, rhel10, amazonlinux2023, debian-bookworm,
+  arch). The container supplies the DISTRIBUTION and the host supplies the
+  ARCHITECTURE -- nothing is emulated or cross-compiled, which is what keeps
+  dependency generation correct. Exposed as make package-<target>,
+  make lint-package-<target> and make packages-all.
+- cerberus-signer-eif is now built automatically when the working tree holds the
+  CA key material the EIF is made from (ssh-cert-signer/ca_key.enc and
+  ca_key.pub) rather than only when --eif was passed. A tree without them (CI,
+  upstream, a clean checkout) is unaffected. --no-eif opts out; --eif still names
+  one explicitly. Detection is shared across the RPM, Debian and Arch packagings
+  via packaging/eif-detect.sh so it cannot drift between them.
+- The build REFUSES a ca_key.enc that is really a plaintext private key. `make
+  encrypt-ca-key` deliberately preserves the plaintext when the KMS call fails,
+  so a tree can hold one, and nothing downstream re-checked it: the signer
+  Makefile only tested that it was non-empty and the Dockerfile COPYs whatever is
+  there, so an unencrypted CA key would have been baked into the EIF and
+  published inside the package.
+- The PCR manifest (pcr-manifest-<arch>.json) is saved next to the built packages
+  in rpmbuild/RPMS/, and collected into dist/<target>/<arch>/ by
+  build-in-container.sh. A PCR-conditioned KMS key policy has to be updated to
+  the new PCR0 BEFORE the new EIF is deployed.
+- rpmlint filters, each with a stated justification, so the lint gate is usable:
+  statically-linked-binary (pure Go, CGO_ENABLED=0), domain vocabulary spelling,
+  the deliberate 0640 env files and 0750 config/log directories, the explicit
+  krb5-libs dependency, and for cerberus-signer-eif the no-binary finding (the
+  package ships an EIF and the executable lives inside the image, where rpmlint
+  cannot see it). The no-binary filter is scoped to that subpackage so it cannot
+  hide a genuinely missing binary elsewhere.
+- `make eif` builds the EIF for the host architecture instead of attempting both.
+  nitro-cli assembles the image around blobs that exist only for the host arch,
+  so the previous eif-amd64 + eif-arm64 default always produced one image and one
+  error; off-native targets now refuse with an explanation. The enclave binary is
+  no longer cross-compiled for the architecture this host cannot package
+  (build-all still does both).
+- .gitignore now covers the bare plaintext ca_key, not just ca_key.*, which
+  `ssh-keygen -f ca_key` and a failed encrypt-ca-key both leave behind.
+- Built with Go 1.27. No distribution ships it yet, so the build sets
+  GOTOOLCHAIN=auto to fetch it, overriding the GOTOOLCHAIN=local baked into the
+  official golang images. Binaries stay statically linked with no new library
+  dependencies, so the packaged artifacts are unchanged in shape.
+- Dependency refresh across all three modules: AWS SDK v2 (config 1.32.40 ->
+  1.33.1, KMS 1.56.0 -> 1.57.1, plus the indirect set), golang.org/x/net 0.57.0
+  -> 0.58.0, x/sync 0.21.0 -> 0.22.0, protobuf 1.36.11 -> 1.36.12, prometheus
+  client_model/common/procfs, and fxamacker/cbor 2.9.2 -> 2.9.3 in the signer's
+  CMS envelope parser. govulncheck reports no vulnerabilities in any module.
+- Supported distributions in the package description no longer list RHEL 8, which
+  is EOL. Amazon Linux 2023, Fedora and RHEL 9+ are the supported targets.
+
 * Mon Aug 31 2026 Paul Kilar <pkilar@gmail.com> - 0.10.6-1
 - Ship sysusers.d fragments so the packages install on rpm >= 6. Six %%files
   entries carry %%attr(...,cerberus,...) / %%attr(...,cerberus-audit,...), which
