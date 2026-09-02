@@ -4,8 +4,15 @@
 # Usage:
 #   ./packaging/rpm/build-rpm.sh                      # build from current tree
 #   ./packaging/rpm/build-rpm.sh --mock               # build inside mock (clean chroot)
-#   ./packaging/rpm/build-rpm.sh --eif <path-to-eif>  # ALSO build the OPT-IN
-#                                                     # cerberus-signer-eif package
+#   ./packaging/rpm/build-rpm.sh --eif <path-to-eif>  # bundle THIS EIF
+#   ./packaging/rpm/build-rpm.sh --no-eif             # never build the EIF package
+#
+# The cerberus-signer-eif package is produced automatically when the working
+# tree holds CA key material -- ssh-cert-signer/ca_key.enc and ca_key.pub, the
+# two files the EIF is built from. That makes a deployment tree produce a
+# complete deployment; a tree without them (CI, upstream) is unaffected and
+# builds exactly what it always did. --eif names an EIF explicitly and skips
+# detection; --no-eif opts out. See packaging/eif-detect.sh.
 #
 # --eif bundles a prebuilt, per-deployment EIF into an optional
 # cerberus-signer-eif RPM. That RPM carries the KMS-encrypted CA key and the
@@ -21,9 +28,12 @@ set -euo pipefail
 # --- Parse arguments -------------------------------------------------------
 MOCK=0
 EIF_FILE=""
+EIF_PCR_MANIFEST=""
+NO_EIF=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --mock)  MOCK=1; shift ;;
+        --mock)   MOCK=1; shift ;;
+        --no-eif) NO_EIF=1; shift ;;
         --eif)
             [[ $# -ge 2 ]] || { echo "ERROR: --eif requires a path argument" >&2; exit 2; }
             EIF_FILE="$2"; shift 2 ;;
@@ -31,10 +41,26 @@ while [[ $# -gt 0 ]]; do
         -h|--help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$0"; exit 0 ;;
         *)
             echo "Unknown argument: $1" >&2
-            echo "Usage: $0 [--mock] [--eif <path-to-eif>]" >&2
+            echo "Usage: $0 [--mock] [--eif <path-to-eif>] [--no-eif]" >&2
             exit 2 ;;
     esac
 done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+VERSION="$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION")"
+PKG_NAME="cerberus"
+TARBALL="${PKG_NAME}-${VERSION}"
+
+# shellcheck source=../eif-detect.sh
+. "${PROJECT_ROOT}/packaging/eif-detect.sh"
+
+# An explicit --eif wins; otherwise let the CA key material decide. --mock is
+# excluded because its clean chroot cannot reach a host path, which is also why
+# an explicit --eif is rejected below rather than silently ignored.
+if [[ -z "${EIF_FILE}" && "${NO_EIF}" -eq 0 && "${MOCK}" -eq 0 ]]; then
+    cerberus_eif_autodetect "${PROJECT_ROOT}" || exit 2
+fi
 
 EXTRA_DEFINES=()
 if [[ -n "${EIF_FILE}" ]]; then
@@ -52,12 +78,6 @@ if [[ -n "${EIF_FILE}" ]]; then
     EIF_FILE="$(cd "$(dirname "${EIF_FILE}")" && pwd)/$(basename "${EIF_FILE}")"
     EXTRA_DEFINES+=(--define "eif_file ${EIF_FILE}")
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VERSION="$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION")"
-PKG_NAME="cerberus"
-TARBALL="${PKG_NAME}-${VERSION}"
 
 echo "==> Building ${PKG_NAME} ${VERSION} RPM"
 
@@ -131,9 +151,8 @@ if [[ "${MOCK}" -eq 1 ]]; then
     mock --rebuild "${SRPM}"
 else
     if [[ -n "${EIF_FILE}" ]]; then
-        echo "==> Bundling EIF into the opt-in cerberus-signer-eif package: ${EIF_FILE}"
-        echo "    WARNING: this RPM carries the KMS-encrypted CA key + PCR0-pinned public key."
-        echo "             It is per-deployment; publish only to an operator-controlled channel."
+        echo "==> Bundling EIF into the cerberus-signer-eif package: ${EIF_FILE}"
+        cerberus_eif_warn
     fi
     echo "==> Building RPM locally..."
     rpmbuild \
@@ -143,7 +162,12 @@ else
         -ba "${RPMBUILD_DIR}/SPECS/cerberus.spec"
 fi
 
+# Keep the PCR measurements with the packages they describe: a PCR-conditioned
+# KMS key policy must be updated to the new PCR0 before the new EIF is deployed.
+cerberus_save_pcr_manifest "${EIF_PCR_MANIFEST}" "${RPMBUILD_DIR}/RPMS"
+
 echo ""
 echo "==> Build complete. Packages:"
 find "${RPMBUILD_DIR}/RPMS" -name '*.rpm' 2>/dev/null | sort
 find "${RPMBUILD_DIR}/SRPMS" -name '*.rpm' 2>/dev/null | sort
+find "${RPMBUILD_DIR}/RPMS" -name 'pcr-manifest-*.json' 2>/dev/null | sort

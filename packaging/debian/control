@@ -93,7 +93,7 @@ Description: Enclave Image File for the Cerberus signer (per-deployment)
  Prebuilt Nitro Enclave Image File for the Cerberus signer, installed at
  /usr/share/cerberus/ssh-cert-signer.eif.
  .
- OPT-IN and per-deployment: the EIF bakes in the KMS-encrypted CA private key
+ CONDITIONAL and per-deployment: the EIF bakes in the KMS-encrypted CA private key
  and a PCR0-pinned CA public key, so this package carries CA key material and
  pins a deployment-specific PCR0. It is per-architecture and must be
  distributed only over an operator-controlled channel, never a shared or

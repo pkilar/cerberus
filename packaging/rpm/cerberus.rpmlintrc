@@ -14,7 +14,7 @@ addFilter(r"statically-linked-binary")
 
 # Domain vocabulary and product names absent from rpmlint's en_US dictionary.
 # All are spelled correctly for the things they name.
-addFilter(r"spelling-error.*\b(api|auditd|eBPF|tracepoint|webhook|md|decrypts|cssh|zsh|howto|plaintext|spec|enclave|enclaves|Casbin|SPNEGO|VSOCK|Nitro|KMS|keytab|noarch|systemd|sysusers|conffile|dbus)\b")
+addFilter(r"spelling-error.*\b(api|auditd|eBPF|tracepoint|webhook|md|decrypts|cssh|zsh|howto|plaintext|spec|enclave|enclaves|Casbin|SPNEGO|VSOCK|Nitro|KMS|keytab|noarch|systemd|sysusers|conffile|dbus|Prebuilt)\b")
 
 # The service env files and the API config template are shipped 0640, not
 # world-readable, on purpose. systemd reads the EnvironmentFile as root and the
@@ -34,3 +34,16 @@ addFilter(r"non-standard-dir-perm.*(/etc/cerberus|/var/log/cerberus) 750")
 # required for the CONFIGURATION that package owns -- /etc/krb5.conf and
 # /etc/krb5.conf.d -- which gokrb5 reads for realm and KDC settings.
 addFilter(r"explicit-lib-dependency krb5-libs")
+
+# cerberus-signer-eif ships one file: a Nitro Enclave Image File. It carries no
+# ELF binary and cannot -- the enclave's executable lives INSIDE the image, which
+# rpmlint cannot see into. The package is still correctly architecture-qualified:
+# an EIF is built for one architecture and will not boot on the other, so a
+# noarch package here would let an operator install an aarch64 image on x86_64.
+# Scoped to this subpackage on purpose; an unscoped filter would hide a genuine
+# "we forgot to install the binary" bug in cerberus-api or cerberus-signer.
+#
+# This surfaces only when the EIF package is actually built, which now happens
+# automatically on a deployment tree (packaging/eif-detect.sh) rather than only
+# behind an explicit --eif flag.
+addFilter(r"cerberus-signer-eif.*no-binary")

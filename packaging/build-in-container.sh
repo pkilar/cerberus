@@ -103,7 +103,7 @@ rpm)
 	BOOTSTRAP='dnf install -y -q rpm-build make git "dnf-command(builddep)" && { dnf install -y -q rpmlint || echo "note: rpmlint unavailable"; }; { dnf install -y -q hunspell-en-US enchant2 || dnf install -y -q hunspell-en || echo "note: en_US dictionary unavailable, rpmlint spell checks may fail"; }'
 	BUILDDEP='dnf builddep -y -q packaging/rpm/cerberus.spec'
 	BUILDCMD='./packaging/rpm/build-rpm.sh'
-	GLOB='rpmbuild/RPMS/*/*.rpm rpmbuild/SRPMS/*.rpm'
+	GLOB='rpmbuild/RPMS/*/*.rpm rpmbuild/SRPMS/*.rpm rpmbuild/RPMS/pcr-manifest-*.json'
 	# rpmlint 1.x (RHEL 9) and 2.x (Fedora) disagree about the flag for a
 	# config file: 1.x spells it -f and has no unused-filter check to disable,
 	# 2.x spells it -r and reports unused filters as errors. Both understand the
@@ -138,7 +138,7 @@ deb)
 	BOOTSTRAP='export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential debhelper devscripts equivs lintian git ca-certificates'
 	BUILDDEP='mk-build-deps -ri -t "apt-get -y --no-install-recommends" packaging/debian/control'
 	BUILDCMD='./packaging/debian/build-deb.sh'
-	GLOB='debbuild/*.deb'
+	GLOB='debbuild/*.deb debbuild/pcr-manifest-*.json'
 	LINTPRE=''
 	SITE_REPO_DIR='/etc/apt/sources.list.d'
 	SITE_REPO_EXT='list sources'
@@ -155,7 +155,7 @@ arch)
 	BOOTSTRAP='pacman -Sy --noconfirm --needed base-devel go git namcap >/dev/null 2>&1; useradd -m builder'
 	BUILDDEP=':'
 	BUILDCMD='chown -R builder /work && su builder -c "./packaging/arch/build-arch.sh"'
-	GLOB='archbuild/*.pkg.tar.*'
+	GLOB='archbuild/*.pkg.tar.* archbuild/pcr-manifest-*.json'
 	LINTPRE=''
 	# pacman takes a mirrorlist rather than repo fragments; a site file named
 	# mirrorlist lands where pacman.conf already includes it from.
@@ -288,6 +288,9 @@ $LINTPRE
 	rc=0
 	for f in /out/*; do
 		[ -e "\$f" ] || continue
+		# The PCR manifest ships beside the packages but is not one; no
+		# package linter can read it, and passing it in fails the leg.
+		case "\$f" in *.json) continue ;; esac
 		echo "--- \$(basename "\$f")"
 		if $LINTCMD "\$f" >/tmp/lint.out 2>&1; then :; else rc=1; fi
 		cat /tmp/lint.out
