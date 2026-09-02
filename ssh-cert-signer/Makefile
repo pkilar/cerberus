@@ -24,6 +24,15 @@ BINARY_NAME=ssh-cert-signer
 EIF_NAME_AMD64=ssh-cert-signer-amd64.eif
 EIF_NAME_ARM64=ssh-cert-signer-arm64.eif
 
+# An EIF can only be built on hardware of the architecture it targets.
+# `nitro-cli build-enclave` assembles the image around the kernel and bootstrap
+# blobs under /usr/share/nitro_enclaves/blobs, and only the host's architecture
+# is present there -- so a foreign-arch build fails inside nitro-cli even when
+# `docker buildx` produced the image happily under qemu emulation. Everything
+# below therefore defaults to this host's architecture rather than attempting
+# both and failing halfway.
+HOST_ARCH := $(shell uname -m | sed 's/^x86_64$$/amd64/; s/^aarch64$$/arm64/')
+
 # Version stamped into the binary's -V flag output; single source of truth is
 # the top-level VERSION file.
 VERSION := $(shell cat $(CURDIR)/../VERSION)
@@ -34,18 +43,54 @@ LDFLAGS_STRIP = -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=$(
 # Default target executed when you just run `make`
 all: eif
 
-# Target to build the Go binary specifically for the enclave environment.
-# Nitro Enclaves support both linux/amd64 and linux/arm64.
-build:
-	@echo "Building Go binary for enclave environment (GOOS=linux, GOARCH=amd64, GOARCH=arm64)..."
+# Build the enclave binary. Nitro Enclaves support both linux/amd64 and
+# linux/arm64, but only one of them can become an EIF on this host, so the
+# default builds that one. These binaries exist solely to be COPYed into the
+# enclave image (the Dockerfile takes ssh-cert-signer.$$TARGETARCH); the packaged
+# host binaries are built by the RPM/deb/Arch recipes, not from here.
+#
+# Use build-all when you genuinely want both -- staging binaries for a machine
+# you are not standing on, say. It is no longer the default because cross-
+# compiling the arch you cannot turn into an EIF is time spent on an artifact
+# this host cannot use.
+build: build-$(HOST_ARCH)
+
+build-all: build-amd64 build-arm64
+
+build-amd64:
+	@echo "Building Go binary for enclave environment (GOOS=linux, GOARCH=amd64)..."
 	GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS_STRIP) -v -o $(BINARY_NAME).amd64 ./cmd/ssh-cert-signer
+
+build-arm64:
+	@echo "Building Go binary for enclave environment (GOOS=linux, GOARCH=arm64)..."
 	GOOS=linux GOARCH=arm64 $(GOBUILD) $(LDFLAGS_STRIP) -v -o $(BINARY_NAME).arm64 ./cmd/ssh-cert-signer
 
-# Target to package the compiled binaries into deployable Enclave Image Files (.eif).
-# This uses Docker to create a root filesystem with the binary and its dependencies.
-# The --docker-uri specifies the base image for the enclave's filesystem.
-# The --docker-dir specifies the context for the Docker build.
-eif: eif-amd64 eif-arm64
+# Package the compiled binary into a deployable Enclave Image File (.eif) for
+# THIS host's architecture. Docker builds a root filesystem holding the binary,
+# and nitro-cli wraps it into the image.
+#
+# This used to be `eif: eif-amd64 eif-arm64`, which always failed: the foreign
+# half cannot be built here (see HOST_ARCH above), so the target reliably
+# produced one EIF and one error. Name the arch explicitly to force a specific
+# one; the guard below explains what to expect off-native.
+eif: eif-$(HOST_ARCH)
+
+# Refuse a foreign-architecture EIF with an explanation rather than letting it
+# fail deep inside nitro-cli, where the error names a missing blob and not the
+# cause. Listed as the FIRST prerequisite of each eif-<arch> target so it runs
+# before the cross-compile, not after make has already spent time producing a
+# binary that cannot be used. ALLOW_CROSS_EIF=1 overrides, for a host that
+# really does have the target's blobs installed.
+check-arch-%:
+	@if [ "$*" != "$(HOST_ARCH)" ] && [ -z "$(ALLOW_CROSS_EIF)" ]; then \
+		echo "ERROR: cannot build a $* EIF on $(HOST_ARCH) hardware."; \
+		echo "  nitro-cli builds the image around the kernel/bootstrap blobs in"; \
+		echo "  /usr/share/nitro_enclaves/blobs, which exist only for this host's"; \
+		echo "  architecture -- docker buildx will emulate the container happily and"; \
+		echo "  nitro-cli will then fail. Build it on $* hardware instead."; \
+		echo "  Override with ALLOW_CROSS_EIF=1 if this host really does have $* blobs."; \
+		exit 1; \
+	fi
 
 # Verify the CA key material the Dockerfile bakes into the EIF is present, with
 # an actionable message, instead of failing deep inside `docker buildx` on a
@@ -54,7 +99,7 @@ require-ca-files:
 	@test -s ca_key.enc || { echo "ERROR: ca_key.enc not found or empty in $(CURDIR). Run 'make encrypt-ca-key KMS_KEY_ARN=...' first."; exit 1; }
 	@test -f ca_key.pub || { echo "ERROR: ca_key.pub not found in $(CURDIR). It is baked into the EIF as the CA_PUBLIC_KEY_PATH pin; keep the ca_key.pub from 'make encrypt-ca-key', or remove the ca_key.pub COPY/ENV from the Dockerfile to build without the pin."; exit 1; }
 
-eif-amd64: build require-ca-files
+eif-amd64: check-arch-amd64 build-amd64 require-ca-files
 	@echo "Building AMD64 Enclave Image File ($(EIF_NAME_AMD64))..."
 	docker buildx build --platform linux/amd64 --build-arg TARGETARCH=amd64 -t ssh-cert-signer:amd64 .
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:amd64 --output-file $(EIF_NAME_AMD64) | tee /dev/stderr | \
@@ -64,7 +109,7 @@ eif-amd64: build require-ca-files
 	@echo "Successfully created $(EIF_NAME_AMD64)."
 	@if [ -f pcr-manifest-amd64.json ]; then echo "PCR manifest: pcr-manifest-amd64.json"; cat pcr-manifest-amd64.json; fi
 
-eif-arm64: build require-ca-files
+eif-arm64: check-arch-arm64 build-arm64 require-ca-files
 	@echo "Building ARM64 Enclave Image File ($(EIF_NAME_ARM64))..."
 	docker buildx build --platform linux/arm64 --build-arg TARGETARCH=arm64 -t ssh-cert-signer:arm64 .
 	$(NITRO_CLI) build-enclave --docker-uri ssh-cert-signer:arm64 --output-file $(EIF_NAME_ARM64) | tee /dev/stderr | \
@@ -193,5 +238,5 @@ clean-ca-key:
 	@echo "CA key material removed. You may now run 'make encrypt-ca-key KMS_KEY_ARN=...'."
 
 # Ensure targets are always run
-.PHONY: all build eif eif-amd64 eif-arm64 require-ca-files test test-coverage clean clean-ca-key encrypt-ca-key
+.PHONY: all build build-all build-amd64 build-arm64 eif eif-amd64 eif-arm64 require-ca-files test test-coverage clean clean-ca-key encrypt-ca-key
 

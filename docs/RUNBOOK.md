@@ -386,13 +386,15 @@ cp /path/to/ca_key.enc ssh-cert-signer/
 Then build:
 
 ```bash
-# Both architectures
+# This host's architecture
 make eif
 
-# Architecture-specific
+# Force a specific one
 make eif-amd64
 make eif-arm64
 ```
+
+An EIF can only be built on hardware of the architecture it targets: `nitro-cli` assembles the image around the kernel and bootstrap blobs under `/usr/share/nitro_enclaves/blobs`, and only the host's architecture is present there. `docker buildx` will happily emulate a foreign-arch container and `nitro-cli` will then fail on the missing blobs, so `make eif` builds only the native one, and `make eif-<other-arch>` refuses up front with that explanation. Build the other architecture on hardware of that architecture. (`ALLOW_CROSS_EIF=1` overrides the refusal for a host that genuinely has the target's blobs installed.)
 
 **Output files:**
 - `ssh-cert-signer/ssh-cert-signer-amd64.eif`
