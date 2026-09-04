@@ -45,17 +45,30 @@ func PlainPrincipals(names ...string) PrincipalRules {
 // mappings with a scalar key and a scalar value (mapping rules). Every other
 // shape is a hard error carrying the YAML line so the operator can find the
 // typo — in particular a `- root:` trailing colon must not silently degrade
-// into a plain entry. Content rules (empty names, "*" restrictions, conflicting
-// duplicates) live in PrincipalRules.validate so programmatic configs are held
-// to the same standard as YAML ones.
+// into a plain entry. Aliases (`- *name`, `root: *name`) are resolved to their
+// anchored node; null items are rejected. Content rules (empty names, "*"
+// restrictions, conflicting duplicates) live in PrincipalRules.validate so
+// programmatic configs are held to the same standard as YAML ones.
 func (rs *PrincipalRules) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind != yaml.SequenceNode {
 		return fmt.Errorf("allowed_principals at line %d: expected a sequence, got %s", n.Line, nodeKindName(n))
 	}
 	out := make(PrincipalRules, 0, len(n.Content))
 	for _, item := range n.Content {
+		// A YAML alias (`- *name`) stands for its anchored node; resolve it so a
+		// shared anchor keeps working — every pre-mapping config must parse
+		// unchanged. yaml.v3 never nests aliases, so one hop suffices.
+		if item.Kind == yaml.AliasNode && item.Alias != nil {
+			item = item.Alias
+		}
 		switch item.Kind {
 		case yaml.ScalarNode:
+			// `- ~`, `- null` and a bare `-` are !!null scalars, not principal
+			// names; reject them here with the line number rather than letting
+			// validate() report a confusing empty/"null" principal later.
+			if item.ShortTag() == "!!null" {
+				return fmt.Errorf("allowed_principals item at line %d is null (write the principal name, or remove the item)", item.Line)
+			}
 			out = append(out, PrincipalRule{Requested: item.Value, Issued: item.Value})
 		case yaml.MappingNode:
 			// A mapping node's Content alternates key, value.
@@ -64,6 +77,9 @@ func (rs *PrincipalRules) UnmarshalYAML(n *yaml.Node) error {
 					item.Line, len(item.Content)/2)
 			}
 			key, val := item.Content[0], item.Content[1]
+			if val.Kind == yaml.AliasNode && val.Alias != nil {
+				val = val.Alias
+			}
 			if key.Kind != yaml.ScalarNode {
 				return fmt.Errorf("allowed_principals item at line %d: mapping key must be a scalar, got %s", key.Line, nodeKindName(key))
 			}
@@ -71,7 +87,7 @@ func (rs *PrincipalRules) UnmarshalYAML(n *yaml.Node) error {
 				return fmt.Errorf("allowed_principals item at line %d: target of %q must be a single scalar, got %s",
 					val.Line, key.Value, nodeKindName(val))
 			}
-			if val.Tag == "!!null" {
+			if val.ShortTag() == "!!null" {
 				return fmt.Errorf("allowed_principals item at line %d: %q has no target (a plain entry needs no colon)", key.Line, key.Value)
 			}
 			out = append(out, PrincipalRule{Requested: key.Value, Issued: val.Value})

@@ -1795,3 +1795,24 @@ func TestWarnings_OAuth(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfig_ShippedExample keeps configs/config-example.yaml honest: it is
+// installed verbatim by every packaging and is the operator's copy-paste source,
+// so it must load through the real LoadConfig and carry the documented mapping.
+func TestLoadConfig_ShippedExample(t *testing.T) {
+	cfg, err := LoadConfig("../../configs/config-example.yaml")
+	if err != nil {
+		t.Fatalf("shipped example must load: %v", err)
+	}
+	sa := cfg.Groups["sysadmins"].CertificateRules.AllowedPrincipals
+	if got := sa.Resolve("root"); got != "global-root" {
+		t.Fatalf("sysadmins: root resolves to %q, want global-root", got)
+	}
+	wm := cfg.Groups["webmasters"].CertificateRules.AllowedPrincipals
+	if got := wm.Resolve("root"); got != "webserver-root" {
+		t.Fatalf("webmasters: root resolves to %q, want webserver-root", got)
+	}
+	if !slices.Equal(sa.Issued(), []string{"ec2-user", "global-root"}) {
+		t.Fatalf("sysadmins issued set = %v", sa.Issued())
+	}
+}

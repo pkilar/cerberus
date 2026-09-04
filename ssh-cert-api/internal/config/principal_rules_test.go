@@ -103,6 +103,41 @@ func TestPrincipalRules_UnmarshalYAML_Shapes(t *testing.T) {
 			yaml:    "root: global-root\n",
 			errPart: "expected a sequence, got a mapping",
 		},
+		{
+			name: "alias item resolves to its anchor",
+			yaml: "- &r root\n- *r\n",
+			want: PrincipalRules{{"root", "root"}, {"root", "root"}},
+		},
+		{
+			name: "alias mapping target resolves to its anchor",
+			yaml: "- &t global-root\n- root: *t\n",
+			want: PrincipalRules{{"global-root", "global-root"}, {"root", "global-root"}},
+		},
+		{
+			name: "alias to a mapping item resolves",
+			yaml: "- &m {root: global-root}\n- *m\n",
+			want: PrincipalRules{{"root", "global-root"}, {"root", "global-root"}},
+		},
+		{
+			name:    "null tilde item rejected",
+			yaml:    "- ~\n",
+			errPart: "is null (write the principal name, or remove the item)",
+		},
+		{
+			name:    "null keyword item rejected",
+			yaml:    "- null\n",
+			errPart: "is null",
+		},
+		{
+			name:    "bare dash item rejected",
+			yaml:    "-\n",
+			errPart: "is null",
+		},
+		{
+			name: "quoted null string is a principal named null",
+			yaml: "- \"null\"\n",
+			want: PrincipalRules{{"null", "null"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,8 +245,12 @@ func FuzzPrincipalRulesUnmarshal(f *testing.F) {
 	for _, s := range []string{"- root\n", "- root: global-root\n", "- root:\n", "- [a]\n", "- {a: b, c: d}\n", "x\n"} {
 		f.Add(s)
 	}
+	f.Add("- &a x\n- *a\n")
+	f.Add("- ~\n")
 	f.Fuzz(func(t *testing.T, in string) {
 		var rs PrincipalRules
-		_ = yaml.Unmarshal([]byte(in), &rs) // must never panic; errors are fine
+		if err := yaml.Unmarshal([]byte(in), &rs); err == nil {
+			_ = rs.validate("fuzz") // must never panic either; errors are fine
+		}
 	})
 }
