@@ -90,6 +90,24 @@ func (s *Server) Router() http.Handler {
 	return recoverMiddleware(s.authMiddleware(s.router))
 }
 
+// ObservabilityRouter returns a handler exposing only /health and /metrics, for
+// the optional plain-HTTP listener (config.observability_http).
+//
+// It builds a separate mux rather than reusing Router(): /sign and /policy must
+// be unreachable over cleartext, and "absent from the mux" is a stronger and
+// more durable guarantee than "rejected by middleware" — a future route added
+// to setupRoutes cannot leak onto this listener by accident. Both endpoints
+// already bypass authMiddleware on the HTTPS listener, so omitting it here
+// changes no authorization decision. recoverMiddleware stays, so a panic still
+// returns 500 and increments cerberus_handler_panics_total rather than
+// aborting the response mid-stream.
+func (s *Server) ObservabilityRouter() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.Handle("GET /metrics", promhttp.Handler())
+	return recoverMiddleware(mux)
+}
+
 // recoverMiddleware catches panics from any handler below it, increments
 // cerberus_handler_panics_total, logs the panic with a stack trace, and
 // returns a generic 500. Without this wrapper, Go's http.Server still

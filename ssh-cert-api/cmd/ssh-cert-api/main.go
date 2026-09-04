@@ -249,6 +249,26 @@ func main() {
 		},
 	}
 
+	// --- 5b. Optional plain-HTTP listener for /health and /metrics ---
+	// For load balancers and Prometheus scrapers that cannot present the CA's
+	// TLS trust. It serves only those two endpoints (see ObservabilityRouter);
+	// signing never becomes reachable over cleartext.
+	var obsServer *http.Server
+	if cfg.ObservabilityHTTP.Enabled {
+		obsServer = &http.Server{
+			Addr:              cfg.ObservabilityHTTP.Addr(),
+			Handler:           server.ObservabilityRouter(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			// /health reads a cached snapshot and /metrics renders in-process
+			// registry state. Neither waits on the enclave, so this listener
+			// does not need the SignTimeout-sized write budget the HTTPS
+			// server carries.
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+	}
+
 	// --- 6. Start Server with graceful shutdown ---
 	// http.Server treats an empty host in Addr (e.g. ":8443") as "all
 	// interfaces". Render that as 0.0.0.0:port so operators don't have to
@@ -268,6 +288,16 @@ func main() {
 		return nil
 	})
 
+	if obsServer != nil {
+		log.Printf("Observability listening on http://%s (/health, /metrics)", obsServer.Addr)
+		g.Go(func() error {
+			if err := obsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("observability http server (%s): %w", obsServer.Addr, err)
+			}
+			return nil
+		})
+	}
+
 	g.Go(func() error {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -285,6 +315,12 @@ func main() {
 		// draining must not be cut short by the parent's cancellation.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
+		if obsServer != nil {
+			// Best-effort: this listener holds no in-flight work worth
+			// draining, and a failure closing it must not mask an error
+			// draining the signing listener.
+			_ = obsServer.Shutdown(shutdownCtx) //nolint:contextcheck // graceful shutdown ctx is independent by design
+		}
 		return httpServer.Shutdown(shutdownCtx) //nolint:contextcheck // graceful shutdown ctx is independent by design
 
 	})

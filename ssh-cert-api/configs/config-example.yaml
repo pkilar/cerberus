@@ -65,6 +65,28 @@ tls_cert: ""
 tls_key: ""
 
 # ──────────────────────────────────────────────────────────────────────
+# Plain-HTTP observability listener (optional, disabled by default)
+# ──────────────────────────────────────────────────────────────────────
+# /health and /metrics are always available on the HTTPS listener above. This
+# block adds a SECOND, plain-HTTP listener that serves only those two paths —
+# for load balancers and Prometheus scrapers that cannot present the CA's TLS
+# trust. It does not move the endpoints; they stay on HTTPS as well.
+#
+#   - /sign and /policy are absent from this listener entirely, so no Kerberos
+#     ticket or OIDC bearer token can ever be sent to it in cleartext.
+#   - bind defaults to 127.0.0.1, NOT all interfaces. /metrics is
+#     unauthenticated by design and leaks request volumes, timing, and enclave
+#     CPU/memory pressure, so reaching it from another host is a deliberate
+#     choice. Any non-loopback bind logs config.observability_http.exposed at
+#     startup. Pair it with a security group or ALB listener rule that admits
+#     only the scraper subnet — the service enforces no source check.
+#   - port defaults to 9109 and must differ from the port in `listen`.
+observability_http:
+  enabled: false
+  # bind: "127.0.0.1"
+  # port: 9109
+
+# ──────────────────────────────────────────────────────────────────────
 # Realm stripping for static members (optional)
 # ──────────────────────────────────────────────────────────────────────
 # SPNEGO/GSSAPI authenticates users as "uid@REALM.COM". By default `members:`
