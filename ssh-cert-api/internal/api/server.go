@@ -44,25 +44,34 @@ const (
 )
 
 type Server struct {
-	config        *config.Config
-	authenticator auth.Authenticator
-	authorizer    authz.Authorizer
-	enclaveClient enclave.Signer
-	healthMonitor *HealthMonitor
-	ldapHealth    *LDAPHealthMonitor
-	limiter       *principalLimiter
-	router        *http.ServeMux
+	config            *config.Config
+	authenticator     auth.Authenticator
+	authorizer        authz.Authorizer
+	enclaveClient     enclave.Signer
+	healthMonitor     *HealthMonitor
+	ldapHealth        *LDAPHealthMonitor
+	limiter           *principalLimiter
+	router            *http.ServeMux
+	policyFingerprint string // config.PolicyFingerprint(), computed once; served on /policy and every /sign success
 }
 
 func NewServer(cfg *config.Config, authenticator auth.Authenticator, authorizer authz.Authorizer, enclaveClient enclave.Signer, healthMonitor *HealthMonitor) (*Server, error) {
+	// The authorization policy is immutable for the life of the process (there
+	// is no reload), so its fingerprint is computed once here.
+	fingerprint := ""
+	if cfg != nil {
+		fingerprint = cfg.PolicyFingerprint()
+	}
+
 	s := &Server{
-		config:        cfg,
-		authenticator: authenticator,
-		authorizer:    authorizer,
-		enclaveClient: enclaveClient,
-		healthMonitor: healthMonitor,
-		limiter:       newPrincipalLimiter(),
-		router:        http.NewServeMux(),
+		config:            cfg,
+		authenticator:     authenticator,
+		authorizer:        authorizer,
+		enclaveClient:     enclaveClient,
+		healthMonitor:     healthMonitor,
+		limiter:           newPrincipalLimiter(),
+		router:            http.NewServeMux(),
+		policyFingerprint: fingerprint,
 	}
 
 	s.setupRoutes()
@@ -156,6 +165,11 @@ func (s *Server) setupRoutes() {
 	// 1.22+ method-prefixed patterns: a non-POST to /sign returns 405 from the
 	// mux automatically, so the handler does not need to re-check r.Method.
 	s.router.Handle("POST /sign", s.limiter.middleware(http.HandlerFunc(s.handleSignRequest)))
+	// /policy is authenticated (only /health and /metrics bypass authMiddleware)
+	// but deliberately NOT wrapped by the sign limiter: it never touches the
+	// enclave, and a cache-hit cssh invocation that probes it must not spend a
+	// sign token.
+	s.router.HandleFunc("GET /policy", s.handlePolicy)
 	s.router.HandleFunc("GET /health", s.handleHealth)
 	s.router.Handle("GET /metrics", promhttp.Handler())
 }
@@ -476,6 +490,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		"principal", principal,
 		"group", result.GroupName,
 		"source", result.Source,
+		"policy_fingerprint", s.policyFingerprint,
 		"requested_principals", req.Principals,
 		"granted_principals", grantedPrincipals,
 		"group_allowed_principals", result.CertificateRules.AllowedPrincipals.Requestable(),
@@ -483,7 +498,24 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey})
+	_ = json.NewEncoder(w).Encode(messages.SigningResponse{SignedKey: signedKey, PolicyFingerprint: s.policyFingerprint})
+}
+
+// policyResponse is the GET /policy body.
+type policyResponse struct {
+	PolicyFingerprint string `json:"policy_fingerprint"`
+}
+
+// handlePolicy returns the fingerprint of the authorization policy this
+// process loaded at startup. cssh calls it before reusing a cached certificate
+// and re-signs when the value differs from the one it recorded at sign time —
+// that is how a principal mapping enabled after a certificate was issued
+// invalidates honest clients' caches instead of waiting for expiry. No
+// per-request log line: it is hit on every cache-hit cssh invocation.
+func (s *Server) handlePolicy(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(policyResponse{PolicyFingerprint: s.policyFingerprint})
 }
 
 // healthResponse is the JSON body /health emits. The top-level status is

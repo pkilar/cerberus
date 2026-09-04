@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1323,5 +1324,108 @@ func TestHandleSignRequest_OIDCEndToEndRealAuthorizer(t *testing.T) {
 				t.Error("signer must not be invoked for an unbound group")
 			}
 		})
+	}
+}
+
+// policyTestConfig is a config whose fingerprint the /policy and /sign tests
+// compare against; it must differ from the empty config newServerForTest uses.
+func policyTestConfig() *config.Config {
+	return &config.Config{
+		Groups: map[string]config.Group{
+			"sysadmins": {
+				Members:          []string{"dave@REALM.COM"},
+				CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}}},
+			},
+		},
+	}
+}
+
+// newServerWithConfigForTest is newServerForTest with a caller-supplied config.
+func newServerWithConfigForTest(t *testing.T, cfg *config.Config, authN auth.Authenticator, authZ authz.Authorizer, signer enclave.Signer) *Server {
+	t.Helper()
+	monitor := newHealthMonitor(signer, 1*time.Hour, 100*time.Millisecond)
+	monitor.Start(t.Context())
+	s, err := NewServer(cfg, authN, authZ, signer, monitor)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+func TestPolicy_RequiresAuth(t *testing.T) {
+	authN := &fakeAuthenticator{err: auth.ErrNoAuthorizationHeader}
+	s := newServerWithConfigForTest(t, policyTestConfig(), authN, &fakeAuthorizer{}, &fakeSigner{})
+	r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "policy_fingerprint") {
+		t.Fatalf("unauthenticated /policy must not disclose the fingerprint: %s", w.Body.String())
+	}
+}
+
+func TestPolicy_ReturnsConfigFingerprint(t *testing.T) {
+	cfg := policyTestConfig()
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	s := newServerWithConfigForTest(t, cfg, authN, &fakeAuthorizer{}, &fakeSigner{})
+	r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	var body struct {
+		PolicyFingerprint string `json:"policy_fingerprint"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if want := cfg.PolicyFingerprint(); body.PolicyFingerprint == "" || body.PolicyFingerprint != want {
+		t.Fatalf("policy_fingerprint = %q, want %q", body.PolicyFingerprint, want)
+	}
+}
+
+func TestPolicy_NotSubjectToSignRateLimit(t *testing.T) {
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	s := newServerWithConfigForTest(t, policyTestConfig(), authN, &fakeAuthorizer{}, &fakeSigner{})
+	// Well past the default sign burst (10): every call must still succeed,
+	// because a cache-hit cssh invocation must not spend a sign token.
+	for i := range 40 {
+		r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+		r.Header.Set("Authorization", "Negotiate x")
+		w := httptest.NewRecorder()
+		s.Router().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("call %d: status = %d, want 200", i, w.Code)
+		}
+	}
+}
+
+func TestHandleSignRequest_ResponseCarriesPolicyFingerprint(t *testing.T) {
+	cfg := policyTestConfig()
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "sysadmins", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerWithConfigForTest(t, cfg, authN, authZ, signer)
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var body messages.SigningResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.SignedKey == "" || body.PolicyFingerprint != cfg.PolicyFingerprint() {
+		t.Fatalf("body = %+v, want signed_key and policy_fingerprint %q", body, cfg.PolicyFingerprint())
 	}
 }
