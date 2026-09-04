@@ -326,7 +326,8 @@ Once the services are running, users can request signed certificates:
 3. **Success response**:
    ```json
    {
-     "signed_key": "ssh-rsa-cert-v01@openssh.com AAA..."
+     "signed_key": "ssh-rsa-cert-v01@openssh.com AAA...",
+     "policy_fingerprint": "3b7c9e0f…"
    }
    ```
 

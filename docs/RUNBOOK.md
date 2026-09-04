@@ -793,6 +793,24 @@ GET /health
   ```
   Per-backend status is **advisory** — the top-level `status` stays gated on the enclave staleness path so that a transient LDAP outage cannot stop static-only certificate issuance. Alert on `ldap[].healthy` separately (or scrape `cerberus_ldap_backend_up{backend="..."}` from `/metrics`).
 
+### Policy Endpoint
+
+```
+GET /policy
+```
+
+- **Authentication required** — the same Kerberos/SPNEGO or OIDC bearer as `/sign`. **Not** subject to the per-principal
+  sign rate limiter, and it never touches the enclave.
+- Returns HTTP 200 with `{"policy_fingerprint": "<64 hex chars>"}`: a SHA-256 over the authorization policy the running
+  process loaded (`groups`, `strip_realms`, `self_principal`). Keytab, TLS, LDAP and OAuth settings are excluded, so the
+  value carries nothing secret-derived and does not change on unrelated edits. The same value is returned on every
+  successful `/sign` response and logged at startup as `startup.policy_fingerprint`.
+- Purpose: `cssh` records the fingerprint beside each cached certificate and, before reusing one, compares it with this
+  endpoint's value. Any authorization-policy change (which requires a restart) therefore makes every honest client
+  re-sign on its next invocation instead of riding out the old certificate's validity window — see
+  [Role principals with Cerberus principal mapping](#role-principals-with-cerberus-principal-mapping). A client without a
+  usable credential, or talking to a server that predates this endpoint, keeps the old behaviour (reuse until expiry).
+
 ### Metrics Endpoint
 
 ```
@@ -1264,11 +1282,12 @@ Request:
 Response (success):
 ```json
 {
-  "signed_key": "ssh-rsa-cert-v01@openssh.com AAAA..."
+  "signed_key": "ssh-rsa-cert-v01@openssh.com AAAA...",
+  "policy_fingerprint": "3b7c9e0f…"
 }
 ```
 
-The field name is `signed_key` — defined by `messages.SigningResponse` (`messages/messages.go`) and validated by `messages/messages_test.go`. Don't rename in docs; this is the wire contract shared with stress clients and any future SDK.
+The field name is `signed_key` — defined by `messages.SigningResponse` (`messages/messages.go`) and validated by `messages/messages_test.go`. Don't rename in docs; this is the wire contract shared with stress clients and any future SDK. `policy_fingerprint` is the value served by the [Policy Endpoint](#policy-endpoint); clients that do not cache certificates may ignore it.
 
 ### SSH Certificate Fields
 
@@ -1398,11 +1417,18 @@ Rules of the road:
 - Both names are logged: `sign.success` carries `requested_principals` and `granted_principals`.
 - `cssh` records the requested set next to the cert (`<key>-cert.requested`) so its cache keeps working even
   though the cert's principals differ from the request (see `docs/cssh.md`).
-- **Upgrade `cerberus-client` before enabling any mapping.** The `cssh` wrapper is a separate, noarch package; an
-  older `cssh` compares the requested name against the cert's principals and, once the server maps that name,
-  re-signs on **every** invocation — hammering the per-principal rate limit (`RATE_LIMIT_RPS=5`, burst 10) with a full
-  Kerberos + HTTPS + enclave round trip each time. The current `cssh` records the request in `<key>-cert.requested`
-  and caches normally.
+- **Policy changes invalidate client caches — but never issued certificates.** Enabling or changing a mapping is a
+  config change plus restart, which changes the server's policy fingerprint (`GET /policy`, also returned on every
+  `/sign`). A current `cssh` records that fingerprint beside each cached cert and re-signs on its next invocation when it
+  differs, so honest users pick up the new principal immediately. Certificates already issued — including any a user
+  copied elsewhere — remain valid until they expire: the boundary for a hostile holder is the validity window, so
+  **shorten `validity` before a restrictive change** if that window matters.
+- **Still upgrade `cerberus-client` first.** The `cssh` wrapper is a separate, noarch package. An older `cssh` neither
+  checks the fingerprint nor records the request: once the server maps the requested name it re-signs on **every**
+  invocation, hammering the per-principal rate limit (`RATE_LIMIT_RPS=5`, burst 10) with a full Kerberos + HTTPS +
+  enclave round trip each time. Upgrading the client against an old server is harmless (`/policy` returns 404 and the
+  client keeps its previous behaviour); once the server is upgraded, each cached cert re-signs exactly once to record
+  its fingerprint.
 - **The caller's own uid is never remapped.** With `self_principal` enabled, an entry `dave: dave-role` applies to
   other members who request `dave`, but Dave requesting his own uid gets `dave` — the self-service path is independent
   of group membership by design.

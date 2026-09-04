@@ -105,14 +105,14 @@ issuance · **LOG** = logging/secrets · **SC** = supply chain/deploy.
 
 ## 6. Executive summary
 
-80 threats were identified across 9 trust-boundary domains:
+81 threats were identified across 9 trust-boundary domains:
 
 | Severity | Count |
 |---|---|
 | Critical | 1 |
 | High | 30 |
 | Medium | 38 |
-| Low | 11 |
+| Low | 12 |
 
 **The single Critical (`KMS-1`) and its siblings `KMS-2`/`SC-4` are not code defects — they are the load-bearing
 *deployment* control.** Because the change is host-mediated, the host holds the KMS-encrypted CA key *and*
@@ -132,7 +132,7 @@ first-alphabetical-group authorization rule (`AUTHZ-1`); (e) the optional OIDC b
 (`OIDC-1` algorithm confusion, `OIDC-2` issuer/JWKS trust), contained in code by the asymmetric-only signing
 allowlist (rejecting `none`/HS* at config load and at verification) and mandatory verified TLS to the IdP.
 
-## 7. Threat register (all 80)
+## 7. Threat register (all 81)
 
 | ID | Sev | DREAD | STRIDE | Title |
 |---|---|---|---|---|
@@ -215,6 +215,7 @@ allowlist (rejecting `none`/HS* at config load and at verification) and mandator
 | `OIDC-6` | Low | 3 | D | IdP discovery unreachable at startup blocks service start (intentional fail-fast, availability coupling) |
 | `AUTHZ-14` | Low | 3.0 | E | Principal mapping (`root: global-root` in allowed_principals) issues a certificate principal that differs from the requested name; the mapping is host-side policy the enclave cannot verify, and the first-alphabetical group's table decides which target is issued |
 | `LOG-8` | Low | 2.8 | I | CiphertextForRecipient redaction depends on a nil-check that misses a future zero-length blob |
+| `AUTHZ-15` | Low | 2.8 | I | Authenticated `GET /policy` discloses a policy-change signal (SHA-256 of groups/strip_realms/self_principal) to any authenticated principal and is exempt from the per-principal sign limiter |
 | `SIGN-10` | Low | 2.4 | TR | Serial number collision — non-unique serials reduce revocation precision |
 
 ## 8. Detailed findings — Critical & High
@@ -554,8 +555,9 @@ This surface exists only when the optional `oauth:` block is enabled; when disab
 | `OIDC-5` | Low | 3.2 | E | oauth.realm collision conflates the OIDC identity with a Kerberos/LDAP principal for audit/rate-limit and self_principal | Group authz is namespace-isolated — an OIDC request resolves membership only from `oidc_groups`, never static/LDAP (`candidateGroups` `casbin.go`), so a colliding realm cannot grant a Kerberos group; `WarnOAuthRealmCollision` covers LDAP/strip_realms; realm must not contain `@`; with `self_principal` enabled + the OIDC realm allowlisted, use a non-mutable unique `username_claim` (`sub`) |
 | `VSOCK-6` | Low | 3 | I | Unbounded host response reader can consume host memory | 30s wall-clock `conn.SetDeadline` `client.go:90` bounds the read window |
 | `OIDC-6` | Low | 3 | D | IdP discovery unreachable at startup blocks service start (availability coupling) | Intentional fail-fast mirroring the LDAP initial-bind probe `main.go`; bounded by `http_timeout`; disabling `oauth` decouples |
-| `AUTHZ-14` | Low | 3.0 | E | Principal mapping issues a certificate principal that differs from the requested name; host-side policy the enclave cannot verify; the first-alphabetical group's table decides the target | Mapping targets are not requestable (Casbin policy is on the requested name only, `casbin.go` loadPolicies); replace-not-add so a mapped cert never also carries the requested name (`authz.Authorize`); `*` may be neither key nor target and conflicting duplicates are config-load errors (`config.PrincipalRules.validate`); `sign.success` logs `requested_principals` + `granted_principals`; sshd `AuthorizedPrincipalsFile` fails closed on hosts that do not list the role principal; `TestAuthorize_Mapped*`, `TestAuthorize_MappingFollowsAlphabeticalGroup` |
+| `AUTHZ-14` | Low | 3.0 | E | Principal mapping issues a certificate principal that differs from the requested name; host-side policy the enclave cannot verify; the first-alphabetical group's table decides the target | Mapping targets are not requestable (Casbin policy is on the requested name only, `casbin.go` loadPolicies); replace-not-add so a mapped cert never also carries the requested name (`authz.Authorize`); `*` may be neither key nor target and conflicting duplicates are config-load errors (`config.PrincipalRules.validate`); `sign.success` logs `requested_principals` + `granted_principals`; sshd `AuthorizedPrincipalsFile` fails closed on hosts that do not list the role principal; `TestAuthorize_Mapped*`, `TestAuthorize_MappingFollowsAlphabeticalGroup`; cssh re-signs when the server's policy fingerprint (`GET /policy`, `/sign` response) differs from the one recorded beside the cached cert, so a mapping enabled after issuance invalidates honest clients' caches on their next call — issued certificates stay valid until expiry, which is the revocation window |
 | `LOG-8` | Low | 2.8 | I | Redaction nil-check could miss a future zero-length blob | Explicit redaction before marshalling `messages.go:159-196`; current types always populate the blob when present |
+| `AUTHZ-15` | Low | 2.8 | I | `GET /policy` discloses a policy-change signal to any authenticated principal; exempt from the sign limiter | Behind the same `authMiddleware` as `/sign` (only `/health` and `/metrics` bypass it); the digest covers no secret-derived fields (`config.PolicyFingerprint`); the handler is a constant JSON write with no enclave or directory I/O, so an authenticated flood costs the same as any rejected `/sign`; `TestPolicy_RequiresAuth`, `TestPolicy_NotSubjectToSignRateLimit` |
 | `SIGN-10` | Low | 2.4 | TR | Serial collision reduces revocation precision | Serial from `crypto/rand` over 2^64 `sign-public-key.go:91`; collision probability negligible |
 
 ## 10. Control posture — code-enforced vs deployment-enforced
