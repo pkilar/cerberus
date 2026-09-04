@@ -131,6 +131,10 @@ with:
 ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
 ```
 
+An explicit sign also writes `<privkey>-cert.requested` — one line with the cert's serial and the principal set
+you asked for — which `cssh` uses for its cache decision (see **Cache** below). It is safe to delete; the next
+sign recreates it.
+
 ---
 
 ## Pre-authenticating (scp, rsync, sftp, git…)
@@ -245,16 +249,24 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   file missing) is left untouched and surfaces as an error rather than being
   clobbered. Disable with `CSSH_AUTOGEN=0` to require a pre-existing key.
 - **Cache.** A signed cert is reused only when it still covers the request:
-  its principal set matches the one being requested **and** its
-  `Valid: from … to …` window doesn't close within `CSSH_REFRESH_BEFORE`
-  seconds. Both are read from `ssh-keygen -L`; if parsing fails for any reason
-  the cert is re-signed rather than reused.
-- **Principal switching.** The signer mints a cert for *exactly* the requested
-  principals, so a cert issued for `principalA` cannot authenticate as
-  `principalB`. `cssh` compares the cached cert's principals (as a set — order
-  and duplicates don't matter) against what it's requesting, and re-signs on any
-  difference. So `cssh alice@host` then `cssh deploy@host` (both in one Cerberus
-  group) transparently re-signs on the switch instead of reusing alice's cert.
+  the set of principals it was **requested for** matches the one being
+  requested now **and** its `Valid: from … to …` window doesn't close within
+  `CSSH_REFRESH_BEFORE` seconds. After each explicit sign `cssh` records that
+  requested set, together with the cert's serial, in `<privkey>-cert.requested`;
+  when the serial matches the cached cert, that record is what the request is
+  compared against. Without a matching record (a cert signed by an older
+  `cssh`, or one you copied in by hand) it falls back to comparing against the
+  cert's own principal list, so at worst it re-signs once. Any parse failure
+  re-signs rather than reuses.
+- **Principal switching.** A cert issued for `principalA` cannot authenticate
+  as `principalB`, so `cssh alice@host` then `cssh deploy@host` (both in one
+  Cerberus group) transparently re-signs on the switch instead of reusing
+  alice's cert. The cert's principals may legitimately differ from what you
+  requested: a group can map a requested name to a role principal
+  (`root: global-root` in `allowed_principals`), in which case `cssh root@host`
+  yields a cert whose principal is `global-root` — that is what the sidecar
+  above is for. A server-side mapping change is picked up on the next re-sign
+  (expiry or `--force`).
 - **Principal selection.** With `CSSH_PRINCIPALS`/`--principals` unset, `cssh`
   asks `ssh -G <args>` for the login user it would use for the destination —
   covering `user@host`, `-l user`, and `ssh_config` `User` directives — and
@@ -294,7 +306,7 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
 If a cached cert seems wrong, the safest reset is:
 
 ```sh
-rm -f ~/.ssh/id_ed25519-cert.pub
+rm -f ~/.ssh/id_ed25519-cert.pub ~/.ssh/id_ed25519-cert.requested
 cssh --force user@host
 ```
 
