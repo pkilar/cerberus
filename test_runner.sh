@@ -147,6 +147,22 @@ run_security_tests() {
 }
 
 # Function to run linting
+# Function to run the cssh client-helper shell tests
+run_cssh_tests() {
+    print_status "Running cssh client tests (sidecar cache)..."
+    if [ ! -f tests/cssh_sidecar_test.sh ]; then
+        print_warning "tests/cssh_sidecar_test.sh not found; skipping"
+        return 0
+    fi
+    bash tests/cssh_sidecar_test.sh
+    # cssh ships for bash and zsh; exercise both when zsh is available.
+    if command -v zsh >/dev/null 2>&1; then
+        zsh tests/cssh_sidecar_test.sh
+    else
+        print_warning "zsh not installed; cssh tested under bash only"
+    fi
+}
+
 run_linting() {
     print_status "Running code linting..."
     
@@ -219,6 +235,11 @@ main() {
     run_integration_tests
     echo ""
     
+    # Run the cssh client-helper shell tests
+    print_status "=== CSSH CLIENT TESTS ==="
+    run_cssh_tests
+    echo ""
+
     # Run security tests
     print_status "=== SECURITY ANALYSIS ==="
     run_security_tests
@@ -265,6 +286,9 @@ case "${1:-all}" in
         ;;
     "security")
         run_security_tests
+        ;;
+    "cssh")
+        run_cssh_tests
         ;;
     "coverage")
         check_coverage "SSH Certificate API" "ssh-cert-api"

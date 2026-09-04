@@ -76,6 +76,19 @@ test:
 	$(MAKE) -C ssh-cert-signer test
 	@echo "Running integration tests..."
 	go test -v ./...
+	$(MAKE) test-cssh
+
+# Shell tests for the cssh client helper (packaging/profile.d/cssh.sh). It is
+# shell, not Go, so `go test` never reaches it. Run under both shells cssh
+# supports -- an EXIT trap behaves differently in zsh and the suite caught it.
+test-cssh:
+	@echo "Running cssh client tests..."
+	bash tests/cssh_sidecar_test.sh
+	@if command -v zsh >/dev/null 2>&1; then \
+		zsh tests/cssh_sidecar_test.sh; \
+	else \
+		echo "zsh not installed; cssh tested under bash only"; \
+	fi
 
 # Run tests with coverage
 test-coverage:
@@ -208,4 +221,4 @@ packages-all:
 		echo "==> $$t"; ./packaging/build-in-container.sh $$t --lint || exit 1; \
 	done
 
-.PHONY: all build stress test test-coverage upgrade-deps upgrade-deps-patch clean eif eif-amd64 eif-arm64 run-api run-enclave-debug package-targets packages-all
+.PHONY: all build stress test test-cssh test-coverage upgrade-deps upgrade-deps-patch clean eif eif-amd64 eif-arm64 run-api run-enclave-debug package-targets packages-all
