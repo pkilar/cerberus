@@ -435,6 +435,9 @@ func (c *Config) Validate() error {
 		if len(rules.AllowedPrincipals) == 0 {
 			return fmt.Errorf("group '%s' has no allowed_principals", name)
 		}
+		if err := rules.AllowedPrincipals.validate(name); err != nil {
+			return err
+		}
 
 		if err := validateFlagExtensions(name, "permissions", rules.Permissions); err != nil {
 			return err

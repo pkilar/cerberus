@@ -137,6 +137,87 @@ groups:
 			expectError: true,
 			errSubstr:   "no allowed_principals",
 		},
+		{
+			name: "principal mapping entries load",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root
+        - ec2-user
+`,
+			expectError: false,
+		},
+		{
+			name: "principal mapping trailing colon is rejected with a line number",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root:
+`,
+			expectError: true,
+			errSubstr:   `"root" has no target`,
+		},
+		{
+			name: "principal mapping to a list is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: [global-root, other-root]
+`,
+			expectError: true,
+			errSubstr:   `target of "root" must be a single scalar, got a sequence`,
+		},
+		{
+			name: "principal mapping wildcard target is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: "*"
+`,
+			expectError: true,
+			errSubstr:   "'root' cannot be mapped to the wildcard '*'",
+		},
+		{
+			name: "principal mapping conflicting duplicate is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root
+        - root
+`,
+			expectError: true,
+			errSubstr:   "principal 'root' is listed twice with different targets ('global-root' and 'root')",
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +251,41 @@ groups:
 				}
 			}
 		})
+	}
+}
+
+func TestLoadConfig_PrincipalMappingParsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - deploy
+        - root: global-root
+        - admin: global-root
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := cfg.Groups["sysadmins"].CertificateRules.AllowedPrincipals
+	want := PrincipalRules{{"deploy", "deploy"}, {"root", "global-root"}, {"admin", "global-root"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("AllowedPrincipals = %+v, want %+v", got, want)
+	}
+	if r := got.Requestable(); !slices.Equal(r, []string{"deploy", "root", "admin"}) {
+		t.Fatalf("Requestable = %v", r)
+	}
+	if i := got.Issued(); !slices.Equal(i, []string{"deploy", "global-root"}) {
+		t.Fatalf("Issued = %v", i)
 	}
 }
 
@@ -278,6 +394,40 @@ func TestValidate(t *testing.T) {
 			},
 			expectError: true,
 			errSubstr:   "no allowed_principals",
+		},
+		{
+			name: "mapping wildcard key rejected",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: PrincipalRules{{"*", "global-root"}},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "the wildcard '*' cannot be mapped",
+		},
+		{
+			name: "mapping conflicting duplicate rejected",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: PrincipalRules{{"root", "a"}, {"root", "b"}},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "listed twice with different targets",
 		},
 		{
 			// PR #35 added the d <= 0 guard. 0s would otherwise produce a cert
