@@ -767,19 +767,20 @@ EOF
             unset -f _cssh_check_krb
             return 1
         fi
-        # Validate that what we got is actually a parseable cert before publishing.
-        if ! ssh-keygen -L -f "$tmp_cert" >/dev/null 2>&1; then
+        # Validate that what we got is actually a parseable cert before publishing,
+        # and capture its serial from OUR private temp file in the same pass:
+        # re-reading $cert after the rename could observe a cert a concurrent
+        # cssh for the same key just installed, and pair its serial with our
+        # requested set. An unparseable cert yields no dump at all.
+        local tmp_info new_serial
+        tmp_info=$(ssh-keygen -L -f "$tmp_cert" 2>/dev/null)
+        if [ -z "$tmp_info" ]; then
             printf 'cssh: server returned unparseable certificate; discarding\n' >&2
             rm -f "$tmp_cert"
             unset -f _cssh_check_krb
             return 1
         fi
-        # Capture the serial from OUR private temp file, before publishing it:
-        # re-reading $cert after the rename could observe a cert a concurrent
-        # cssh for the same key just installed, and pair its serial with our
-        # requested set.
-        local new_serial
-        new_serial=$(ssh-keygen -L -f "$tmp_cert" 2>/dev/null | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
+        new_serial=$(printf '%s\n' "$tmp_info" | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
         chmod 0600 "$tmp_cert"
         if ! mv -f "$tmp_cert" "$cert"; then
             rm -f "$tmp_cert"
@@ -792,15 +793,18 @@ EOF
         # Explicit mode only — --all-principals / --self have no fixed requested
         # set, so drop any sidecar left behind by an earlier explicit sign.
         if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ]; then
-            local tmp_side
+            local tmp_side written=0
             if [ -n "$new_serial" ] && tmp_side=$(mktemp "${sidecar}.XXXXXX" 2>/dev/null); then
                 if printf '%s %s\n' "$new_serial" "$req_princ" >| "$tmp_side" \
                     && chmod 0600 "$tmp_side" && mv -f "$tmp_side" "$sidecar"; then
-                    :
+                    written=1
                 else
-                    rm -f "$tmp_side" "$sidecar" 2>/dev/null
+                    rm -f "$tmp_side" 2>/dev/null
                 fi
             fi
+            # A sidecar we could not refresh must not outlive the cert it described
+            # (the serial gate would ignore it anyway; keep the two paths consistent).
+            [ "$written" -eq 1 ] || rm -f "$sidecar" 2>/dev/null
         else
             rm -f "$sidecar" 2>/dev/null
         fi
