@@ -205,3 +205,13 @@ func TestPrincipalRules_Validate(t *testing.T) {
 		})
 	}
 }
+
+func FuzzPrincipalRulesUnmarshal(f *testing.F) {
+	for _, s := range []string{"- root\n", "- root: global-root\n", "- root:\n", "- [a]\n", "- {a: b, c: d}\n", "x\n"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		var rs PrincipalRules
+		_ = yaml.Unmarshal([]byte(in), &rs) // must never panic; errors are fine
+	})
+}
