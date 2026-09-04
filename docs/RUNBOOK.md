@@ -810,6 +810,9 @@ GET /policy
   re-sign on its next invocation instead of riding out the old certificate's validity window — see
   [Role principals with Cerberus principal mapping](#role-principals-with-cerberus-principal-mapping). A client without a
   usable credential, or talking to a server that predates this endpoint, keeps the old behaviour (reuse until expiry).
+- Roll every API instance to a new configuration together. While instances with different policies sit behind one
+  load balancer, a client may see alternating fingerprints and re-sign on consecutive calls (bounded by the per-principal
+  rate limiter) until the roll-out completes.
 
 ### Metrics Endpoint
 

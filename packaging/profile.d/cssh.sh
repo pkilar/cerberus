@@ -367,7 +367,7 @@ _cssh_policy_fingerprint() {
         klist -s 2>/dev/null || return 0
     fi
     local _resp _code
-    _resp=$(mktemp "${TMPDIR:-/tmp}/cssh-policy.XXXXXX") || return 0
+    _resp=$(mktemp "${TMPDIR:-/tmp}/cssh-policy.XXXXXX" 2>/dev/null) || return 0
     _code=$(
         set -- --silent --max-time 5 -o "$_resp" -w '%{http_code}'
         [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
