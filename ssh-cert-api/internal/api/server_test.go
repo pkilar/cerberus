@@ -269,9 +269,16 @@ func TestHandleSignRequest(t *testing.T) {
 	}
 }
 
-// TestHandleSignRequest_SendsDefensiveCopy verifies that mutating the slice
-// passed to the enclave doesn't bleed back to the authorizer's internal
-// CertificateRules — the regression the defensive-copy change guards against.
+// TestHandleSignRequest_SendsDefensiveCopy verifies that mutating the maps
+// handed to the enclave doesn't bleed back to the authorizer's internal
+// CertificateRules — the regression maps.Clone(Permissions) and
+// maps.Clone(CriticalOptions) guard against. The signer.got.Principals
+// mutation below only guards against config.PrincipalRules ([]PrincipalRule)
+// corruption; it is NOT a test of principals slice aliasing — a []string and
+// a []PrincipalRule's string field can never share a backing array, with or
+// without a clone. The aliasing regression test for
+// slices.Clone(grantedPrincipals) at the enclave-request construction is
+// TestHandleSignRequest_ClonesGrantedPrincipals, below.
 func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "1h",
@@ -292,7 +299,9 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	if signer.got == nil {
 		t.Fatal("signer never invoked")
 	}
-	// Mutating the handed-off slice/map must not touch the config's copy.
+	// Mutating the handed-off maps must not touch the config's copy. The
+	// principals mutation here cannot exercise aliasing (see doc comment
+	// above) but is left in place as a config-slice-corruption guard.
 	signer.got.Principals[0] = "hacked"
 	signer.got.CriticalOptions["force-command"] = "/bin/sh"
 	signer.got.Permissions["permit-pty"] = "tampered"
@@ -305,6 +314,52 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	}
 	if rules.Permissions["permit-pty"] != "" {
 		t.Errorf("config permissions corrupted: %v", rules.Permissions)
+	}
+}
+
+// TestHandleSignRequest_ClonesGrantedPrincipals is the regression test for
+// slices.Clone(grantedPrincipals) at the enclave-request construction
+// (server.go): it proves the handler hands the enclave a copy of the
+// authorizer's GrantedPrincipals slice, never an alias of its backing array.
+// The fake authorizer's result carries the exact `granted` slice (see
+// withGrant: a non-nil GrantedPrincipals is passed through untouched), so if
+// the handler ever regresses to `Principals: grantedPrincipals` (no clone),
+// mutating signer.got.Principals below would corrupt `granted` too.
+func TestHandleSignRequest_ClonesGrantedPrincipals(t *testing.T) {
+	granted := []string{"root"}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "admin",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: granted,
+	}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"root"}) {
+		t.Fatalf("enclave principals = %v, want [root]", signer.got.Principals)
+	}
+
+	// Mutate the enclave-bound slice; the authorizer's own backing array
+	// (held here as `granted`) must be unaffected if server.go clones before
+	// handing it to the enclave request.
+	signer.got.Principals[0] = "hacked"
+	if granted[0] != "root" {
+		t.Errorf("authorizer's GrantedPrincipals corrupted: got %q, want \"root\" (handler must clone, not alias)", granted[0])
 	}
 }
 
