@@ -566,6 +566,19 @@ EOF
     fi
 
     local cert="${privkey}-cert.pub"
+    # Cerberus may issue a different principal than the one requested when the
+    # matched group maps it (`root: global-root` in allowed_principals), so the
+    # cert's own principal list is not a reliable record of what we asked for.
+    # After each explicit sign we record "<serial> <requested-set>" here and use
+    # it for the refresh decision below; see docs/cssh.md "Cache".
+    local sidecar="${privkey}-cert.requested"
+
+    # Sorted, deduplicated requested set (comma-joined, trailing comma), used by
+    # the refresh decision and recorded in the sidecar after an explicit sign.
+    local req_princ=""
+    if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ]; then
+        req_princ=$(printf '%s' "$principals" | tr ',' '\n' | awk 'NF' | sort -u | tr '\n' ',')
+    fi
 
     # Refresh decision, from ssh-keygen -L on the cached cert. Re-sign when the
     # cert is missing/unparseable, when its principal set no longer matches what
@@ -573,10 +586,11 @@ EOF
     # failure re-signs rather than reuse a cert we can't reason about.
     #
     # The principal check is what makes a principalA -> principalB switch work:
-    # the signer issues a cert for EXACTLY the requested principals (not the
-    # group's full allowed set), so a cert minted for principalA cannot
-    # authenticate a request for principalB. We compare the two as sorted sets,
-    # so order and duplicates don't matter.
+    # a cert minted for principalA cannot authenticate a request for principalB.
+    # We compare sorted sets, so order and duplicates don't matter. Because the
+    # server may issue a mapped name (root -> global-root), the comparison
+    # target is the sidecar's record of what the cached cert was requested for
+    # when available, else the cert's own principals.
     local need_sign=$force
     if [ "$need_sign" -eq 0 ]; then
         if [ ! -s "$cert" ]; then
@@ -587,8 +601,7 @@ EOF
             if [ -z "$cert_info" ]; then
                 need_sign=1
             else
-                local req_princ cert_princ
-                req_princ=$(printf '%s' "$principals" | tr ',' '\n' | awk 'NF' | sort -u | tr '\n' ',')
+                local cert_princ
                 # Extract the cert's principal list: the lines indented under
                 # "Principals:" up to the next "<Header>:" line (principal names
                 # carry no colon, so a ':' marks the end of the block).
@@ -601,11 +614,25 @@ EOF
                     p && /:/ { p=0; next }
                     p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
                 ' | sort -u | tr '\n' ',')
+                # Prefer the sidecar's record of what this exact cert (by serial)
+                # was requested for; a missing/stale/unparseable sidecar falls back
+                # to comparing against the cert's own principals — never to reuse.
+                # Certs cached by an older cssh therefore re-sign at most once.
+                local cert_serial cached_req
+                cert_serial=$(printf '%s\n' "$cert_info" | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
+                cached_req=$cert_princ
+                if [ -n "$cert_serial" ] && [ -r "$sidecar" ]; then
+                    local sc_serial="" sc_princ=""
+                    read -r sc_serial sc_princ < "$sidecar" 2>/dev/null
+                    if [ "$sc_serial" = "$cert_serial" ] && [ -n "$sc_princ" ]; then
+                        cached_req=$sc_princ
+                    fi
+                fi
                 # --all-principals / --self have no fixed requested set to compare
                 # against (the server derives the principals), so their certs are
                 # cached on expiry alone; entitlement changes are picked up on the
                 # next re-sign (expiry or --force).
-                if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ "$req_princ" != "$cert_princ" ]; then
+                if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ "$req_princ" != "$cached_req" ]; then
                     need_sign=1
                 else
                     local valid_to
@@ -752,6 +779,25 @@ EOF
             rm -f "$tmp_cert"
             unset -f _cssh_check_krb
             return 1
+        fi
+
+        # Record what this cert was requested for (see the refresh decision
+        # above). Best-effort: a failure here only costs one extra re-sign later.
+        # Explicit mode only — --all-principals / --self have no fixed requested
+        # set, so drop any sidecar left behind by an earlier explicit sign.
+        if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ]; then
+            local new_serial tmp_side
+            new_serial=$(ssh-keygen -L -f "$cert" 2>/dev/null | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
+            if [ -n "$new_serial" ] && tmp_side=$(mktemp "${sidecar}.XXXXXX" 2>/dev/null); then
+                if printf '%s %s\n' "$new_serial" "$req_princ" >| "$tmp_side" \
+                    && chmod 0600 "$tmp_side" && mv -f "$tmp_side" "$sidecar"; then
+                    :
+                else
+                    rm -f "$tmp_side" "$sidecar" 2>/dev/null
+                fi
+            fi
+        else
+            rm -f "$sidecar" 2>/dev/null
         fi
     fi
 
