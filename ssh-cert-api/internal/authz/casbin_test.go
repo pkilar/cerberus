@@ -23,7 +23,7 @@ func TestAuthorize_BasicAllow(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root", "ec2-user"},
+				AllowedPrincipals: config.PlainPrincipals("root", "ec2-user"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -62,7 +62,7 @@ func TestAuthorize_BasicDeny(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"ec2-user"},
+				AllowedPrincipals: config.PlainPrincipals("ec2-user"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -89,7 +89,7 @@ func TestAuthorize_UnknownUser(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -116,7 +116,7 @@ func TestAuthorize_WildcardPrincipal(t *testing.T) {
 			Members: []string{"admin@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "4h",
-				AllowedPrincipals: []string{"*"},
+				AllowedPrincipals: config.PlainPrincipals("*"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -159,7 +159,7 @@ func TestAuthorize_MultiGroup(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root", "ec2-user"},
+				AllowedPrincipals: config.PlainPrincipals("root", "ec2-user"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -167,7 +167,7 @@ func TestAuthorize_MultiGroup(t *testing.T) {
 			Members: []string{"charlie@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"analyst"},
+				AllowedPrincipals: config.PlainPrincipals("analyst"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -215,7 +215,7 @@ func TestAuthorize_DeterministicOrder(t *testing.T) {
 			Members: []string{"bob@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "24h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -223,7 +223,7 @@ func TestAuthorize_DeterministicOrder(t *testing.T) {
 			Members: []string{"bob@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -263,7 +263,7 @@ func TestAuthorize_MultiGroupDisjointPrincipals(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 				Permissions:       map[string]string{"permit-pty": ""},
 				CriticalOptions:   map[string]string{"source-address": "10.0.0.0/8"},
 			},
@@ -272,7 +272,7 @@ func TestAuthorize_MultiGroupDisjointPrincipals(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "24h",
-				AllowedPrincipals: []string{"deploy"},
+				AllowedPrincipals: config.PlainPrincipals("deploy"),
 				Permissions: map[string]string{
 					"permit-pty":              "",
 					"permit-port-forwarding":  "",
@@ -334,7 +334,7 @@ func TestAuthorize_PartialDeny(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"ec2-user"},
+				AllowedPrincipals: config.PlainPrincipals("ec2-user"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -366,7 +366,7 @@ func TestAuthorize_EmptyPrincipals(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 				Permissions:       map[string]string{"permit-pty": ""},
 			},
 		},
@@ -402,7 +402,7 @@ func TestAuthorize_CertificateRulesReturned(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root", "ec2-user"},
+				AllowedPrincipals: config.PlainPrincipals("root", "ec2-user"),
 				Permissions: map[string]string{
 					"permit-pty":              "",
 					"permit-agent-forwarding": "",
@@ -480,7 +480,7 @@ func TestAuthorize_LDAPGrantsMembership(t *testing.T) {
 			LDAPGroups: []string{"CN=ssh-admins,OU=Groups,DC=corp,DC=example"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -519,7 +519,7 @@ func TestAuthorize_LDAPNoMatch(t *testing.T) {
 			LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -549,14 +549,14 @@ func TestAuthorize_LDAPErrorFailsClosed(t *testing.T) {
 			Members: []string{"alice@CORP.EXAMPLE"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 		"ssh-admins": {
 			LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -581,7 +581,7 @@ func TestAuthorize_LDAPNoBackendForRealmFallsThrough(t *testing.T) {
 			Members: []string{"alice@OTHER.EXAMPLE"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -616,14 +616,14 @@ func TestAuthorize_LDAPPrecedenceConfigStable(t *testing.T) {
 			LDAPGroups: []string{"CN=alpha,DC=corp"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 		"beta-team": {
 			LDAPGroups: []string{"CN=beta,DC=corp"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "24h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -672,7 +672,7 @@ func stripRealmConfig(members, stripRealms []string) *config.Config {
 			Members: members,
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -769,7 +769,7 @@ func TestAuthorize_StripRealmResolverGetsFullPrincipal(t *testing.T) {
 			LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -805,11 +805,11 @@ func TestAuthorizeAll_FirstAlphabeticalGroup(t *testing.T) {
 	cfg := newTestConfig(map[string]config.Group{
 		"zebra": {
 			Members:          []string{"alice@REALM.COM"},
-			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"zoo"}},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PlainPrincipals("zoo")},
 		},
 		"admins": {
 			Members:          []string{"alice@REALM.COM"},
-			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root", "ec2-user"}},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PlainPrincipals("root", "ec2-user")},
 		},
 	})
 	a, err := NewCasbinAuthorizer(cfg, nil)
@@ -826,7 +826,7 @@ func TestAuthorizeAll_FirstAlphabeticalGroup(t *testing.T) {
 	if res.GroupName != "admins" { // 'admins' sorts before 'zebra'
 		t.Errorf("got group %q, want first-alphabetical 'admins'", res.GroupName)
 	}
-	if !slices.Equal(res.CertificateRules.AllowedPrincipals, []string{"root", "ec2-user"}) {
+	if !slices.Equal(res.CertificateRules.AllowedPrincipals.Requestable(), []string{"root", "ec2-user"}) {
 		t.Errorf("got allowed_principals %v, want the admins group's", res.CertificateRules.AllowedPrincipals)
 	}
 }
@@ -837,7 +837,7 @@ func TestAuthorizeAll_NoGroupDenied(t *testing.T) {
 	cfg := newTestConfig(map[string]config.Group{
 		"admins": {
 			Members:          []string{"alice@REALM.COM"},
-			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PlainPrincipals("root")},
 		},
 	})
 	a, err := NewCasbinAuthorizer(cfg, nil)
@@ -861,7 +861,7 @@ func TestAuthorizeAll_LDAPFailsClosed(t *testing.T) {
 	cfg := newTestConfig(map[string]config.Group{
 		"ssh-admins": {
 			LDAPGroups:       []string{"CN=ssh-admins,DC=corp,DC=example"},
-			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PlainPrincipals("root")},
 		},
 	})
 	resolver := &fakeLDAPResolver{err: errors.New("ldap down")}
@@ -883,7 +883,7 @@ func selfCfg(enabled bool, realms, deny []string) *config.Config {
 	cfg := newTestConfig(map[string]config.Group{
 		"admins": {
 			Members:          []string{"x@X"},
-			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+			CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PlainPrincipals("root")},
 		},
 	})
 	cfg.SelfPrincipal = config.SelfPrincipalConfig{
@@ -997,7 +997,7 @@ func TestAuthorizeSelf_DenylistOnlyGatesRequesterUID(t *testing.T) {
 			Members: []string{"jsmith@FOO.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"jsmith", "root"},
+				AllowedPrincipals: config.PlainPrincipals("jsmith", "root"),
 			},
 		},
 	})
@@ -1063,7 +1063,7 @@ func TestAuthorize_SelfPrincipalAugmentsGroupGrantedRequest(t *testing.T) {
 			Members: []string{"pkilar@W.PDTPARTNERS.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"}, // does NOT include "pkilar"
+				AllowedPrincipals: config.PlainPrincipals("root"), // does NOT include "pkilar"
 			},
 		},
 	})
@@ -1111,7 +1111,7 @@ func TestAuthorize_SoloSelfUIDNotSatisfiedByUnrelatedGroup(t *testing.T) {
 			Members: []string{"pkilar@W.PDTPARTNERS.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -1147,7 +1147,7 @@ func TestAuthorize_OIDCGrantsMembership(t *testing.T) {
 			OIDCGroups: []string{"platform-eng", "sre"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -1178,7 +1178,7 @@ func TestAuthorize_OIDCNoMatch(t *testing.T) {
 			OIDCGroups: []string{"platform-eng"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -1206,14 +1206,14 @@ func TestAuthorize_OIDCNoAssertedGroupsIsInert(t *testing.T) {
 			Members: []string{"alice@REALM.COM"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 		"oidc-admins": {
 			OIDCGroups: []string{"platform-eng"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})
@@ -1248,14 +1248,14 @@ func TestAuthorize_OIDCFirstAlphabeticalWins(t *testing.T) {
 			OIDCGroups: []string{"everyone"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"shared"},
+				AllowedPrincipals: config.PlainPrincipals("shared"),
 			},
 		},
 		"zebra": {
 			OIDCGroups: []string{"everyone"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"shared"},
+				AllowedPrincipals: config.PlainPrincipals("shared"),
 			},
 		},
 	})
@@ -1296,14 +1296,14 @@ func TestAuthorize_OIDCIsolatedFromStaticMembership(t *testing.T) {
 			Members: []string{"jsmith@OIDC"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "1h",
-				AllowedPrincipals: []string{"shared"},
+				AllowedPrincipals: config.PlainPrincipals("shared"),
 			},
 		},
 		"zz-oidc": {
 			OIDCGroups: []string{"platform-eng"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"shared"},
+				AllowedPrincipals: config.PlainPrincipals("shared"),
 			},
 		},
 	})
@@ -1341,7 +1341,7 @@ func TestAuthorize_OIDCUnaffectedByLDAPError(t *testing.T) {
 			OIDCGroups: []string{"platform-eng"},
 			CertificateRules: config.CertificateRules{
 				Validity:          "8h",
-				AllowedPrincipals: []string{"root"},
+				AllowedPrincipals: config.PlainPrincipals("root"),
 			},
 		},
 	})

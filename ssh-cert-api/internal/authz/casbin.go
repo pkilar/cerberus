@@ -113,7 +113,9 @@ func (ca *CasbinAuthorizer) loadPolicies(cfg *config.Config) error {
 		rules := group.CertificateRules
 		ca.groupRules[groupName] = &rules
 
-		for _, principal := range rules.AllowedPrincipals {
+		// Policy is keyed on the requested name; mapping targets are resolved
+		// later in Authorize and are deliberately NOT policy objects.
+		for _, principal := range rules.AllowedPrincipals.Requestable() {
 			if _, err := ca.enforcer.AddPolicy(groupName, principal, "sign"); err != nil {
 				return fmt.Errorf("failed to add policy for group %s, principal %s: %w", groupName, principal, err)
 			}

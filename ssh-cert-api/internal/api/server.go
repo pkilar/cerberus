@@ -287,8 +287,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		// Expand to the matched group's finite allowed_principals. A "*" grant is
 		// an unbounded set that can't be enumerated into a cert — refuse with a
 		// clear 400 rather than mint a surprising any-principal certificate.
-		allowed := result.CertificateRules.AllowedPrincipals
-		if slices.Contains(allowed, "*") {
+		if result.CertificateRules.AllowedPrincipals.HasWildcard() {
 			outcome = outcomeInvalidBody
 			slog.Warn("authz.all_principals.wildcard_group", "principal", principal, "group", result.GroupName)
 			w.Header().Set("Content-Type", "application/json")
@@ -297,9 +296,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		grantedPrincipals = slices.Clone(allowed)
-		slices.Sort(grantedPrincipals)
-		grantedPrincipals = slices.Compact(grantedPrincipals)
+		grantedPrincipals = result.CertificateRules.AllowedPrincipals.Issued()
 		// config.Validate rejects groups with no allowed_principals, so an empty
 		// expansion is defensive — deny rather than mint an empty (any-principal)
 		// cert.
@@ -466,7 +463,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		"group", result.GroupName,
 		"source", result.Source,
 		"granted_principals", grantedPrincipals,
-		"group_allowed_principals", result.CertificateRules.AllowedPrincipals,
+		"group_allowed_principals", result.CertificateRules.AllowedPrincipals.Requestable(),
 		"remote_addr", r.RemoteAddr,
 	)
 	w.Header().Set("Content-Type", "application/json")

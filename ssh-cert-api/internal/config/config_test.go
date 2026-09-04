@@ -197,7 +197,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -220,7 +220,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -237,7 +237,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -254,7 +254,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "invalid",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -271,7 +271,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{},
+							AllowedPrincipals: PlainPrincipals(),
 						},
 					},
 				},
@@ -290,7 +290,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "0s",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -309,7 +309,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "-1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -326,7 +326,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "25h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -346,7 +346,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							Permissions: map[string]string{
 								"permit-pty": "yes",
 							},
@@ -365,7 +365,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							CriticalOptions: map[string]string{
 								"verify-required": "true",
 							},
@@ -386,7 +386,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							Permissions: map[string]string{
 								"permit-X11-forwarding":   "",
 								"permit-agent-forwarding": "",
@@ -414,7 +414,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -431,7 +431,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -449,7 +449,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -468,7 +468,7 @@ func TestValidate(t *testing.T) {
 					CertificateRules: CertificateRules{Validity: "8h"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: false,
@@ -482,7 +482,7 @@ func TestValidate(t *testing.T) {
 					CertificateRules: CertificateRules{Validity: "8h"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: true,
@@ -497,7 +497,7 @@ func TestValidate(t *testing.T) {
 					Realms:  []string{"FOO.COM"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: true,
@@ -510,7 +510,7 @@ func TestValidate(t *testing.T) {
 				// Enabled=false with an otherwise-incomplete block must not fail.
 				SelfPrincipal: SelfPrincipalConfig{Enabled: false},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: false,
@@ -555,7 +555,7 @@ func TestValidate_ValidityDurationParsing(t *testing.T) {
 						Members: []string{"test@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          duration,
-							AllowedPrincipals: []string{"test"},
+							AllowedPrincipals: PlainPrincipals("test"),
 						},
 					},
 				},
@@ -585,7 +585,7 @@ func TestConfigStructure(t *testing.T) {
 				Members: []string{"admin@example.com", "root@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin", "root"},
+					AllowedPrincipals: PlainPrincipals("admin", "root"),
 					Permissions: map[string]string{
 						"permit-pty":     "",
 						"permit-user-rc": "",
@@ -600,7 +600,7 @@ func TestConfigStructure(t *testing.T) {
 				Members: []string{"user1@example.com", "user2@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "1h",
-					AllowedPrincipals: []string{"user1", "user2"},
+					AllowedPrincipals: PlainPrincipals("user1", "user2"),
 					Permissions: map[string]string{
 						"permit-pty": "",
 					},
@@ -650,21 +650,21 @@ func TestConfigValidation_MultipleGroups(t *testing.T) {
 				Members: []string{"admin@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin"},
+					AllowedPrincipals: PlainPrincipals("admin"),
 				},
 			},
 			"users": {
 				Members: []string{"user@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "1h",
-					AllowedPrincipals: []string{"user"},
+					AllowedPrincipals: PlainPrincipals("user"),
 				},
 			},
 			"invalid": {
 				Members: []string{"test@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "invalid-duration",
-					AllowedPrincipals: []string{"test"},
+					AllowedPrincipals: PlainPrincipals("test"),
 				},
 			},
 		},
@@ -798,7 +798,7 @@ func validLDAPConfig() Config {
 				LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
 				CertificateRules: CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: PlainPrincipals("root"),
 				},
 			},
 		},
@@ -1162,7 +1162,7 @@ func TestWarnings_StripRealm(t *testing.T) {
 				Members: []string{"admin"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin"},
+					AllowedPrincipals: PlainPrincipals("admin"),
 				},
 			},
 		},
@@ -1190,7 +1190,7 @@ func TestWarnings_SelfPrincipalRealm(t *testing.T) {
 			CertificateRules: CertificateRules{Validity: "8h"},
 		},
 		Groups: map[string]Group{
-			"admin": {Members: []string{"admin"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+			"admin": {Members: []string{"admin"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 		},
 	}
 	want := []Warning{
@@ -1321,7 +1321,7 @@ func TestEnclaveMetricsInterval_Validate(t *testing.T) {
 					Members: []string{"u@example.com"},
 					CertificateRules: CertificateRules{
 						Validity:          "1h",
-						AllowedPrincipals: []string{"u"},
+						AllowedPrincipals: PlainPrincipals("u"),
 					},
 				},
 			},
@@ -1413,7 +1413,7 @@ func validOAuthConfig() Config {
 				OIDCGroups: []string{"platform-eng"},
 				CertificateRules: CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: PlainPrincipals("root"),
 				},
 			},
 		},
@@ -1515,7 +1515,7 @@ func TestValidate_OAuth(t *testing.T) {
 						Members: []string{"admin@REALM"},
 						CertificateRules: CertificateRules{
 							Validity:          "8h",
-							AllowedPrincipals: []string{"root"},
+							AllowedPrincipals: PlainPrincipals("root"),
 						},
 					},
 				}
@@ -1554,7 +1554,7 @@ func TestApplyDefaults_OAuth(t *testing.T) {
 		Groups: map[string]Group{
 			"admins": {
 				OIDCGroups:       []string{"admins"},
-				CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+				CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: PlainPrincipals("root")},
 			},
 		},
 	}
@@ -1625,7 +1625,7 @@ func TestWarnings_OAuth(t *testing.T) {
 				c.Groups = map[string]Group{
 					"admins": {
 						Members:          []string{"admin@REALM"},
-						CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+						CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: PlainPrincipals("root")},
 					},
 				}
 			},

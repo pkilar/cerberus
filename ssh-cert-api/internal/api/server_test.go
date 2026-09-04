@@ -137,7 +137,7 @@ func newServerForTest(t *testing.T, authN auth.Authenticator, authZ authz.Author
 func TestHandleSignRequest(t *testing.T) {
 	validRules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 		Permissions:       map[string]string{"permit-pty": ""},
 		StaticAttributes:  map[string]string{"env": "test"},
 	}
@@ -248,7 +248,7 @@ func TestHandleSignRequest(t *testing.T) {
 func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root", "ubuntu"},
+		AllowedPrincipals: config.PlainPrincipals("root", "ubuntu"),
 		Permissions:       map[string]string{"permit-pty": ""},
 		CriticalOptions:   map[string]string{"force-command": "/usr/bin/true"},
 		StaticAttributes:  map[string]string{"env": "test"},
@@ -270,7 +270,7 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	signer.got.CriticalOptions["force-command"] = "/bin/sh"
 	signer.got.Permissions["permit-pty"] = "tampered"
 
-	if rules.AllowedPrincipals[0] != "root" {
+	if rules.AllowedPrincipals[0].Requested != "root" {
 		t.Errorf("config principals corrupted: %v", rules.AllowedPrincipals)
 	}
 	if rules.CriticalOptions["force-command"] != "/usr/bin/true" {
@@ -288,7 +288,7 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root", "ubuntu", "deploy"},
+		AllowedPrincipals: config.PlainPrincipals("root", "ubuntu", "deploy"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
@@ -315,7 +315,7 @@ func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
 // with allowed_principals: ["*"] yields a cert carrying the concrete requested
 // principal, never a literal "*".
 func TestHandleSignRequest_WildcardGroupGetsConcretePrincipal(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -340,7 +340,7 @@ func TestHandleSignRequest_WildcardGroupGetsConcretePrincipal(t *testing.T) {
 // TestHandleSignRequest_WildcardRequestRejected verifies the host refuses a
 // literal "*" as a requested principal before it ever reaches the signer.
 func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -366,7 +366,7 @@ func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
 // a cert for the whole (finite) allowed_principals set of the matched group,
 // sorted and deduplicated, without the caller enumerating them.
 func TestHandleSignRequest_AllPrincipalsExpands(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root", "ec2-user", "deploy"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root", "ec2-user", "deploy")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules, Source: "static"}}
 	signer := &fakeSigner{signed: "ok"}
@@ -391,7 +391,7 @@ func TestHandleSignRequest_AllPrincipalsExpands(t *testing.T) {
 // TestHandleSignRequest_AllPrincipalsMutualExclusion verifies that combining
 // all_principals with an explicit principals list is a 400 (ambiguous request).
 func TestHandleSignRequest_AllPrincipalsMutualExclusion(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -418,7 +418,7 @@ func TestHandleSignRequest_AllPrincipalsMutualExclusion(t *testing.T) {
 // with a 400 (an unbounded set can't be enumerated into a cert) rather than
 // minting an any-principal certificate.
 func TestHandleSignRequest_AllPrincipalsWildcardGroupRefused(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -597,7 +597,7 @@ func TestHandleSignRequest_SelfFallbackRejectsNonSelf(t *testing.T) {
 // input). The enclave re-enforces the same cap; this asserts the host's 400
 // and that the over-cap request never reaches the signer.
 func TestHandleSignRequest_TooManyPrincipals(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -633,7 +633,7 @@ func TestHandleSignRequest_RateLimited(t *testing.T) {
 
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
@@ -802,7 +802,7 @@ func TestMetrics_BypassesAuthAndExposesCounters(t *testing.T) {
 	// go test -shuffle=on is meant to catch.
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "metrics-warmup", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
@@ -1010,7 +1010,7 @@ func newServerWithConfig(t *testing.T, cfg *config.Config, authN auth.Authentica
 func TestHandleSignRequest_OIDCBearerAllowed(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "8h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 		Permissions:       map[string]string{"permit-pty": ""},
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{
@@ -1108,7 +1108,7 @@ func TestHandleSignRequest_OIDCEndToEndRealAuthorizer(t *testing.T) {
 				OIDCGroups: []string{"platform-eng"},
 				CertificateRules: config.CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: config.PlainPrincipals("root"),
 				},
 			},
 		},
