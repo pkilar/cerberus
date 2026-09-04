@@ -206,9 +206,9 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Three request shapes, mutually exclusive: an explicit principals list,
 	// all_principals (every principal in the user's first group), or
-	// self_principal (a cert for the caller's own short uid). Each path ends with
-	// an authorized result and a concrete grantedPrincipals set that feeds the
-	// enclave request below.
+	// self_principal (a cert for the caller's own short uid). Each path ends
+	// with an authorized result whose GrantedPrincipals — never anything
+	// derived from the request body — feeds the enclave request below.
 	var result *authz.AuthorizationResult
 	var grantedPrincipals []string
 
@@ -242,18 +242,18 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Issue for the caller's own short uid. AuthorizeSelf has already
-		// confirmed it is realm-allowlisted and not on the denylist; re-check the
-		// structural invariants (non-empty, not "*") as defense in depth.
-		uid := user.Username
-		if uid == "" || strings.TrimSpace(uid) == "*" {
+		// Issue for the caller's own short uid, as granted by AuthorizeSelf
+		// (which has already confirmed it is realm-allowlisted and not on the
+		// denylist). Re-check the structural invariants — exactly one
+		// principal, non-empty, not "*" — as defense in depth.
+		grantedPrincipals = result.GrantedPrincipals
+		if len(grantedPrincipals) != 1 || grantedPrincipals[0] == "" || strings.TrimSpace(grantedPrincipals[0]) == "*" {
 			outcome = outcomeInvalidBody
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Invalid self principal"})
 			return
 		}
-		grantedPrincipals = []string{uid}
 	} else if req.AllPrincipals {
 		if len(req.Principals) != 0 {
 			outcome = outcomeInvalidBody
@@ -284,8 +284,9 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Expand to the matched group's finite allowed_principals. A "*" grant is
-		// an unbounded set that can't be enumerated into a cert — refuse with a
+		// Expand to the matched group's finite issued set (mapping entries
+		// contribute their target, not the requested name). A "*" grant is an
+		// unbounded set that can't be enumerated into a cert — refuse with a
 		// clear 400 rather than mint a surprising any-principal certificate.
 		if result.CertificateRules.AllowedPrincipals.HasWildcard() {
 			outcome = outcomeInvalidBody
@@ -296,7 +297,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		grantedPrincipals = result.CertificateRules.AllowedPrincipals.Issued()
+		grantedPrincipals = result.GrantedPrincipals
 		// config.Validate rejects groups with no allowed_principals, so an empty
 		// expansion is defensive — deny rather than mint an empty (any-principal)
 		// cert.
@@ -413,16 +414,29 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Issue the certificate for exactly the principals the user requested,
-		// not the group's full allowed_principals set. Authorization above has
-		// confirmed every requested principal is permitted by the matched group,
-		// so honoring the request is least-privilege: a user asking for
-		// ["deploy"] receives a cert valid only for "deploy" even if their group
-		// also allows "root". Deduplicate so a request padded with repeats does
-		// not bloat the cert's ValidPrincipals.
-		grantedPrincipals = slices.Clone(req.Principals)
-		slices.Sort(grantedPrincipals)
-		grantedPrincipals = slices.Compact(grantedPrincipals)
+		// Issue the certificate for the principals the user requested — or, for
+		// entries the matched group maps (`root: global-root`), their configured
+		// targets — never the group's full allowed_principals set. Authorization
+		// resolved each requested name through the winning group's own rules
+		// (or, on the solo self-fallback, granted exactly the caller's uid), so
+		// honoring the result is least-privilege: a user asking for ["deploy"]
+		// receives a cert valid only for "deploy" even if their group also allows
+		// "root". The authorizer sorts and deduplicates, so a request padded with
+		// repeats (or two names mapped to one target) does not bloat
+		// ValidPrincipals.
+		grantedPrincipals = result.GrantedPrincipals
+	}
+
+	// Every path above ends with an Allowed result. An allowed result with no
+	// principals is an authorizer bug; fail closed rather than mint an empty
+	// (any-principal) certificate.
+	if len(grantedPrincipals) == 0 {
+		outcome = outcomeDenied
+		slog.Warn("authz.denied", "principal", principal, "group", result.GroupName, "reason", "empty_grant")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Not authorized (no principals granted)"})
+		return
 	}
 
 	// Static attributes from config become custom extensions on the cert.
@@ -431,7 +445,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,
 		KeyID:            principal,
-		Principals:       grantedPrincipals,
+		Principals:       slices.Clone(grantedPrincipals), // defensive copy: the authorizer's slice is not ours
 		Validity:         result.CertificateRules.Validity,
 		Permissions:      maps.Clone(result.CertificateRules.Permissions),
 		CustomAttributes: customAttributes,
@@ -462,6 +476,7 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 		"principal", principal,
 		"group", result.GroupName,
 		"source", result.Source,
+		"requested_principals", req.Principals,
 		"granted_principals", grantedPrincipals,
 		"group_allowed_principals", result.CertificateRules.AllowedPrincipals.Requestable(),
 		"remote_addr", r.RemoteAddr,

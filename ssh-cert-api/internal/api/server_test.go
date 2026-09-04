@@ -42,22 +42,49 @@ type fakeAuthorizer struct {
 	selfErr    error
 }
 
-func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.AuthorizationResult, error) {
-	return f.result, f.err
+// withGrant mirrors the real authorizer's contract — an Allowed result always
+// carries the principals the cert must get — for fake results that don't set
+// GrantedPrincipals themselves. The default is identity semantics (what the
+// real authorizer returns for plain allowed_principals). A test that wants a
+// mapped or deliberately empty grant sets the field explicitly; a non-nil
+// slice (even an empty one) is passed through untouched. The result is copied
+// so a shared pointer across subtests is never mutated.
+func withGrant(res *authz.AuthorizationResult, granted []string) *authz.AuthorizationResult {
+	if res == nil || !res.Allowed || res.GrantedPrincipals != nil {
+		return res
+	}
+	cp := *res
+	cp.GrantedPrincipals = granted
+	return &cp
+}
+
+func (f *fakeAuthorizer) Authorize(_ context.Context, _ string, requested []string) (*authz.AuthorizationResult, error) {
+	granted := slices.Clone(requested)
+	slices.Sort(granted)
+	return withGrant(f.result, slices.Compact(granted)), f.err
 }
 
 func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
+	res, err := f.result, f.err
 	if f.allResult != nil || f.allErr != nil {
-		return f.allResult, f.allErr
+		res, err = f.allResult, f.allErr
 	}
-	return f.result, f.err
+	if res != nil && res.CertificateRules != nil {
+		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued()), err
+	}
+	return res, err
 }
 
-func (f *fakeAuthorizer) AuthorizeSelf(context.Context, string) (*authz.AuthorizationResult, error) {
+func (f *fakeAuthorizer) AuthorizeSelf(_ context.Context, principal string) (*authz.AuthorizationResult, error) {
+	res, err := f.result, f.err
 	if f.selfResult != nil || f.selfErr != nil {
-		return f.selfResult, f.selfErr
+		res, err = f.selfResult, f.selfErr
 	}
-	return f.result, f.err
+	uid := principal
+	if at := strings.LastIndex(principal, "@"); at >= 0 {
+		uid = principal[:at] // same split as authz.selfEligibleUID
+	}
+	return withGrant(res, []string{uid}), err
 }
 
 type fakeSigner struct {
@@ -308,6 +335,98 @@ func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
 	}
 	if !slices.Equal(signer.got.Principals, []string{"deploy"}) {
 		t.Errorf("cert principals = %v, want exactly [deploy] (the requested subset)", signer.got.Principals)
+	}
+}
+
+// TestHandleSignRequest_MappedPrincipalReachesSigner verifies that a group's
+// `root: global-root` mapping is what reaches the enclave — the cert carries
+// the mapped (issued) name, never the requested "root" itself.
+func TestHandleSignRequest_MappedPrincipalReachesSigner(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}},
+	}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "sysadmins",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: []string{"global-root"}, // what the real authorizer returns for a "root" request
+	}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer not called")
+	}
+	if want := []string{"global-root"}; !slices.Equal(signer.got.Principals, want) {
+		t.Fatalf("enclave principals = %v, want %v (mapped name only, never the requested 'root')", signer.got.Principals, want)
+	}
+	if signer.got.KeyID != "dave@REALM.COM" {
+		t.Fatalf("KeyID = %q must stay the authenticated identity", signer.got.KeyID)
+	}
+}
+
+// TestHandleSignRequest_AllowedWithEmptyGrantDenied verifies the handler
+// fails closed — 403, signer never called — when an Allowed result somehow
+// carries no granted principals (an authorizer bug), rather than minting an
+// empty (any-principal) certificate.
+func TestHandleSignRequest_AllowedWithEmptyGrantDenied(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "ops",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: []string{}, // non-nil empty: an authorizer bug the handler must fail closed on
+	}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403; body %s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Fatal("signer must not be called for an empty grant")
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsExpandsToIssuedSet verifies that an
+// all_principals request expands to the matched group's issued set — mapping
+// targets, not requested names.
+func TestHandleSignRequest_AllPrincipalsExpandsToIssuedSet(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}, {Requested: "deploy", Issued: "deploy"}},
+	}
+	// GrantedPrincipals left nil: the fake fills in Issued(), exactly like authz.AuthorizeAll.
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "sysadmins", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	if want := []string{"deploy", "global-root"}; signer.got == nil || !slices.Equal(signer.got.Principals, want) {
+		t.Fatalf("enclave principals = %v, want issued set %v", signer.got, want)
 	}
 }
 
