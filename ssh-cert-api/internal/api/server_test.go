@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,22 +43,49 @@ type fakeAuthorizer struct {
 	selfErr    error
 }
 
-func (f *fakeAuthorizer) Authorize(context.Context, string, []string) (*authz.AuthorizationResult, error) {
-	return f.result, f.err
+// withGrant mirrors the real authorizer's contract — an Allowed result always
+// carries the principals the cert must get — for fake results that don't set
+// GrantedPrincipals themselves. The default is identity semantics (what the
+// real authorizer returns for plain allowed_principals). A test that wants a
+// mapped or deliberately empty grant sets the field explicitly; a non-nil
+// slice (even an empty one) is passed through untouched. The result is copied
+// so a shared pointer across subtests is never mutated.
+func withGrant(res *authz.AuthorizationResult, granted []string) *authz.AuthorizationResult {
+	if res == nil || !res.Allowed || res.GrantedPrincipals != nil {
+		return res
+	}
+	cp := *res
+	cp.GrantedPrincipals = granted
+	return &cp
+}
+
+func (f *fakeAuthorizer) Authorize(_ context.Context, _ string, requested []string) (*authz.AuthorizationResult, error) {
+	granted := slices.Clone(requested)
+	slices.Sort(granted)
+	return withGrant(f.result, slices.Compact(granted)), f.err
 }
 
 func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
+	res, err := f.result, f.err
 	if f.allResult != nil || f.allErr != nil {
-		return f.allResult, f.allErr
+		res, err = f.allResult, f.allErr
 	}
-	return f.result, f.err
+	if res != nil && res.CertificateRules != nil {
+		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued()), err
+	}
+	return res, err
 }
 
-func (f *fakeAuthorizer) AuthorizeSelf(context.Context, string) (*authz.AuthorizationResult, error) {
+func (f *fakeAuthorizer) AuthorizeSelf(_ context.Context, principal string) (*authz.AuthorizationResult, error) {
+	res, err := f.result, f.err
 	if f.selfResult != nil || f.selfErr != nil {
-		return f.selfResult, f.selfErr
+		res, err = f.selfResult, f.selfErr
 	}
-	return f.result, f.err
+	uid := principal
+	if at := strings.LastIndex(principal, "@"); at >= 0 {
+		uid = principal[:at] // same split as authz.selfEligibleUID
+	}
+	return withGrant(res, []string{uid}), err
 }
 
 type fakeSigner struct {
@@ -137,7 +165,7 @@ func newServerForTest(t *testing.T, authN auth.Authenticator, authZ authz.Author
 func TestHandleSignRequest(t *testing.T) {
 	validRules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 		Permissions:       map[string]string{"permit-pty": ""},
 		StaticAttributes:  map[string]string{"env": "test"},
 	}
@@ -242,13 +270,20 @@ func TestHandleSignRequest(t *testing.T) {
 	}
 }
 
-// TestHandleSignRequest_SendsDefensiveCopy verifies that mutating the slice
-// passed to the enclave doesn't bleed back to the authorizer's internal
-// CertificateRules — the regression the defensive-copy change guards against.
+// TestHandleSignRequest_SendsDefensiveCopy verifies that mutating the maps
+// handed to the enclave doesn't bleed back to the authorizer's internal
+// CertificateRules — the regression maps.Clone(Permissions) and
+// maps.Clone(CriticalOptions) guard against. The signer.got.Principals
+// mutation below only guards against config.PrincipalRules ([]PrincipalRule)
+// corruption; it is NOT a test of principals slice aliasing — a []string and
+// a []PrincipalRule's string field can never share a backing array, with or
+// without a clone. The aliasing regression test for
+// slices.Clone(grantedPrincipals) at the enclave-request construction is
+// TestHandleSignRequest_ClonesGrantedPrincipals, below.
 func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root", "ubuntu"},
+		AllowedPrincipals: config.PlainPrincipals("root", "ubuntu"),
 		Permissions:       map[string]string{"permit-pty": ""},
 		CriticalOptions:   map[string]string{"force-command": "/usr/bin/true"},
 		StaticAttributes:  map[string]string{"env": "test"},
@@ -265,12 +300,14 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	if signer.got == nil {
 		t.Fatal("signer never invoked")
 	}
-	// Mutating the handed-off slice/map must not touch the config's copy.
+	// Mutating the handed-off maps must not touch the config's copy. The
+	// principals mutation here cannot exercise aliasing (see doc comment
+	// above) but is left in place as a config-slice-corruption guard.
 	signer.got.Principals[0] = "hacked"
 	signer.got.CriticalOptions["force-command"] = "/bin/sh"
 	signer.got.Permissions["permit-pty"] = "tampered"
 
-	if rules.AllowedPrincipals[0] != "root" {
+	if rules.AllowedPrincipals[0].Requested != "root" {
 		t.Errorf("config principals corrupted: %v", rules.AllowedPrincipals)
 	}
 	if rules.CriticalOptions["force-command"] != "/usr/bin/true" {
@@ -281,6 +318,52 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 	}
 }
 
+// TestHandleSignRequest_ClonesGrantedPrincipals is the regression test for
+// slices.Clone(grantedPrincipals) at the enclave-request construction
+// (server.go): it proves the handler hands the enclave a copy of the
+// authorizer's GrantedPrincipals slice, never an alias of its backing array.
+// The fake authorizer's result carries the exact `granted` slice (see
+// withGrant: a non-nil GrantedPrincipals is passed through untouched), so if
+// the handler ever regresses to `Principals: grantedPrincipals` (no clone),
+// mutating signer.got.Principals below would corrupt `granted` too.
+func TestHandleSignRequest_ClonesGrantedPrincipals(t *testing.T) {
+	granted := []string{"root"}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "admin",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: granted,
+	}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	if !slices.Equal(signer.got.Principals, []string{"root"}) {
+		t.Fatalf("enclave principals = %v, want [root]", signer.got.Principals)
+	}
+
+	// Mutate the enclave-bound slice; the authorizer's own backing array
+	// (held here as `granted`) must be unaffected if server.go clones before
+	// handing it to the enclave request.
+	signer.got.Principals[0] = "hacked"
+	if granted[0] != "root" {
+		t.Errorf("authorizer's GrantedPrincipals corrupted: got %q, want \"root\" (handler must clone, not alias)", granted[0])
+	}
+}
+
 // TestHandleSignRequest_CertScopedToRequest verifies that the certificate is
 // issued for exactly the principals the user requested, not the group's full
 // allowed_principals set. Requesting a subset must not silently widen the cert
@@ -288,7 +371,7 @@ func TestHandleSignRequest_SendsDefensiveCopy(t *testing.T) {
 func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root", "ubuntu", "deploy"},
+		AllowedPrincipals: config.PlainPrincipals("root", "ubuntu", "deploy"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
@@ -311,11 +394,103 @@ func TestHandleSignRequest_CertScopedToRequest(t *testing.T) {
 	}
 }
 
+// TestHandleSignRequest_MappedPrincipalReachesSigner verifies that a group's
+// `root: global-root` mapping is what reaches the enclave — the cert carries
+// the mapped (issued) name, never the requested "root" itself.
+func TestHandleSignRequest_MappedPrincipalReachesSigner(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}},
+	}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "sysadmins",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: []string{"global-root"}, // what the real authorizer returns for a "root" request
+	}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer not called")
+	}
+	if want := []string{"global-root"}; !slices.Equal(signer.got.Principals, want) {
+		t.Fatalf("enclave principals = %v, want %v (mapped name only, never the requested 'root')", signer.got.Principals, want)
+	}
+	if signer.got.KeyID != "dave@REALM.COM" {
+		t.Fatalf("KeyID = %q must stay the authenticated identity", signer.got.KeyID)
+	}
+}
+
+// TestHandleSignRequest_AllowedWithEmptyGrantDenied verifies the handler
+// fails closed — 403, signer never called — when an Allowed result somehow
+// carries no granted principals (an authorizer bug), rather than minting an
+// empty (any-principal) certificate.
+func TestHandleSignRequest_AllowedWithEmptyGrantDenied(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed:           true,
+		GroupName:         "ops",
+		CertificateRules:  rules,
+		Source:            "static",
+		GrantedPrincipals: []string{}, // non-nil empty: an authorizer bug the handler must fail closed on
+	}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403; body %s", w.Code, w.Body.String())
+	}
+	if signer.got != nil {
+		t.Fatal("signer must not be called for an empty grant")
+	}
+}
+
+// TestHandleSignRequest_AllPrincipalsExpandsToIssuedSet verifies that an
+// all_principals request expands to the matched group's issued set — mapping
+// targets, not requested names.
+func TestHandleSignRequest_AllPrincipalsExpandsToIssuedSet(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}, {Requested: "deploy", Issued: "deploy"}},
+	}
+	// GrantedPrincipals left nil: the fake fills in Issued(), exactly like authz.AuthorizeAll.
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "sysadmins", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerForTest(t, &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	if want := []string{"deploy", "global-root"}; signer.got == nil || !slices.Equal(signer.got.Principals, want) {
+		t.Fatalf("enclave principals = %v, want issued set %v", signer.got, want)
+	}
+}
+
 // TestHandleSignRequest_WildcardGroupGetsConcretePrincipal verifies that a group
 // with allowed_principals: ["*"] yields a cert carrying the concrete requested
 // principal, never a literal "*".
 func TestHandleSignRequest_WildcardGroupGetsConcretePrincipal(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -340,7 +515,7 @@ func TestHandleSignRequest_WildcardGroupGetsConcretePrincipal(t *testing.T) {
 // TestHandleSignRequest_WildcardRequestRejected verifies the host refuses a
 // literal "*" as a requested principal before it ever reaches the signer.
 func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -366,7 +541,7 @@ func TestHandleSignRequest_WildcardRequestRejected(t *testing.T) {
 // a cert for the whole (finite) allowed_principals set of the matched group,
 // sorted and deduplicated, without the caller enumerating them.
 func TestHandleSignRequest_AllPrincipalsExpands(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root", "ec2-user", "deploy"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root", "ec2-user", "deploy")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules, Source: "static"}}
 	signer := &fakeSigner{signed: "ok"}
@@ -391,7 +566,7 @@ func TestHandleSignRequest_AllPrincipalsExpands(t *testing.T) {
 // TestHandleSignRequest_AllPrincipalsMutualExclusion verifies that combining
 // all_principals with an explicit principals list is a 400 (ambiguous request).
 func TestHandleSignRequest_AllPrincipalsMutualExclusion(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "admin", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -418,7 +593,7 @@ func TestHandleSignRequest_AllPrincipalsMutualExclusion(t *testing.T) {
 // with a 400 (an unbounded set can't be enumerated into a cert) rather than
 // minting an any-principal certificate.
 func TestHandleSignRequest_AllPrincipalsWildcardGroupRefused(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"*"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{allResult: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -597,7 +772,7 @@ func TestHandleSignRequest_SelfFallbackRejectsNonSelf(t *testing.T) {
 // input). The enclave re-enforces the same cap; this asserts the host's 400
 // and that the over-cap request never reaches the signer.
 func TestHandleSignRequest_TooManyPrincipals(t *testing.T) {
-	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: []string{"root"}}
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
 	signer := &fakeSigner{signed: "ok"}
@@ -633,7 +808,7 @@ func TestHandleSignRequest_RateLimited(t *testing.T) {
 
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
@@ -802,7 +977,7 @@ func TestMetrics_BypassesAuthAndExposesCounters(t *testing.T) {
 	// go test -shuffle=on is meant to catch.
 	rules := &config.CertificateRules{
 		Validity:          "1h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "metrics-warmup", Realm: "EXAMPLE.COM"}}
 	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "x", CertificateRules: rules}}
@@ -1010,7 +1185,7 @@ func newServerWithConfig(t *testing.T, cfg *config.Config, authN auth.Authentica
 func TestHandleSignRequest_OIDCBearerAllowed(t *testing.T) {
 	rules := &config.CertificateRules{
 		Validity:          "8h",
-		AllowedPrincipals: []string{"root"},
+		AllowedPrincipals: config.PlainPrincipals("root"),
 		Permissions:       map[string]string{"permit-pty": ""},
 	}
 	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{
@@ -1108,7 +1283,7 @@ func TestHandleSignRequest_OIDCEndToEndRealAuthorizer(t *testing.T) {
 				OIDCGroups: []string{"platform-eng"},
 				CertificateRules: config.CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: config.PlainPrincipals("root"),
 				},
 			},
 		},
@@ -1149,5 +1324,108 @@ func TestHandleSignRequest_OIDCEndToEndRealAuthorizer(t *testing.T) {
 				t.Error("signer must not be invoked for an unbound group")
 			}
 		})
+	}
+}
+
+// policyTestConfig is a config whose fingerprint the /policy and /sign tests
+// compare against; it must differ from the empty config newServerForTest uses.
+func policyTestConfig() *config.Config {
+	return &config.Config{
+		Groups: map[string]config.Group{
+			"sysadmins": {
+				Members:          []string{"dave@REALM.COM"},
+				CertificateRules: config.CertificateRules{Validity: "8h", AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "global-root"}}},
+			},
+		},
+	}
+}
+
+// newServerWithConfigForTest is newServerForTest with a caller-supplied config.
+func newServerWithConfigForTest(t *testing.T, cfg *config.Config, authN auth.Authenticator, authZ authz.Authorizer, signer enclave.Signer) *Server {
+	t.Helper()
+	monitor := newHealthMonitor(signer, 1*time.Hour, 100*time.Millisecond)
+	monitor.Start(t.Context())
+	s, err := NewServer(cfg, authN, authZ, signer, monitor)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+func TestPolicy_RequiresAuth(t *testing.T) {
+	authN := &fakeAuthenticator{err: auth.ErrNoAuthorizationHeader}
+	s := newServerWithConfigForTest(t, policyTestConfig(), authN, &fakeAuthorizer{}, &fakeSigner{})
+	r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "policy_fingerprint") {
+		t.Fatalf("unauthenticated /policy must not disclose the fingerprint: %s", w.Body.String())
+	}
+}
+
+func TestPolicy_ReturnsConfigFingerprint(t *testing.T) {
+	cfg := policyTestConfig()
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	s := newServerWithConfigForTest(t, cfg, authN, &fakeAuthorizer{}, &fakeSigner{})
+	r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	var body struct {
+		PolicyFingerprint string `json:"policy_fingerprint"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if want := cfg.PolicyFingerprint(); body.PolicyFingerprint == "" || body.PolicyFingerprint != want {
+		t.Fatalf("policy_fingerprint = %q, want %q", body.PolicyFingerprint, want)
+	}
+}
+
+func TestPolicy_NotSubjectToSignRateLimit(t *testing.T) {
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	s := newServerWithConfigForTest(t, policyTestConfig(), authN, &fakeAuthorizer{}, &fakeSigner{})
+	// Well past the default sign burst (10): every call must still succeed,
+	// because a cache-hit cssh invocation must not spend a sign token.
+	for i := range 40 {
+		r := httptest.NewRequest(http.MethodGet, "/policy", nil)
+		r.Header.Set("Authorization", "Negotiate x")
+		w := httptest.NewRecorder()
+		s.Router().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("call %d: status = %d, want 200", i, w.Code)
+		}
+	}
+}
+
+func TestHandleSignRequest_ResponseCarriesPolicyFingerprint(t *testing.T) {
+	cfg := policyTestConfig()
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "sysadmins", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ssh-ed25519-cert-v01@openssh.com AAAA"}
+	s := newServerWithConfigForTest(t, cfg, authN, authZ, signer)
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var body messages.SigningResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.SignedKey == "" || body.PolicyFingerprint != cfg.PolicyFingerprint() {
+		t.Fatalf("body = %+v, want signed_key and policy_fingerprint %q", body, cfg.PolicyFingerprint())
 	}
 }

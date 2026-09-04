@@ -137,6 +137,87 @@ groups:
 			expectError: true,
 			errSubstr:   "no allowed_principals",
 		},
+		{
+			name: "principal mapping entries load",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root
+        - ec2-user
+`,
+			expectError: false,
+		},
+		{
+			name: "principal mapping trailing colon is rejected with a line number",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root:
+`,
+			expectError: true,
+			errSubstr:   `"root" has no target`,
+		},
+		{
+			name: "principal mapping to a list is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: [global-root, other-root]
+`,
+			expectError: true,
+			errSubstr:   `target of "root" must be a single scalar, got a sequence`,
+		},
+		{
+			name: "principal mapping wildcard target is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: "*"
+`,
+			expectError: true,
+			errSubstr:   "'root' cannot be mapped to the wildcard '*'",
+		},
+		{
+			name: "principal mapping conflicting duplicate is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root
+        - root
+`,
+			expectError: true,
+			errSubstr:   "principal 'root' is listed twice with different targets ('global-root' and 'root')",
+		},
 	}
 
 	for _, tt := range tests {
@@ -173,6 +254,41 @@ groups:
 	}
 }
 
+func TestLoadConfig_PrincipalMappingParsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  sysadmins:
+    members:
+      - dave@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - deploy
+        - root: global-root
+        - admin: global-root
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := cfg.Groups["sysadmins"].CertificateRules.AllowedPrincipals
+	want := PrincipalRules{{"deploy", "deploy"}, {"root", "global-root"}, {"admin", "global-root"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("AllowedPrincipals = %+v, want %+v", got, want)
+	}
+	if r := got.Requestable(); !slices.Equal(r, []string{"deploy", "root", "admin"}) {
+		t.Fatalf("Requestable = %v", r)
+	}
+	if i := got.Issued(); !slices.Equal(i, []string{"deploy", "global-root"}) {
+		t.Fatalf("Issued = %v", i)
+	}
+}
+
 func TestLoadConfig_FileNotFound(t *testing.T) {
 	_, err := LoadConfig("/nonexistent/file.yaml")
 	if err == nil {
@@ -197,7 +313,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -220,7 +336,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -237,7 +353,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -254,7 +370,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "invalid",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -271,13 +387,47 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{},
+							AllowedPrincipals: PlainPrincipals(),
 						},
 					},
 				},
 			},
 			expectError: true,
 			errSubstr:   "no allowed_principals",
+		},
+		{
+			name: "mapping wildcard key rejected",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: PrincipalRules{{"*", "global-root"}},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "the wildcard '*' cannot be mapped",
+		},
+		{
+			name: "mapping conflicting duplicate rejected",
+			config: Config{
+				KeytabPath: "/etc/keytab/test.keytab",
+				Groups: map[string]Group{
+					"admin": {
+						Members: []string{"admin@example.com"},
+						CertificateRules: CertificateRules{
+							Validity:          "24h",
+							AllowedPrincipals: PrincipalRules{{"root", "a"}, {"root", "b"}},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errSubstr:   "listed twice with different targets",
 		},
 		{
 			// PR #35 added the d <= 0 guard. 0s would otherwise produce a cert
@@ -290,7 +440,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "0s",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -309,7 +459,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "-1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -326,7 +476,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "25h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -346,7 +496,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							Permissions: map[string]string{
 								"permit-pty": "yes",
 							},
@@ -365,7 +515,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							CriticalOptions: map[string]string{
 								"verify-required": "true",
 							},
@@ -386,7 +536,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          "1h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 							Permissions: map[string]string{
 								"permit-X11-forwarding":   "",
 								"permit-agent-forwarding": "",
@@ -414,7 +564,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -431,7 +581,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -449,7 +599,7 @@ func TestValidate(t *testing.T) {
 						Members: []string{"admin"},
 						CertificateRules: CertificateRules{
 							Validity:          "24h",
-							AllowedPrincipals: []string{"admin"},
+							AllowedPrincipals: PlainPrincipals("admin"),
 						},
 					},
 				},
@@ -468,7 +618,7 @@ func TestValidate(t *testing.T) {
 					CertificateRules: CertificateRules{Validity: "8h"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: false,
@@ -482,7 +632,7 @@ func TestValidate(t *testing.T) {
 					CertificateRules: CertificateRules{Validity: "8h"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: true,
@@ -497,7 +647,7 @@ func TestValidate(t *testing.T) {
 					Realms:  []string{"FOO.COM"},
 				},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: true,
@@ -510,7 +660,7 @@ func TestValidate(t *testing.T) {
 				// Enabled=false with an otherwise-incomplete block must not fail.
 				SelfPrincipal: SelfPrincipalConfig{Enabled: false},
 				Groups: map[string]Group{
-					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+					"admin": {Members: []string{"admin@FOO.COM"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 				},
 			},
 			expectError: false,
@@ -555,7 +705,7 @@ func TestValidate_ValidityDurationParsing(t *testing.T) {
 						Members: []string{"test@example.com"},
 						CertificateRules: CertificateRules{
 							Validity:          duration,
-							AllowedPrincipals: []string{"test"},
+							AllowedPrincipals: PlainPrincipals("test"),
 						},
 					},
 				},
@@ -585,7 +735,7 @@ func TestConfigStructure(t *testing.T) {
 				Members: []string{"admin@example.com", "root@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin", "root"},
+					AllowedPrincipals: PlainPrincipals("admin", "root"),
 					Permissions: map[string]string{
 						"permit-pty":     "",
 						"permit-user-rc": "",
@@ -600,7 +750,7 @@ func TestConfigStructure(t *testing.T) {
 				Members: []string{"user1@example.com", "user2@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "1h",
-					AllowedPrincipals: []string{"user1", "user2"},
+					AllowedPrincipals: PlainPrincipals("user1", "user2"),
 					Permissions: map[string]string{
 						"permit-pty": "",
 					},
@@ -650,21 +800,21 @@ func TestConfigValidation_MultipleGroups(t *testing.T) {
 				Members: []string{"admin@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin"},
+					AllowedPrincipals: PlainPrincipals("admin"),
 				},
 			},
 			"users": {
 				Members: []string{"user@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "1h",
-					AllowedPrincipals: []string{"user"},
+					AllowedPrincipals: PlainPrincipals("user"),
 				},
 			},
 			"invalid": {
 				Members: []string{"test@example.com"},
 				CertificateRules: CertificateRules{
 					Validity:          "invalid-duration",
-					AllowedPrincipals: []string{"test"},
+					AllowedPrincipals: PlainPrincipals("test"),
 				},
 			},
 		},
@@ -798,7 +948,7 @@ func validLDAPConfig() Config {
 				LDAPGroups: []string{"CN=ssh-admins,DC=corp,DC=example"},
 				CertificateRules: CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: PlainPrincipals("root"),
 				},
 			},
 		},
@@ -1162,7 +1312,7 @@ func TestWarnings_StripRealm(t *testing.T) {
 				Members: []string{"admin"},
 				CertificateRules: CertificateRules{
 					Validity:          "24h",
-					AllowedPrincipals: []string{"admin"},
+					AllowedPrincipals: PlainPrincipals("admin"),
 				},
 			},
 		},
@@ -1190,7 +1340,7 @@ func TestWarnings_SelfPrincipalRealm(t *testing.T) {
 			CertificateRules: CertificateRules{Validity: "8h"},
 		},
 		Groups: map[string]Group{
-			"admin": {Members: []string{"admin"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: []string{"admin"}}},
+			"admin": {Members: []string{"admin"}, CertificateRules: CertificateRules{Validity: "24h", AllowedPrincipals: PlainPrincipals("admin")}},
 		},
 	}
 	want := []Warning{
@@ -1321,7 +1471,7 @@ func TestEnclaveMetricsInterval_Validate(t *testing.T) {
 					Members: []string{"u@example.com"},
 					CertificateRules: CertificateRules{
 						Validity:          "1h",
-						AllowedPrincipals: []string{"u"},
+						AllowedPrincipals: PlainPrincipals("u"),
 					},
 				},
 			},
@@ -1413,7 +1563,7 @@ func validOAuthConfig() Config {
 				OIDCGroups: []string{"platform-eng"},
 				CertificateRules: CertificateRules{
 					Validity:          "8h",
-					AllowedPrincipals: []string{"root"},
+					AllowedPrincipals: PlainPrincipals("root"),
 				},
 			},
 		},
@@ -1515,7 +1665,7 @@ func TestValidate_OAuth(t *testing.T) {
 						Members: []string{"admin@REALM"},
 						CertificateRules: CertificateRules{
 							Validity:          "8h",
-							AllowedPrincipals: []string{"root"},
+							AllowedPrincipals: PlainPrincipals("root"),
 						},
 					},
 				}
@@ -1554,7 +1704,7 @@ func TestApplyDefaults_OAuth(t *testing.T) {
 		Groups: map[string]Group{
 			"admins": {
 				OIDCGroups:       []string{"admins"},
-				CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+				CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: PlainPrincipals("root")},
 			},
 		},
 	}
@@ -1625,7 +1775,7 @@ func TestWarnings_OAuth(t *testing.T) {
 				c.Groups = map[string]Group{
 					"admins": {
 						Members:          []string{"admin@REALM"},
-						CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: []string{"root"}},
+						CertificateRules: CertificateRules{Validity: "8h", AllowedPrincipals: PlainPrincipals("root")},
 					},
 				}
 			},
@@ -1643,5 +1793,26 @@ func TestWarnings_OAuth(t *testing.T) {
 				t.Errorf("Warnings() =\n  %+v\nwant:\n  %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestLoadConfig_ShippedExample keeps configs/config-example.yaml honest: it is
+// installed verbatim by every packaging and is the operator's copy-paste source,
+// so it must load through the real LoadConfig and carry the documented mapping.
+func TestLoadConfig_ShippedExample(t *testing.T) {
+	cfg, err := LoadConfig("../../configs/config-example.yaml")
+	if err != nil {
+		t.Fatalf("shipped example must load: %v", err)
+	}
+	sa := cfg.Groups["sysadmins"].CertificateRules.AllowedPrincipals
+	if got := sa.Resolve("root"); got != "global-root" {
+		t.Fatalf("sysadmins: root resolves to %q, want global-root", got)
+	}
+	wm := cfg.Groups["webmasters"].CertificateRules.AllowedPrincipals
+	if got := wm.Resolve("root"); got != "webserver-root" {
+		t.Fatalf("webmasters: root resolves to %q, want webserver-root", got)
+	}
+	if !slices.Equal(sa.Issued(), []string{"ec2-user", "global-root"}) {
+		t.Fatalf("sysadmins issued set = %v", sa.Issued())
 	}
 }

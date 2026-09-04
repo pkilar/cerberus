@@ -32,6 +32,12 @@
 # │  - ALL requested principals must match within a SINGLE group        │
 # │  - A user in multiple groups CANNOT combine principals across them  │
 # │  - Use "*" in allowed_principals to permit any SSH principal        │
+# │  - An entry may MAP a requested name to a different certificate     │
+# │    principal:   - root: global-root                                 │
+# │    Policy is on the LEFT name; the cert carries the RIGHT name,     │
+# │    which is NOT itself requestable. "*" may be neither side of a    │
+# │    mapping; an explicit mapping beats "*". The winning group's      │
+# │    mapping applies (alphabetical rule above), never a mix.          │
 # │  - The matched group's certificate_rules (validity, permissions,    │
 # │    attributes, critical_options) are applied to the certificate     │
 # │                                                                     │
@@ -259,6 +265,8 @@ groups:
       # to log in as. These become Casbin policies: p, <group>, <principal>, sign
       # Use "*" as a single entry to allow ANY SSH principal for this group.
       # Example wildcard: allowed_principals: ["*"]
+      # An entry may also map a requested name to a different certificate
+      # principal — see the sysadmins/webmasters groups below.
       allowed_principals:
         - "root"
         - "ec2-user"
@@ -318,6 +326,43 @@ groups:
       static_attributes:
         team@example.com: "data"
         access-level@example.com: "restricted"
+
+  # ── Principal mapping ──────────────────────────────────────────────────
+  # An allowed_principals entry may be a single-pair mapping `requested: issued`.
+  # Members request the LEFT name as usual (a plain `cssh root@host` requests
+  # "root"); the certificate carries the RIGHT name instead — and ONLY the right
+  # name. Pair this with sshd's AuthorizedPrincipalsFile so each host decides
+  # which role principals may become root:
+  #   /etc/ssh/auth_principals/root on every host:     global-root
+  #   ...and additionally on Apache hosts:              webserver-root
+  # A host with no AuthorizedPrincipalsFile for root rejects both certs (neither
+  # carries the literal "root"), so the mapping fails closed.
+  # A user in BOTH groups gets the first group alphabetically (sysadmins), so
+  # name groups accordingly. The RIGHT name is not requestable on its own, and
+  # "*" may be neither side of a mapping. See docs/RUNBOOK.md, "Role principals
+  # with Cerberus principal mapping".
+  sysadmins:
+    members:
+      - "dave@YOUR-REALM.COM"
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root       # request "root" → cert principal "global-root"
+        - "ec2-user"              # plain entries work alongside mappings
+      permissions:
+        permit-pty: ""
+        permit-agent-forwarding: ""
+        permit-port-forwarding: ""
+
+  webmasters:
+    members:
+      - "erin@YOUR-REALM.COM"
+    certificate_rules:
+      validity: "4h"
+      allowed_principals:
+        - root: webserver-root    # same request, a different role principal
+      permissions:
+        permit-pty: ""
 
   # Example of an LDAP-backed group. Membership is decided at request time
   # by querying the LDAP backend whose realms cover the user's Kerberos

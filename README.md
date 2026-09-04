@@ -10,7 +10,7 @@ Cerberus is a highly secure, automated SSH Certificate Authority (CA) built to r
 
 - **Ultimate Key Security**: The CA private key is loaded directly into a secure Nitro Enclave and never leaves it. It is not accessible from the parent EC2 instance.
 - **Kerberos Authentication**: The public-facing API uses Kerberos (SPNEGO) to authenticate users, integrating seamlessly with existing enterprise identity systems like Active Directory or MIT Kerberos.
-- **Flexible, Group-Based Authorization**: A simple, powerful YAML file (config.yaml) defines which users belong to which groups and what permissions each group has (e.g., certificate validity, allowed server principals). Authorization is enforced by [Casbin](https://casbin.org/) with per-group policy evaluation and wildcard principal support.
+- **Flexible, Group-Based Authorization**: A simple, powerful YAML file (config.yaml) defines which users belong to which groups and what permissions each group has (e.g., certificate validity, allowed server principals). Authorization is enforced by [Casbin](https://casbin.org/) with per-group policy evaluation, wildcard principal support, and per-group **principal mapping** (a request for `root` can be issued as a role principal such as `global-root` for sshd's `AuthorizedPrincipalsFile` to map back).
 - **Secure Communication**: The API server communicates with the signing service in the enclave over a secure, isolated VSOCK connection, not the standard network stack.
 - **Auditable**: Every signing request is logged with the authenticated principal and group; certificates can carry operator-defined custom metadata (e.g. `team@example.com`, `access-level@example.com`) for downstream audit and policy use. The principal itself is recorded as the cert's `KeyId`, and `ValidAfter`/`ValidBefore` bound the issuance window in the signed cert.
 - **Easy to Deploy**: Makefile automation simplifies building the application binaries and the Enclave Image File (.eif).
@@ -326,7 +326,8 @@ Once the services are running, users can request signed certificates:
 3. **Success response**:
    ```json
    {
-     "signed_key": "ssh-rsa-cert-v01@openssh.com AAA..."
+     "signed_key": "ssh-rsa-cert-v01@openssh.com AAA...",
+     "policy_fingerprint": "3b7c9e0f…"
    }
    ```
 
@@ -342,6 +343,7 @@ See `ssh-cert-api/configs/config-example.yaml` for a complete configuration exam
 - User group definitions
 - Certificate validity periods
 - Allowed principals
+- Principal mapping (`root: global-root` issues a role principal for the requested name)
 - Permissions and custom attributes
 
 ## **Security Considerations**

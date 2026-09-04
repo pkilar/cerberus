@@ -178,7 +178,7 @@ groups:
       - "bob@REALM.COM"
     certificate_rules:
       validity: "8h"                         # Max certificate lifetime
-      allowed_principals:                     # Principals the user may request (* = wildcard)
+      allowed_principals:                     # Principals the user may request (* = wildcard; `root: global-root` maps)
         - "root"
         - "ec2-user"
       permissions:                            # SSH certificate extensions
@@ -194,9 +194,9 @@ groups:
         source-address: "10.20.30.0/24"
 ```
 
-**Authorization flow**: The API matches the authenticated Kerberos principal against group membership. When a user belongs to multiple groups, the API picks the **first group in alphabetical order by group name** whose `allowed_principals` cover **every** principal in the request. Principals are *not* combined across two different groups within a single request — pick the right group, or the request is rejected with `403`. The one exception is the caller's own uid when `self_principal` is enabled and permits it (see below): it always "rides along" with whatever a matching group grants, so e.g. requesting `["root", "<your own uid>"]` succeeds via a group that only lists `root`, as long as `self_principal` would separately allow your own uid. Enforcement is in `ssh-cert-api/internal/authz/casbin.go`.
+**Authorization flow**: The API matches the authenticated Kerberos principal against group membership. When a user belongs to multiple groups, the API picks the **first group in alphabetical order by group name** whose `allowed_principals` cover **every** principal in the request. Principals are *not* combined across two different groups within a single request — pick the right group, or the request is rejected with `403`. An `allowed_principals` entry may be a plain name or a mapping `requested: issued` (e.g. `root: global-root`); the winning group's mapping is applied to the request, so the certificate carries the mapped name instead of the requested one, and mapping targets are not themselves requestable — see [Role principals with Cerberus principal mapping](#role-principals-with-cerberus-principal-mapping). The one exception is the caller's own uid when `self_principal` is enabled and permits it (see below): it always "rides along" with whatever a matching group grants, so e.g. requesting `["root", "<your own uid>"]` succeeds via a group that only lists `root`, as long as `self_principal` would separately allow your own uid. Enforcement is in `ssh-cert-api/internal/authz/casbin.go`.
 
-**All-principals expansion** (`all_principals: true`): a `/sign` request may set `all_principals: true` (mutually exclusive with `principals`) to mint a cert for **every** principal in the user's **first group** (alphabetically). The API expands that group's finite `allowed_principals`, deduped and capped at 100. If the selected group grants `allowed_principals: ["*"]` (any principal), the request is **refused with a 400** — an unbounded set cannot be enumerated into a certificate; the caller must request explicit principals instead. The `cssh` client exposes this as `cssh --sign-only --all-principals` (see `docs/cssh.md`).
+**All-principals expansion** (`all_principals: true`): a `/sign` request may set `all_principals: true` (mutually exclusive with `principals`) to mint a cert for **every** principal in the user's **first group** (alphabetically). The API expands that group's finite `allowed_principals` into its set of *issued* names (a mapping entry such as `root: global-root` contributes `global-root`), deduped and capped at 100. If the selected group grants `allowed_principals: ["*"]` (any principal), the request is **refused with a 400** — an unbounded set cannot be enumerated into a certificate; the caller must request explicit principals instead. The `cssh` client exposes this as `cssh --sign-only --all-principals` (see `docs/cssh.md`).
 
 **Self-service certificates**: with the top-level `self_principal:` block enabled, an authenticated user may obtain a cert for their **own short uid** — `jsmith@FOO.COM` → principal `jsmith` — without being enumerated in any group. Granted three ways:
 
@@ -793,6 +793,27 @@ GET /health
   ```
   Per-backend status is **advisory** — the top-level `status` stays gated on the enclave staleness path so that a transient LDAP outage cannot stop static-only certificate issuance. Alert on `ldap[].healthy` separately (or scrape `cerberus_ldap_backend_up{backend="..."}` from `/metrics`).
 
+### Policy Endpoint
+
+```
+GET /policy
+```
+
+- **Authentication required** — the same Kerberos/SPNEGO or OIDC bearer as `/sign`. **Not** subject to the per-principal
+  sign rate limiter, and it never touches the enclave.
+- Returns HTTP 200 with `{"policy_fingerprint": "<64 hex chars>"}`: a SHA-256 over the authorization policy the running
+  process loaded (`groups`, `strip_realms`, `self_principal`). Keytab, TLS, LDAP and OAuth settings are excluded, so the
+  value carries nothing secret-derived and does not change on unrelated edits. The same value is returned on every
+  successful `/sign` response and logged at startup as `startup.policy_fingerprint`.
+- Purpose: `cssh` records the fingerprint beside each cached certificate and, before reusing one, compares it with this
+  endpoint's value. Any authorization-policy change (which requires a restart) therefore makes every honest client
+  re-sign on its next invocation instead of riding out the old certificate's validity window — see
+  [Role principals with Cerberus principal mapping](#role-principals-with-cerberus-principal-mapping). A client without a
+  usable credential, or talking to a server that predates this endpoint, keeps the old behaviour (reuse until expiry).
+- Roll every API instance to a new configuration together. While instances with different policies sit behind one
+  load balancer, a client may see alternating fingerprints and re-sign on consecutive calls (bounded by the per-principal
+  rate limiter) until the roll-out completes.
+
 ### Metrics Endpoint
 
 ```
@@ -1015,14 +1036,16 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 
 ### Authorization Failures
 
-| Error                                                          | Likely Cause                                        | Resolution                                                                                                                                                                                                                                                                                                          |
-| -------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Not authorized for requested principals` (HTTP 403)           | User's group doesn't allow the requested principals | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                               |
-| User gets wrong permissions                                    | User matches the wrong group                        | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request. |
-| User not found in any group                                    | Principal not listed in any `members` list          | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                            |
-| HTTP 403 with `authz.ldap.error` in logs                       | LDAP backend unreachable or denied bind             | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                            |
-| Service refuses to start with `ldap[...] initial probe failed` | Misconfigured LDAP backend at startup               | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                             |
-| `realm "..." claimed by both backends`                         | Two LDAP backends list overlapping realms           | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                           |
+| Error                                                                                                           | Likely Cause                                                                             | Resolution                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Not authorized for requested principals` (HTTP 403)                                                            | User's group doesn't allow the requested principals                                      | Check `allowed_principals` in the user's group config; `*` allows all                                                                                                                                                                                                                                              |
+| User gets wrong permissions                                                                                     | User matches the wrong group                                                             | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request.|
+| Certificate carries a different principal than requested (requested `root`, `ssh-keygen -L` shows `global-root`)| The matched group maps that principal (`root: global-root` in `allowed_principals`)      | Expected — the mapped name is what the account's `AuthorizedPrincipalsFile` should list. If the *wrong* group's mapping won, groups are matched alphabetically: rename or split them.                                                                                                                              |
+| HTTP 403 when requesting a mapping target directly (e.g. `--principals global-root`)                            | Mapping targets are not requestable; only the left-hand names in `allowed_principals` are| Request the left-hand name (`root`) and let the mapping issue the target, or add the target as a plain entry if it should be requestable on its own.                                                                                                                                                               |
+| User not found in any group                                                                                     | Principal not listed in any `members` list                                               | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                           |
+| HTTP 403 with `authz.ldap.error` in logs                                                                        | LDAP backend unreachable or denied bind                                                  | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                           |
+| Service refuses to start with `ldap[...] initial probe failed`                                                  | Misconfigured LDAP backend at startup                                                    | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                            |
+| `realm "..." claimed by both backends`                                                                          | Two LDAP backends list overlapping realms                                                | Make `realms:` disjoint across all `ldap:` entries. A Kerberos realm may map to at most one LDAP backend.                                                                                                                                                                                                          |
 
 ### VSOCK / KMS Issues
 
@@ -1112,7 +1135,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
 - All signing requests require **Kerberos/SPNEGO authentication**.
 - Authorization is **group-based** with per-group certificate rules.
-- Principals support **wildcard matching** — use carefully. A group with `allowed_principals: ["*"]` authorizes a user to request *any* principal, but the **issued certificate is always scoped to exactly the principals the user requested**, never the group's full `allowed_principals` list and never a literal `"*"`. Requesting `"*"` itself is rejected (it is meaningful only as a policy wildcard, not as a certificate principal).
+- Principals support **wildcard matching** — use carefully. A group with `allowed_principals: ["*"]` authorizes a user to request *any* principal, but the **issued certificate is always scoped to the principals the user requested** — or, for entries the group maps such as `root: global-root`, their configured targets — never the group's full `allowed_principals` list and never a literal `"*"`. Requesting `"*"` itself is rejected (it is meaningful only as a policy wildcard, not as a certificate principal).
 - When a user is in multiple groups, the **first group alphabetically by name** whose `allowed_principals` cover the request wins. Reordering YAML keys won't change this — rename groups if you need a different winner.
 - Per-principal rate limiting on `/sign` is on by default (`RATE_LIMIT_RPS=5`, `RATE_LIMIT_BURST=10`). Tune via env vars if needed.
 
@@ -1262,11 +1285,12 @@ Request:
 Response (success):
 ```json
 {
-  "signed_key": "ssh-rsa-cert-v01@openssh.com AAAA..."
+  "signed_key": "ssh-rsa-cert-v01@openssh.com AAAA...",
+  "policy_fingerprint": "3b7c9e0f…"
 }
 ```
 
-The field name is `signed_key` — defined by `messages.SigningResponse` (`messages/messages.go`) and validated by `messages/messages_test.go`. Don't rename in docs; this is the wire contract shared with stress clients and any future SDK.
+The field name is `signed_key` — defined by `messages.SigningResponse` (`messages/messages.go`) and validated by `messages/messages_test.go`. Don't rename in docs; this is the wire contract shared with stress clients and any future SDK. `policy_fingerprint` is the value served by the [Policy Endpoint](#policy-endpoint); clients that do not cache certificates may ignore it.
 
 ### SSH Certificate Fields
 
@@ -1344,6 +1368,73 @@ Match User deploy,ec2-user
 ```
 
 **Static file vs. dynamic command.** `AuthorizedPrincipalsFile` is the static form. For decisions that depend on certificate *contents* — a custom `team` / `access-level` extension, time of day, an external lookup — use `AuthorizedPrincipalsCommand` instead (see [Acting on custom extensions server-side](#acting-on-custom-extensions-server-side)). Either way the mapping is an **additional** gate: the certificate must still be signed by the trusted CA, unexpired, and satisfy any `source-address` / critical options.
+
+#### Role principals with Cerberus principal mapping
+
+`AuthorizedPrincipalsFile` gives every host a per-account allowlist, but with plain `allowed_principals` entries the
+certificate still carries whatever name the user requested. **Principal mapping** lets a group turn a requested name
+into a role principal, so the same `cssh root@host` yields a different certificate depending on the caller's group,
+and each host decides which roles may become `root`:
+
+```yaml
+groups:
+  sysadmins:
+    members: ["dave@REALM.COM"]
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: global-root       # request "root", cert principal "global-root"
+  webmasters:
+    members: ["erin@REALM.COM"]
+    certificate_rules:
+      validity: "4h"
+      allowed_principals:
+        - root: webserver-root    # same request, a different role principal
+```
+
+On **every** host, `/etc/ssh/auth_principals/root` lists the fleet-wide role; Apache hosts add the web role:
+
+```bash
+# every host
+printf '%s\n' global-root | sudo tee /etc/ssh/auth_principals/root
+# Apache hosts only
+printf '%s\n' global-root webserver-root | sudo tee /etc/ssh/auth_principals/root
+```
+
+Now `cssh root@db01` works for Dave (cert principal `global-root`) and fails for Erin (her cert says
+`webserver-root`, which `db01` does not list), while `cssh root@web01` works for both. Neither certificate carries
+the literal `root`, so a host that has **not** been given an `AuthorizedPrincipalsFile` for `root` rejects both —
+the mapping fails closed.
+
+Rules of the road:
+
+- Only the **left-hand** name is requestable. `cssh --principals global-root` is refused with `403` unless a plain
+  `global-root` entry (or `*`) also exists in the group.
+- The mapped certificate carries **only** the target, never the requested name as well.
+- A user in several groups gets the **first group alphabetically** that covers the request — and that group's
+  mapping. Dave in both `sysadmins` and `webmasters` gets `global-root` (`s` sorts before `w`); name groups so the
+  broader role sorts first, or keep memberships disjoint.
+- `*` may appear as a plain entry alongside mappings (the mapping wins for its own name; everything else is issued
+  as requested) but may be neither side of a mapping. The same requested name may not map to two different targets.
+- `--all-principals` expands to the group's **issued** names (`global-root`, not `root`).
+- Both names are logged: `sign.success` carries `requested_principals` and `granted_principals`.
+- `cssh` records the requested set next to the cert (`<key>-cert.requested`) so its cache keeps working even
+  though the cert's principals differ from the request (see `docs/cssh.md`).
+- **Policy changes invalidate client caches — but never issued certificates.** Enabling or changing a mapping is a
+  config change plus restart, which changes the server's policy fingerprint (`GET /policy`, also returned on every
+  `/sign`). A current `cssh` records that fingerprint beside each cached cert and re-signs on its next invocation when it
+  differs, so honest users pick up the new principal immediately. Certificates already issued — including any a user
+  copied elsewhere — remain valid until they expire: the boundary for a hostile holder is the validity window, so
+  **shorten `validity` before a restrictive change** if that window matters.
+- **Still upgrade `cerberus-client` first.** The `cssh` wrapper is a separate, noarch package. An older `cssh` neither
+  checks the fingerprint nor records the request: once the server maps the requested name it re-signs on **every**
+  invocation, hammering the per-principal rate limit (`RATE_LIMIT_RPS=5`, burst 10) with a full Kerberos + HTTPS +
+  enclave round trip each time. Upgrading the client against an old server is harmless (`/policy` returns 404 and the
+  client keeps its previous behaviour); once the server is upgraded, each cached cert re-signs exactly once to record
+  its fingerprint.
+- **The caller's own uid is never remapped.** With `self_principal` enabled, an entry `dave: dave-role` applies to
+  other members who request `dave`, but Dave requesting his own uid gets `dave` — the self-service path is independent
+  of group membership by design.
 
 ### Client Usage
 

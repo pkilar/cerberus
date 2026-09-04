@@ -206,9 +206,13 @@ const oauthLeewayMax = 5 * time.Minute
 const oauthHTTPTimeoutMax = 30 * time.Second
 
 // CertificateRules specifies the parameters for a signed SSH certificate.
+//
+// AllowedPrincipals entries are plain names or single-pair mappings
+// (`root: global-root`); see PrincipalRule. Casbin policy is on the requested
+// name, the certificate carries the issued name.
 type CertificateRules struct {
 	Validity          string            `yaml:"validity"`
-	AllowedPrincipals []string          `yaml:"allowed_principals"`
+	AllowedPrincipals PrincipalRules    `yaml:"allowed_principals"`
 	Permissions       map[string]string `yaml:"permissions"`
 	StaticAttributes  map[string]string `yaml:"static_attributes"`
 	CriticalOptions   map[string]string `yaml:"critical_options"`
@@ -430,6 +434,9 @@ func (c *Config) Validate() error {
 
 		if len(rules.AllowedPrincipals) == 0 {
 			return fmt.Errorf("group '%s' has no allowed_principals", name)
+		}
+		if err := rules.AllowedPrincipals.validate(name); err != nil {
+			return err
 		}
 
 		if err := validateFlagExtensions(name, "permissions", rules.Permissions); err != nil {

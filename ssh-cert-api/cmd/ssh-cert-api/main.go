@@ -53,6 +53,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+	slog.Info("startup.policy_fingerprint", "fingerprint", cfg.PolicyFingerprint())
 	logging.Debug("Configuration loaded successfully.")
 
 	// Non-fatal config-hygiene warnings: bare static_attributes keys and any

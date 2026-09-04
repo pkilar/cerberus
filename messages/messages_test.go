@@ -339,3 +339,38 @@ func TestRedactedResponseJSON_ElidesBeginKeyLoadBlobs(t *testing.T) {
 		}
 	}
 }
+
+func TestSshSigningResponse_PolicyFingerprintJSON(t *testing.T) {
+	t.Parallel()
+	resp := SigningResponse{SignedKey: "ssh-ed25519-cert-v01@openssh.com AAAA", PolicyFingerprint: "abc123"}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"policy_fingerprint":"abc123"`) {
+		t.Fatalf("policy_fingerprint missing from %s", data)
+	}
+	var decoded SigningResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.PolicyFingerprint != "abc123" {
+		t.Fatalf("PolicyFingerprint = %q", decoded.PolicyFingerprint)
+	}
+	// An enclave-style reply never carries the field; it must decode to "" and
+	// marshal without it (omitempty), keeping the VSOCK shape unchanged.
+	var enclave SigningResponse
+	if err := json.Unmarshal([]byte(`{"signed_key":"x"}`), &enclave); err != nil {
+		t.Fatalf("unmarshal enclave reply: %v", err)
+	}
+	if enclave.PolicyFingerprint != "" {
+		t.Fatalf("expected empty PolicyFingerprint, got %q", enclave.PolicyFingerprint)
+	}
+	out, err := json.Marshal(enclave)
+	if err != nil {
+		t.Fatalf("marshal enclave reply: %v", err)
+	}
+	if strings.Contains(string(out), "policy_fingerprint") {
+		t.Fatalf("empty PolicyFingerprint must be omitted, got %s", out)
+	}
+}

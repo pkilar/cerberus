@@ -178,8 +178,11 @@ _cssh_oidc_store() {
 # token. Requires CSSH_OIDC_ISSUER and CSSH_OIDC_CLIENT_ID.
 #   $1 = force (1 = skip the cached access token; renew via refresh_token, else
 #        run the device flow). Used by the sign path's 401 retry.
+#   $2 = non-interactive (1 = return the cached, unexpired token or fail; never
+#        refresh, never start the device flow). Used by the cache-check policy
+#        probe.
 _cssh_oidc_token() {
-    local _force="${1:-0}"
+    local _force="${1:-0}" _noninteractive="${2:-0}"
     local _issuer="${CSSH_OIDC_ISSUER:-}" _cid="${CSSH_OIDC_CLIENT_ID:-}"
     local _scope="${CSSH_OIDC_SCOPE:-openid profile email groups offline_access}"
     local _aud="${CSSH_OIDC_AUDIENCE:-}"
@@ -218,6 +221,10 @@ _cssh_oidc_token() {
             else _send=$(jq -r '.access_token // empty' "$_file" 2>/dev/null); fi
             if [ -n "$_send" ]; then printf '%s' "$_send"; return 0; fi
         fi
+    fi
+    # A non-interactive caller wants only what the cache already holds.
+    if [ "$_noninteractive" -eq 1 ]; then
+        return 1
     fi
     [ "$_match" -eq 1 ] && _cached_refresh=$(jq -r '.refresh_token // empty' "$_file" 2>/dev/null)
 
@@ -338,6 +345,44 @@ _cssh_oidc_token() {
             *) printf 'cssh: OIDC token error: %s\n' "${_err:-HTTP $_code}" >&2; rm -f "$_tmp"; return 1 ;;
         esac
     done
+}
+
+# _cssh_policy_fingerprint prints the server's current authorization-policy
+# fingerprint (GET /policy), or nothing when it cannot be learned without side
+# effects: no usable credential (no Kerberos TGT, no cached OIDC token — it never
+# prompts), a server that predates the endpoint (HTTP 404), jq missing, or any
+# network error. It writes nothing to stderr. The caller treats "nothing" as
+# "unknown" and keeps the pre-fingerprint cache behaviour.
+#   $1 base URL   $2 CA bundle path (may be empty)   $3 auth mode (kerberos|oidc)
+_cssh_policy_fingerprint() {
+    local _url="$1" _cacert="$2" _mode="$3" _hdr=""
+    command -v jq >/dev/null 2>&1 || return 0
+    if [ "$_mode" = oidc ]; then
+        local _tok
+        _tok=$(_cssh_oidc_token 0 1 2>/dev/null) || return 0
+        [ -n "$_tok" ] || return 0
+        _hdr="Authorization: Bearer $_tok"
+    else
+        command -v klist >/dev/null 2>&1 || return 0
+        klist -s 2>/dev/null || return 0
+    fi
+    local _resp _code
+    _resp=$(mktemp "${TMPDIR:-/tmp}/cssh-policy.XXXXXX" 2>/dev/null) || return 0
+    _code=$(
+        set -- --silent --max-time 5 -o "$_resp" -w '%{http_code}'
+        [ -n "$_cacert" ] && set -- "$@" --cacert "$_cacert"
+        if [ -n "$_hdr" ]; then
+            set -- "$@" -H "$_hdr"
+        else
+            set -- "$@" --negotiate -u :
+        fi
+        curl "$@" "${_url%/}/policy" 2>/dev/null
+    )
+    if [ "$_code" = 200 ]; then
+        jq -r '.policy_fingerprint // empty' < "$_resp" 2>/dev/null
+    fi
+    rm -f "$_resp"
+    return 0
 }
 
 cssh() {
@@ -566,17 +611,33 @@ EOF
     fi
 
     local cert="${privkey}-cert.pub"
+    # Cerberus may issue a different principal than the one requested when the
+    # matched group maps it (`root: global-root` in allowed_principals), so the
+    # cert's own principal list is not a reliable record of what we asked for.
+    # After each sign we record "<serial> <policy-fingerprint> <requested-set>"
+    # here ("-" for an unknown fingerprint or an all/self request) and use it
+    # for the refresh decision below; see docs/cssh.md "Cache".
+    local sidecar="${privkey}-cert.requested"
+
+    # Sorted, deduplicated requested set (comma-joined, trailing comma), used by
+    # the refresh decision and recorded in the sidecar after an explicit sign.
+    local req_princ=""
+    if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ]; then
+        req_princ=$(printf '%s' "$principals" | tr ',' '\n' | awk 'NF' | sort -u | tr '\n' ',')
+    fi
 
     # Refresh decision, from ssh-keygen -L on the cached cert. Re-sign when the
     # cert is missing/unparseable, when its principal set no longer matches what
-    # we're requesting, or when it is expiring within refresh_before. Any parse
+    # we're requesting, when it is expiring within refresh_before, or when the
+    # server's authorization policy has changed since it was issued. Any parse
     # failure re-signs rather than reuse a cert we can't reason about.
     #
     # The principal check is what makes a principalA -> principalB switch work:
-    # the signer issues a cert for EXACTLY the requested principals (not the
-    # group's full allowed set), so a cert minted for principalA cannot
-    # authenticate a request for principalB. We compare the two as sorted sets,
-    # so order and duplicates don't matter.
+    # a cert minted for principalA cannot authenticate a request for principalB.
+    # We compare sorted sets, so order and duplicates don't matter. Because the
+    # server may issue a mapped name (root -> global-root), the comparison
+    # target is the sidecar's record of what the cached cert was requested for
+    # when available, else the cert's own principals.
     local need_sign=$force
     if [ "$need_sign" -eq 0 ]; then
         if [ ! -s "$cert" ]; then
@@ -587,8 +648,7 @@ EOF
             if [ -z "$cert_info" ]; then
                 need_sign=1
             else
-                local req_princ cert_princ
-                req_princ=$(printf '%s' "$principals" | tr ',' '\n' | awk 'NF' | sort -u | tr '\n' ',')
+                local cert_princ
                 # Extract the cert's principal list: the lines indented under
                 # "Principals:" up to the next "<Header>:" line (principal names
                 # carry no colon, so a ':' marks the end of the block).
@@ -601,11 +661,34 @@ EOF
                     p && /:/ { p=0; next }
                     p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
                 ' | sort -u | tr '\n' ',')
+                # Prefer the sidecar's record of what this exact cert (by serial)
+                # was requested for, and under which server policy it was issued.
+                # Lines are "<serial> <fingerprint> <requested-set>" (v2) or
+                # "<serial> <requested-set>" (v1, before policy fingerprints); "-"
+                # stands for an absent fingerprint or an all/self request. A
+                # missing/stale/unparseable sidecar falls back to comparing
+                # against the cert's own principals — never to reuse.
+                local cert_serial cached_req cached_fp=""
+                cert_serial=$(printf '%s\n' "$cert_info" | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
+                cached_req=$cert_princ
+                if [ -n "$cert_serial" ] && [ -r "$sidecar" ]; then
+                    local sc_serial="" sc_f2="" sc_f3="" sc_set=""
+                    read -r sc_serial sc_f2 sc_f3 < "$sidecar" 2>/dev/null
+                    if [ "$sc_serial" = "$cert_serial" ]; then
+                        if [ -n "$sc_f3" ]; then
+                            cached_fp=$sc_f2; sc_set=$sc_f3
+                        else
+                            sc_set=$sc_f2
+                        fi
+                        if [ -n "$sc_set" ] && [ "$sc_set" != "-" ]; then
+                            cached_req=$sc_set
+                        fi
+                    fi
+                fi
                 # --all-principals / --self have no fixed requested set to compare
                 # against (the server derives the principals), so their certs are
-                # cached on expiry alone; entitlement changes are picked up on the
-                # next re-sign (expiry or --force).
-                if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ "$req_princ" != "$cert_princ" ]; then
+                # cached on expiry and policy alone.
+                if [ "$all_principals" -eq 0 ] && [ "$self_req" -eq 0 ] && [ "$req_princ" != "$cached_req" ]; then
                     need_sign=1
                 else
                     local valid_to
@@ -625,6 +708,25 @@ EOF
                             || printf '0')
                         now=$(date +%s)
                         if [ "$valid_epoch" -le $((now + refresh_before)) ]; then
+                            need_sign=1
+                        fi
+                    fi
+                fi
+                # Policy check, last because it costs a network round trip and
+                # only matters when everything local says "reuse": a cached cert
+                # issued under an authorization policy that has since changed
+                # (e.g. a principal mapping enabled after it was minted) must not
+                # ride out its validity window. The sidecar holds the fingerprint
+                # the server returned at sign time; GET /policy (authenticated,
+                # cheap, no enclave, not rate-limited) returns the current one.
+                # Missing or "-" (pre-feature cert, v1 sidecar) or different →
+                # re-sign. Unknowable now (no credential, pre-feature server,
+                # network error) → keep the cert, exactly as before this check.
+                if [ "$need_sign" -eq 0 ]; then
+                    local cur_fp
+                    cur_fp=$(_cssh_policy_fingerprint "$cerberus_url" "$cacert" "$auth_mode")
+                    if [ -n "$cur_fp" ]; then
+                        if [ -z "$cached_fp" ] || [ "$cached_fp" = "-" ] || [ "$cached_fp" != "$cur_fp" ]; then
                             need_sign=1
                         fi
                     fi
@@ -721,8 +823,12 @@ EOF
             return 1
         fi
 
-        local signed_key
+        local signed_key new_fp
         signed_key=$(jq -r '.signed_key // empty' < "$resp")
+        # The policy fingerprint the server applied; "-" when the server predates
+        # policy fingerprints, so the sidecar line always has three fields.
+        new_fp=$(jq -r '.policy_fingerprint // empty' < "$resp" 2>/dev/null)
+        [ -n "$new_fp" ] || new_fp='-'
         rm -f "$resp"
         if [ -z "$signed_key" ]; then
             printf 'cssh: empty signed_key in response\n' >&2
@@ -740,19 +846,46 @@ EOF
             unset -f _cssh_check_krb
             return 1
         fi
-        # Validate that what we got is actually a parseable cert before publishing.
-        if ! ssh-keygen -L -f "$tmp_cert" >/dev/null 2>&1; then
+        # Validate that what we got is actually a parseable cert before publishing,
+        # and capture its serial from OUR private temp file in the same pass:
+        # re-reading $cert after the rename could observe a cert a concurrent
+        # cssh for the same key just installed, and pair its serial with our
+        # requested set. An unparseable cert yields no dump at all.
+        local tmp_info new_serial
+        tmp_info=$(ssh-keygen -L -f "$tmp_cert" 2>/dev/null)
+        if [ -z "$tmp_info" ]; then
             printf 'cssh: server returned unparseable certificate; discarding\n' >&2
             rm -f "$tmp_cert"
             unset -f _cssh_check_krb
             return 1
         fi
+        new_serial=$(printf '%s\n' "$tmp_info" | awk '/^[[:space:]]+Serial:/ {print $2; exit}')
         chmod 0600 "$tmp_cert"
         if ! mv -f "$tmp_cert" "$cert"; then
             rm -f "$tmp_cert"
             unset -f _cssh_check_krb
             return 1
         fi
+
+        # Record what this cert was requested for and the policy it was issued
+        # under (see the refresh decision above): "<serial> <fingerprint>
+        # <requested-set>", with "-" for --all-principals/--self, whose requested
+        # set the server derives. Best-effort: a failure here only costs one
+        # extra re-sign later, but a sidecar we could not refresh must not
+        # outlive the cert it described.
+        local sc_req="$req_princ" tmp_side written=0
+        if [ "$all_principals" -ne 0 ] || [ "$self_req" -ne 0 ]; then
+            sc_req='-'
+        fi
+        if [ -n "$new_serial" ] && tmp_side=$(mktemp "${sidecar}.XXXXXX" 2>/dev/null); then
+            if printf '%s %s %s\n' "$new_serial" "$new_fp" "$sc_req" >| "$tmp_side" \
+                && chmod 0600 "$tmp_side" && mv -f "$tmp_side" "$sidecar"; then
+                written=1
+            else
+                rm -f "$tmp_side" 2>/dev/null
+            fi
+        fi
+        [ "$written" -eq 1 ] || rm -f "$sidecar" 2>/dev/null
     fi
 
     unset -f _cssh_check_krb
