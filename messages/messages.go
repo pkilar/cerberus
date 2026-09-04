@@ -151,7 +151,13 @@ type SigningRequest struct {
 // SigningResponse is the structure for JSON response sent back by the web API and the Nitro Enclave.
 type SigningResponse struct {
 	SignedKey string `json:"signed_key,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// PolicyFingerprint identifies the authorization policy the host applied
+	// (config.PolicyFingerprint on the ssh-cert-api side). It is set only on the
+	// HTTP /sign response so clients can detect a policy change and re-sign
+	// instead of reusing a cached certificate; the enclave never populates it,
+	// so the VSOCK reply shape is unchanged.
+	PolicyFingerprint string `json:"policy_fingerprint,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 // EnclaveSigningRequest is the structure for JSON request being sent to the Nitro Enclave.
