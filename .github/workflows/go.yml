@@ -119,3 +119,23 @@ jobs:
       - name: gosec (ssh-cert-signer)
         working-directory: ssh-cert-signer
         run: gosec -severity=medium ./...
+
+  # The cssh client helper is shell, not Go, so `go test` never reaches it.
+  # These cover the certificate-cache sidecar (<privkey>-cert.requested), which
+  # is what keeps a mapped certificate (root -> global-root) cacheable. Run
+  # under both shells cssh supports; zsh scopes some constructs differently and
+  # has already caught one bug bash did not.
+  cssh:
+    name: cssh client tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: cssh sidecar tests (bash)
+        run: bash tests/cssh_sidecar_test.sh
+
+      - name: cssh sidecar tests (zsh)
+        run: zsh tests/cssh_sidecar_test.sh
