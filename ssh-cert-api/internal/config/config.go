@@ -53,6 +53,42 @@ type Config struct {
 	// the service behaves exactly as it did before OIDC support existed. See
 	// OAuthConfig.
 	OAuth OAuthConfig `yaml:"oauth"`
+
+	// ObservabilityHTTP optionally serves /health and /metrics on a second,
+	// plain-HTTP listener alongside the primary HTTPS one. Disabled unless
+	// Enabled is true. See ObservabilityHTTPConfig.
+	ObservabilityHTTP ObservabilityHTTPConfig `yaml:"observability_http"`
+}
+
+// ObservabilityHTTPConfig controls an optional plain-HTTP listener that serves
+// /health and /metrics only. It exists for load balancers and Prometheus
+// scrapers that cannot present the CA's TLS trust, and it is deliberately
+// narrow:
+//
+//   - Only /health and /metrics are routed. /sign and /policy are absent from
+//     this listener's mux entirely, so a Kerberos ticket or an OIDC bearer
+//     token can never be submitted over cleartext by aiming a client at this
+//     port.
+//   - Bind defaults to 127.0.0.1 rather than all interfaces. /metrics is
+//     unauthenticated by design and leaks request volumes and timing, so
+//     reaching it from another host is an explicit operator decision; any
+//     non-loopback Bind raises WarnObservabilityHTTPExposed at startup.
+//   - Port defaults to 9109 and must differ from the port in Listen.
+//
+// Both endpoints stay available on the HTTPS listener regardless. This adds a
+// second route to them; it does not move them.
+type ObservabilityHTTPConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Bind    string `yaml:"bind"`
+	Port    int    `yaml:"port"`
+}
+
+// Addr renders the listener address for net.Listen. Only meaningful when
+// Enabled; LoadConfig fills Bind and Port via applyDefaults first. An empty
+// Bind yields ":port", which net.Listen reads as all interfaces — the same
+// case Warnings flags.
+func (o ObservabilityHTTPConfig) Addr() string {
+	return net.JoinHostPort(o.Bind, strconv.Itoa(o.Port))
 }
 
 // SelfPrincipalConfig controls the self-service issuance path: an authenticated
@@ -317,6 +353,16 @@ func (c *Config) applyDefaults() {
 			}
 		}
 	}
+	if c.ObservabilityHTTP.Enabled {
+		// Loopback by default: enabling the listener must not, on its own,
+		// publish unauthenticated metrics to the network.
+		if c.ObservabilityHTTP.Bind == "" {
+			c.ObservabilityHTTP.Bind = "127.0.0.1"
+		}
+		if c.ObservabilityHTTP.Port == 0 {
+			c.ObservabilityHTTP.Port = 9109
+		}
+	}
 	if c.OAuth.Enabled {
 		if c.OAuth.UsernameClaim == "" {
 			c.OAuth.UsernameClaim = "sub"
@@ -386,6 +432,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateObservabilityHTTP(); err != nil {
+		return err
+	}
+
 	for name, group := range c.Groups {
 		hasStatic := len(group.Members) > 0
 		hasLDAP := len(group.LDAPGroups) > 0
@@ -445,6 +495,36 @@ func (c *Config) Validate() error {
 		if err := validateFlagExtensions(name, "critical_options", rules.CriticalOptions); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateObservabilityHTTP checks the plain-HTTP observability listener. Only
+// enforced when Enabled: a disabled block may hold a stale port an operator
+// left behind, and that must not fail startup.
+func (c *Config) validateObservabilityHTTP() error {
+	o := &c.ObservabilityHTTP
+	if !o.Enabled {
+		return nil
+	}
+	// Port 0 is rejected for the same reason as in validateListen: an
+	// ephemeral port cannot be scraped, routed to, or opened in a security
+	// group. Reaching here with 0 means applyDefaults did not run, which only
+	// happens for a Config built directly in a test.
+	if o.Port < 1 || o.Port > 65535 {
+		return fmt.Errorf("observability_http.port %d out of range 1..65535", o.Port)
+	}
+	// An IP literal, not a hostname: the bind address selects a local
+	// interface, and accepting a name would defer a resolution failure to
+	// bind time and make the loopback check in Warnings unreliable.
+	if o.Bind != "" && net.ParseIP(o.Bind) == nil {
+		return fmt.Errorf("observability_http.bind %q is not an IP address; use 127.0.0.1 or 0.0.0.0, not a hostname", o.Bind)
+	}
+	// Listen defaults to all interfaces, so an equal port always collides no
+	// matter what Bind says. Catch it here rather than as an opaque "address
+	// already in use" from whichever listener loses the race at startup.
+	if _, mainPort, err := net.SplitHostPort(c.Listen); err == nil && mainPort == strconv.Itoa(o.Port) {
+		return fmt.Errorf("observability_http.port %d collides with listen %q; the plain-HTTP listener needs its own port", o.Port, c.Listen)
 	}
 	return nil
 }
@@ -798,6 +878,7 @@ const (
 	WarnOAuthIssuerNotHTTPS          = "config.oauth.issuer_not_https"
 	WarnOAuthRealmCollision          = "config.oauth.realm_collision"
 	WarnOAuthLeewayLong              = "config.oauth.leeway_long"
+	WarnObservabilityHTTPExposed     = "config.observability_http.exposed"
 )
 
 // Warning is one non-fatal configuration issue surfaced at startup. Kind is
@@ -839,6 +920,14 @@ func (c *Config) Warnings() []Warning {
 				})
 			}
 		}
+	}
+	if c.ObservabilityHTTP.Enabled && !isLoopbackHost(c.ObservabilityHTTP.Bind) {
+		warns = append(warns, Warning{
+			Kind: WarnObservabilityHTTPExposed,
+			Key:  c.ObservabilityHTTP.Addr(),
+			Detail: "plain-HTTP /metrics is served unauthenticated and in cleartext on a non-loopback address; " +
+				"restrict it with a network ACL or security group",
+		})
 	}
 	for i := range c.LDAP {
 		b := &c.LDAP[i]

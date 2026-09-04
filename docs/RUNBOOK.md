@@ -829,6 +829,41 @@ GET /metrics
   - **Network exposure**: like `/health`, this endpoint is unauthenticated by design so Prometheus can scrape without Kerberos. Unlike `/health`, the response now includes enclave-internal CPU and memory pressure data, which can be a useful side-channel signal to an attacker probing for OOM-triggering inputs or covert-channel timing. **Restrict `/metrics` to the Prometheus scraper subnet via security groups, ALB listener rules, or an in-service IP allow-list** - do not rely on obscurity.
   - Tune the poll cadence with `ENCLAVE_METRICS_INTERVAL` (Go duration, default `15s`, minimum `1s`). The poller probe-times-out at 2s per call; failed polls leave the previous snapshot in place, so dashboards see stale-but-monotonic counters until the enclave recovers.
 
+### Plain-HTTP Observability Listener
+
+`/health` and `/metrics` are always served on the HTTPS listener. For scrapers and load balancers that cannot present
+the CA's TLS trust, an optional second listener serves those two paths over plain HTTP. It is **disabled by default**.
+
+```yaml
+observability_http:
+  enabled: true
+  bind: "127.0.0.1"   # default; an IP literal, not a hostname
+  port: 9109          # default; must differ from the port in `listen`
+```
+
+- **Only `/health` and `/metrics` are routed.** `/sign` and `/policy` are absent from this listener's mux entirely, so
+  pointing a client at it can never put a Kerberos ticket or an OIDC bearer token on the wire in cleartext. This is
+  enforced by construction (a separate `http.ServeMux`, not the main router with routes filtered) and covered by
+  `TestObservabilityRouter_DoesNotExposeSigningRoutes`.
+- **`bind` defaults to loopback, not all interfaces.** Enabling the listener does not, by itself, publish metrics to the
+  network. To let a remote Prometheus scrape it, set `bind: "0.0.0.0"` deliberately — which logs
+  `config.observability_http.exposed` at WARN on every start, because `/metrics` is unauthenticated and carries request
+  volumes, timing, and enclave CPU/memory pressure. Pair it with a security group or ALB listener rule admitting only
+  the scraper subnet; the service enforces no source check. See [Metrics Endpoint](#metrics-endpoint).
+- **A port equal to the one in `listen` is rejected at config load**, rather than surfacing as an opaque "address
+  already in use" from whichever listener loses the startup race.
+- The listener drains on SIGTERM alongside the HTTPS one. It carries no in-flight work worth preserving, so a failure
+  closing it never masks an error draining the signing listener.
+
+Verify after enabling:
+
+```bash
+curl -s http://127.0.0.1:9109/health | jq .status
+curl -s http://127.0.0.1:9109/metrics | head -5
+# must 404 — signing is never reachable over cleartext:
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:9109/sign
+```
+
 ### Monitoring Recommendations
 
 | Check                    | Method                                                                                                                                                                                                       | Frequency |
@@ -1129,7 +1164,7 @@ curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 - The enclave has **no network access** — it makes no external calls. The host performs the attested `kms:Decrypt` on the enclave's behalf using its own EC2 instance role; only the resulting CMS envelope (already encrypted to the enclave's attestation public key) crosses VSOCK.
 - The API listens on HTTPS only (TLS required).
 - Restrict access to port 8443 via security groups to authorized networks.
-- **`/metrics` and `/health` are intentionally unauthenticated** so Prometheus and load balancers can reach them without Kerberos tickets. Both expose information about enclave state — `/metrics` in particular surfaces enclave CPU/memory pressure (see [Metrics Endpoint](#metrics-endpoint)). **Restrict these paths to known-good source ranges at the network layer** (security group, ALB listener rule, or in-service IP allow-list); the application does not enforce a source check.
+- **`/metrics` and `/health` are intentionally unauthenticated** so Prometheus and load balancers can reach them without Kerberos tickets. Both expose information about enclave state — `/metrics` in particular surfaces enclave CPU/memory pressure (see [Metrics Endpoint](#metrics-endpoint)). **Restrict these paths to known-good source ranges at the network layer** (security group, ALB listener rule, or in-service IP allow-list); the application does not enforce a source check. This applies with more force if you enable the optional plain-HTTP listener (`observability_http`), which serves both paths unencrypted — see [Plain-HTTP Observability Listener](#plain-http-observability-listener).
 
 ### Authentication & Authorization
 
