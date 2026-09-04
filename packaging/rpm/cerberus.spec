@@ -465,6 +465,38 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Fri Sep 04 2026 Paul Kilar <pkilar@gmail.com> - 0.12.0-1
+- allowed_principals entries may now be a "requested: issued" map, not just a
+  plain name. A group can map "root: global-root", so a user asks for root and
+  receives a certificate whose only principal is global-root. Casbin policy is
+  keyed on the requested name alone, so a mapping target is not requestable
+  unless a plain entry or "*" also covers it, and a mapped certificate never
+  carries the requested name alongside the issued one.
+- cssh survives requested != issued. A mapped certificate's principal list is no
+  longer a record of what was asked for, so cssh records the serial, policy
+  fingerprint and requested set in <privkey>-cert.requested and compares against
+  that. Upgrade the client BEFORE enabling mapping on the server: a cssh without
+  the sidecar re-signs on every invocation instead of reusing its cache.
+- Policy changes invalidate client caches. config.PolicyFingerprint() (a SHA-256
+  over groups, strip_realms and self_principal only -- never keytab, TLS, LDAP or
+  OAuth material) is returned on every /sign success and by the new
+  authenticated, limiter-exempt GET /policy. cssh probes it only after every
+  local check says "reuse" and never prompts, so a certificate issued under a
+  superseded policy cannot ride out its validity window.
+- New optional plain-HTTP listener for /health and /metrics, for scrapers and
+  load balancers that cannot present the CA's TLS trust. Configured under
+  observability_http:; off by default, binds 127.0.0.1 rather than all
+  interfaces, and listens on 9109. Both endpoints remain on the HTTPS listener as
+  well -- this adds a route to them, it does not move them. The listener builds
+  its own mux carrying only those two paths, so /sign and /policy are absent from
+  it entirely and no Kerberos ticket or OIDC bearer token can be sent to it in
+  cleartext. A non-loopback bind logs config.observability_http.exposed at
+  startup, and a port equal to the one in listen is refused at config load rather
+  than surfacing as an opaque "address already in use".
+- The cssh certificate cache is now tested. Ten cases drive the real cssh
+  function against real ssh-keygen-minted certificates under both bash and zsh,
+  covering the sidecar's v1 and v2 record formats, the serial-mismatch fallback,
+  and the removal of a record that could not be refreshed.
 * Wed Sep 02 2026 Paul Kilar <pkilar@gmail.com> - 0.11.0-1
 - build-rpm.sh was BROKEN in 0.10.6 and is repaired. 0.10.6 added Source1 and
   Source2 (the sysusers.d fragments) to the spec, but build-rpm.sh never staged
