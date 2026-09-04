@@ -1398,6 +1398,14 @@ Rules of the road:
 - Both names are logged: `sign.success` carries `requested_principals` and `granted_principals`.
 - `cssh` records the requested set next to the cert (`<key>-cert.requested`) so its cache keeps working even
   though the cert's principals differ from the request (see `docs/cssh.md`).
+- **Upgrade `cerberus-client` before enabling any mapping.** The `cssh` wrapper is a separate, noarch package; an
+  older `cssh` compares the requested name against the cert's principals and, once the server maps that name,
+  re-signs on **every** invocation — hammering the per-principal rate limit (`RATE_LIMIT_RPS=5`, burst 10) with a full
+  Kerberos + HTTPS + enclave round trip each time. The current `cssh` records the request in `<key>-cert.requested`
+  and caches normally.
+- **The caller's own uid is never remapped.** With `self_principal` enabled, an entry `dave: dave-role` applies to
+  other members who request `dave`, but Dave requesting his own uid gets `dave` — the self-service path is independent
+  of group membership by design.
 
 ### Client Usage
 

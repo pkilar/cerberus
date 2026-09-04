@@ -258,6 +258,9 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   `cssh`, or one you copied in by hand) it falls back to comparing against the
   cert's own principal list, so at worst it re-signs once. Any parse failure
   re-signs rather than reuses.
+  A pre-sidecar `cssh` (before this feature) has no such record and re-signs
+  on every call once the server maps the requested name — upgrade the
+  client before enabling mapping server-side.
 - **Principal switching.** A cert issued for `principalA` cannot authenticate
   as `principalB`, so `cssh alice@host` then `cssh deploy@host` (both in one
   Cerberus group) transparently re-signs on the switch instead of reusing
