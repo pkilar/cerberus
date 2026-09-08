@@ -9,7 +9,7 @@ require (
 	github.com/mdlayher/vsock v1.3.0
 	github.com/pkilar/cerberus v0.10.6
 	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require (
