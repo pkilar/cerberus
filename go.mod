@@ -6,7 +6,7 @@ require (
 	github.com/cilium/ebpf v0.22.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/mdlayher/vsock v1.3.0
-	golang.org/x/crypto v0.56.0
+	golang.org/x/crypto v0.57.0
 )
 
 replace github.com/pkilar/cerberus/ssh-cert-api => ./ssh-cert-api
@@ -18,10 +18,10 @@ require (
 	github.com/jcmturner/gofork v1.7.6 // indirect
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
-	github.com/mdlayher/socket v0.6.1 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	github.com/mdlayher/socket v0.7.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
 
 // Dev tools (gosec, govulncheck, golangci-lint) are intentionally NOT tracked
