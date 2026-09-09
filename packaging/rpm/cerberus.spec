@@ -465,6 +465,29 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Tue Sep 08 2026 Paul Kilar <pkilar@gmail.com> - 0.12.1-1
+- Dependency-only release. No behavioural change to the API, the signer,
+  vsock-watch, or the cssh client, and no configuration change: upgrading from
+  0.12.0 needs nothing beyond installing the new packages.
+- OIDC dependency refresh on the bearer-token authentication path:
+  coreos/go-oidc/v3 to 3.21.0 and go-jose/v4 to 4.1.5, the latter being the JWS
+  verification used to validate access tokens.
+- golang.org/x/crypto 0.55.0 -> 0.57.0 across all three modules, plus x/net to
+  0.59.0, x/sync to 0.23.0, x/sys to 0.48.0, x/oauth2 to 0.37.0 and x/time to
+  0.16.0.
+- AWS SDK v2 refresh in both service modules: core to 1.46.0, config to 1.33.3,
+  kms to 1.59.0 (the attested Decrypt path), and the accompanying credentials,
+  imds, endpoints, v4a, presigned-url, signin, sso, ssooidc and sts indirect set.
+- mdlayher/socket to 0.7.0, under the VSOCK transport both services use.
+- The sweep that closes this release moves all three modules together rather than
+  one at a time. The submodules replace github.com/pkilar/cerberus with ../, so
+  MVS folds the root's requirements into their builds and a shared dependency
+  raised in one module alone breaks the other two. It also brings each
+  submodule's stale github.com/pkilar/cerberus pin from v0.10.6 up to v0.12.0;
+  the replace directive means that version never affected a build, but it had
+  drifted three releases behind what the code is written against.
+- govulncheck reports no vulnerabilities in any module. Nothing in this release
+  is advisory-driven.
 * Fri Sep 04 2026 Paul Kilar <pkilar@gmail.com> - 0.12.0-1
 - allowed_principals entries may now be a "requested: issued" map, not just a
   plain name. A group can map "root: global-root", so a user asks for root and
