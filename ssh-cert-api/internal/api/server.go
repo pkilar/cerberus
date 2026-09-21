@@ -487,6 +487,17 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Static attributes from config become custom extensions on the cert.
 	customAttributes := maps.Clone(result.CertificateRules.StaticAttributes)
+	if result.CertificateRules.LoginAsIssued {
+		// A flag extension (empty value) telling cssh that this certificate's
+		// principal is the account to log into, so a request for a mode name
+		// such as "root-ro" lands on the account the mapping actually issued.
+		// config.Validate reserves the name, so this never overwrites an
+		// operator-supplied entry.
+		if customAttributes == nil {
+			customAttributes = make(map[string]string, 1)
+		}
+		customAttributes[config.LoginAsIssuedExtension] = ""
+	}
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,

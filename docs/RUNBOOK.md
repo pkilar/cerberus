@@ -336,6 +336,7 @@ This is why `permissions:` in a group's `certificate_rules` should only contain 
 | Extension       | `permit-pty`              | Allow PTY allocation (required for interactive shells)                      |
 | Extension       | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                        |
 | Extension       | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                        |
+| Extension       | `login-as-principal@cerberus` | Read by `cssh`, ignored by sshd: log in as the cert's single principal (set `login_as_issued: true`) |
 | Critical option | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only) |
 | Critical option | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses          |
 | Critical option | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence |
@@ -1516,6 +1517,41 @@ group-membership change — no shared-principal rotation.
   gate refuses.
 - The caller's own uid is never remapped, so a group containing both `jsmith: some-role` and `root: $self` still issues
   plain `jsmith` when `jsmith` requests their own uid.
+
+##### Making the requested name a mode rather than an account
+
+`cssh root-ro@host` asks ssh to log in to an account called `root-ro`, which need not exist. Set `login_as_issued: true`
+on the group and the certificate carries `login-as-principal@cerberus`, a flag extension sshd ignores and `cssh` reads:
+the client logs in as the certificate's single principal instead of the name you typed, and says so on stderr when the
+name changes. The requested name becomes a mode selector, and the session lands on the account the mapping issued.
+
+Paired with a forced command this gives a read-only troubleshooting session that is attributable per human, with no
+shared account and no `AuthorizedPrincipalsFile` anywhere:
+
+```yaml
+groups:
+  roam-users:
+    members: ["jsmith@REALM.COM", "alice@REALM.COM"]
+    certificate_rules:
+      validity: "1h"
+      login_as_issued: true
+      allowed_principals:
+        - root-ro: $self
+      permissions:
+        permit-pty: ""                    # required, or the session gets no tty
+      critical_options:
+        force-command: "/usr/bin/sudo -n /usr/local/bin/roam"
+```
+
+`jsmith` runs `cssh root-ro@host`, the certificate is issued for `jsmith` with the forced command, the client connects
+as `jsmith`, and the session is the read-only shell. Set `ExposeAuthInfo yes` in `sshd_config` and the tool can read the
+certificate named by `$SSH_USER_AUTH` to confirm the forced command is its own and to log the KeyId and serial, which
+tie the session back to the `sign.success` entry on the API.
+
+Two properties are worth stating plainly. The extension is applied only to a single-principal certificate, so a group
+combining it with `--all-principals` leaves the login name alone and warns. And a forced command restricts the session,
+not the human: anyone who can obtain an ordinary certificate for their own account can still open an unrestricted
+session, so this is a mode users choose, not a boundary that contains them.
 
 ### Client Usage
 

@@ -1904,3 +1904,57 @@ func TestValidate_SelfTargetRequiresSelfPrincipal(t *testing.T) {
 		t.Fatalf("an enabled self_principal must accept a $self mapping: %v", err)
 	}
 }
+
+func TestLoadConfig_LoginAsIssued(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  roam-users:
+    members:
+      - jsmith@example.com
+    certificate_rules:
+      validity: "1h"
+      login_as_issued: true
+      allowed_principals:
+        - root-ro: roam
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Groups["roam-users"].CertificateRules.LoginAsIssued {
+		t.Fatal("login_as_issued did not survive the round trip")
+	}
+	// Absent means false, so existing configs are untouched.
+	other := Config{Groups: map[string]Group{"g": {}}}
+	if other.Groups["g"].CertificateRules.LoginAsIssued {
+		t.Fatal("login_as_issued must default to false")
+	}
+}
+
+func TestValidate_LoginAsIssuedExtensionIsReserved(t *testing.T) {
+	c := &Config{
+		KeytabPath: "/etc/krb5.keytab",
+		Groups: map[string]Group{
+			"roam-users": {
+				Members: []string{"jsmith@EXAMPLE.COM"},
+				CertificateRules: CertificateRules{
+					Validity:          "1h",
+					AllowedPrincipals: PrincipalRules{{Requested: "root-ro", Issued: "roam"}},
+					StaticAttributes:  map[string]string{LoginAsIssuedExtension: ""},
+				},
+			},
+		},
+	}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "reserved extension") {
+		t.Fatalf("hand-rolling the reserved extension must be refused, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "login_as_issued") {
+		t.Fatalf("the error must point at the flag that replaces it: %v", err)
+	}
+}

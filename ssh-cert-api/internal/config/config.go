@@ -252,12 +252,31 @@ const oauthHTTPTimeoutMax = 30 * time.Second
 // AllowedPrincipals entries are plain names or single-pair mappings
 // (`root: global-root`); see PrincipalRule. Casbin policy is on the requested
 // name, the certificate carries the issued name.
+// LoginAsIssuedExtension is the certificate extension the API adds when a group
+// sets login_as_issued. It is a flag extension carrying no value: sshd ignores
+// extensions it does not know, and only the cssh client reads this one, as a
+// signal that the certificate's single principal is the account to log into.
+// The name is fixed and namespaced per PROTOCOL.certkeys §4 so it can never
+// collide with an extension OpenSSH may define later, and it is reserved —
+// config.Validate refuses a group that sets it through static_attributes.
+const LoginAsIssuedExtension = "login-as-principal@cerberus"
+
 type CertificateRules struct {
 	Validity          string            `yaml:"validity"`
 	AllowedPrincipals PrincipalRules    `yaml:"allowed_principals"`
 	Permissions       map[string]string `yaml:"permissions"`
 	StaticAttributes  map[string]string `yaml:"static_attributes"`
 	CriticalOptions   map[string]string `yaml:"critical_options"`
+
+	// LoginAsIssued adds LoginAsIssuedExtension to this group's certificates,
+	// telling the cssh client to log in as the certificate's principal instead
+	// of the name the user typed. It exists for groups whose allowed_principals
+	// turn a mode name into a real account: `root-ro: $self` issues the caller's
+	// own uid, and the session should land on that account rather than on a
+	// non-existent "root-ro". The client applies it only to a single-principal
+	// certificate, since several principals leave no one account to choose, and
+	// it announces the switch. sshd never reads the extension.
+	LoginAsIssued bool `yaml:"login_as_issued"`
 }
 
 // flagOnlyExtensions are SSH cert extensions and critical options whose
@@ -507,6 +526,15 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("group '%s': allowed_principals maps '%s' to %s, but self_principal is not enabled; set self_principal.enabled: true and list the realms allowed to self-issue",
 					name, req, SelfTarget)
 			}
+		}
+
+		// The extension is Cerberus vocabulary with a client-side effect, so it
+		// has exactly one source: the login_as_issued flag. Hand-rolling it
+		// through static_attributes would work but hide the behaviour from the
+		// field that documents it.
+		if _, reserved := rules.StaticAttributes[LoginAsIssuedExtension]; reserved {
+			return fmt.Errorf("group '%s': %s is a reserved extension; set login_as_issued: true instead of adding it to static_attributes",
+				name, LoginAsIssuedExtension)
 		}
 
 		if err := validateFlagExtensions(name, "permissions", rules.Permissions); err != nil {

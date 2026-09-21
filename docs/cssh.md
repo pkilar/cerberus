@@ -268,6 +268,14 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   A pre-sidecar `cssh` (before this feature) has no such record and re-signs
   on every call once the server maps the requested name — upgrade the
   client before enabling mapping server-side.
+- **Login name from the certificate.** A group may set `login_as_issued`, which
+  marks its certificates with `login-as-principal@cerberus`. `cssh` then logs in
+  as the certificate's principal rather than the name you typed, and prints one
+  line to stderr when that changes the account. This is what lets a requested
+  name be a *mode*: `cssh root-ro@host` against a `root-ro: $self` mapping gets
+  you a cert for your own uid and connects you to your own account. It applies
+  only to a single-principal certificate; with several principals there is no
+  one account to choose, so the login name is left alone and `cssh` says why.
 - **Principal switching.** A cert issued for `principalA` cannot authenticate
   as `principalB`, so `cssh alice@host` then `cssh deploy@host` (both in one
   Cerberus group) transparently re-signs on the switch instead of reusing
