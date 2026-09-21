@@ -69,16 +69,27 @@ func NewKerberosAuthenticator(keytabPath string, servicePrincipal string) (*Kerb
 		return nil, fmt.Errorf("failed to load keytab from %s: %w", keytabPath, err)
 	}
 
-	// Configure service settings with the specified service principal
+	// service_principal selects WHICH keytab entry decrypts incoming service
+	// tickets. gokrb5 exposes two look-alike options: SName is read only by its
+	// client-side authenticator (which ticket to request), while VerifyAPREQ
+	// consults KeytabPrincipal; with neither set it looks up the SPN named
+	// inside the client's ticket — i.e. whatever name the client connected to.
+	// Passing SName here (as an earlier version did) therefore silently left
+	// the setting without effect. KeytabPrincipal makes it mean what the
+	// config says: clients may reach us as HTTP/host1.example.com while the
+	// keytab was exported for HTTP/service.example.com, and — as long as the
+	// KDC issues both SPNs with the same key (one AD account) — tickets still
+	// decrypt. An "@REALM" suffix is accepted and ignored for the lookup (the
+	// ticket's own realm is what the keytab entry must carry).
 	var settings *service.Settings
 	var spnegoService *spnego.SPNEGO
 
 	if servicePrincipal != "" {
-		logging.Debug("Configuring Kerberos authenticator with service principal: %s", servicePrincipal)
-		settings = service.NewSettings(kt, service.SName(servicePrincipal))
-		spnegoService = spnego.SPNEGOService(kt, service.SName(servicePrincipal))
+		logging.Debug("Configuring Kerberos authenticator to decrypt tickets with keytab entry: %s", servicePrincipal)
+		settings = service.NewSettings(kt, service.KeytabPrincipal(servicePrincipal))
+		spnegoService = spnego.SPNEGOService(kt, service.KeytabPrincipal(servicePrincipal))
 	} else {
-		logging.Debug("Configuring Kerberos authenticator with default service principal from keytab")
+		logging.Debug("Configuring Kerberos authenticator to decrypt tickets with the keytab entry named in each ticket")
 		settings = service.NewSettings(kt)
 		spnegoService = spnego.SPNEGOService(kt)
 	}

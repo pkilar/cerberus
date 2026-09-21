@@ -153,7 +153,8 @@ The API service uses a YAML configuration file to define authorization policies.
 # Kerberos keytab for authenticating incoming requests
 keytab_path: "/etc/krb5.keytab"
 
-# Optional SPNEGO service principal (auto-detected from keytab if omitted)
+# Optional: keytab entry that decrypts service tickets, e.g. "HTTP/cerberus.example.com".
+# Omitted: use the entry for the SPN named in each client's ticket.
 service_principal: ""
 
 # Listen address (default: ":8443")
@@ -1066,7 +1067,7 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 | Error                                | Likely Cause                                      | Resolution                                                             |
 | ------------------------------------ | ------------------------------------------------- | ---------------------------------------------------------------------- |
 | `Authentication required` (HTTP 401) | Missing or invalid Kerberos ticket                | Run `kinit user@REALM.COM`; verify the keytab is valid with `klist -k` |
-| SPNEGO negotiation fails             | Service principal mismatch                        | Set `service_principal` in config.yaml to match the keytab's principal |
+| `auth.failed` with `matching key not found in keytab. Looking for "HTTP/<host>"` | The client obtained a ticket for a different SPN than the keytab holds — typically the host's FQDN or a load-balancer name, while the keytab was exported for the service's canonical SPN | If the KDC issues both SPNs with one key (AD: SPNs on one account), set `service_principal: "HTTP/<keytab SPN>"` so that entry decrypts every ticket. Otherwise add the requested SPN to the keytab (`ktutil`/`ktpass`), or make clients target the canonical name (curl derives the SPN from the URL host; MIT krb5 may canonicalize it via DNS — see `dns_canonicalize_hostname` in `krb5.conf`). A bare hostname in `service_principal` is rejected at startup. |
 | `Clock skew too great`               | Time difference between client and server > 5 min | Sync clocks with NTP: `chronyc tracking` or `ntpdate pool.ntp.org`     |
 
 ### Authorization Failures
