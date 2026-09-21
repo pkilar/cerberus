@@ -51,9 +51,21 @@
 # Path to the Kerberos keytab file for authenticating incoming requests
 keytab_path: "/etc/krb5.keytab"
 
-# Service principal name for SPNEGO authentication (optional)
-# If not specified, the service will use the principal from the keytab
-# Example: "HTTP/hostname.domain.com@REALM.COM"
+# Keytab entry used to decrypt incoming Kerberos service tickets (optional).
+# Must be a full service principal, e.g. "HTTP/cerberus.example.com" (an
+# "@REALM" suffix is accepted); a bare hostname is rejected at startup.
+#
+#   - Empty (default): decrypt each ticket with the keytab entry for the SPN
+#     named in that ticket — i.e. the name the client connected to. Right when
+#     the keytab holds that SPN.
+#   - Set it when clients reach the service under a different name than the
+#     keytab entry (CNAME, load balancer, or the host's own FQDN) and the KDC
+#     issues both SPNs with the same key (Active Directory: several SPNs on
+#     one account). A ticket for HTTP/host1.example.com then decrypts with
+#     the HTTP/cerberus.example.com entry. With MIT/Heimdal KDCs, where every
+#     principal has its own key, add the extra SPN to the keytab instead.
+#   - Symptom of a mismatch: auth.failed with "matching key not found in
+#     keytab. Looking for HTTP/<the name the client used>".
 service_principal: ""
 
 # IP address and port to listen on, default ":8443" if not specified

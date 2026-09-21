@@ -1816,3 +1816,41 @@ func TestLoadConfig_ShippedExample(t *testing.T) {
 		t.Fatalf("sysadmins issued set = %v", sa.Issued())
 	}
 }
+
+func TestValidate_ServicePrincipalShape(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			KeytabPath: "/etc/krb5.keytab",
+			Groups: map[string]Group{
+				"admin": {Members: []string{"admin@EXAMPLE.COM"}, CertificateRules: CertificateRules{Validity: "1h", AllowedPrincipals: PlainPrincipals("root")}},
+			},
+		}
+	}
+	cases := []struct {
+		sp      string
+		wantErr bool
+	}{
+		{"", false},
+		{"HTTP/cerberus.example.com", false},
+		{"HTTP/cerberus.example.com@EXAMPLE.COM", false},
+		{"host/cerberus.example.com", false},
+		{"cerberus.example.com", true},             // bare hostname: matches no HTTP/ keytab entry
+		{"cerberus.example.com@EXAMPLE.COM", true}, // bare hostname with realm
+		{"/cerberus.example.com", true},
+		{"HTTP/", true},
+		{"HTTP/cerberus example.com", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sp, func(t *testing.T) {
+			c := base()
+			c.ServicePrincipal = tc.sp
+			err := c.Validate()
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "must be a full service principal")) {
+				t.Fatalf("service_principal %q: expected a shape error, got %v", tc.sp, err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("service_principal %q: unexpected error %v", tc.sp, err)
+			}
+		})
+	}
+}

@@ -21,14 +21,20 @@ import (
 
 // Config is the top-level structure for the entire config.yaml file.
 type Config struct {
-	Groups                 map[string]Group `yaml:"groups"`
-	KeytabPath             string           `yaml:"keytab_path"`
-	ServicePrincipal       string           `yaml:"service_principal"`
-	Listen                 string           `yaml:"listen"`
-	TlsCert                string           `yaml:"tls_cert"`
-	TlsKey                 string           `yaml:"tls_key"`
-	EnclaveMetricsInterval time.Duration    `yaml:"enclave_metrics_interval"`
-	LDAP                   []LDAPBackend    `yaml:"ldap"`
+	Groups     map[string]Group `yaml:"groups"`
+	KeytabPath string           `yaml:"keytab_path"`
+	// ServicePrincipal names the keytab entry used to decrypt incoming service
+	// tickets (e.g. "HTTP/cerberus.example.com", optionally "@REALM"). Empty
+	// means "the SPN named in each client's ticket", which is right when the
+	// keytab holds that SPN. Set it when clients reach the service under a
+	// different name than the keytab entry (CNAME, load balancer, host FQDN)
+	// and the KDC issues both SPNs with the same key.
+	ServicePrincipal       string        `yaml:"service_principal"`
+	Listen                 string        `yaml:"listen"`
+	TlsCert                string        `yaml:"tls_cert"`
+	TlsKey                 string        `yaml:"tls_key"`
+	EnclaveMetricsInterval time.Duration `yaml:"enclave_metrics_interval"`
+	LDAP                   []LDAPBackend `yaml:"ldap"`
 
 	// StripRealms lists Kerberos realms whose @REALM suffix is removed from an
 	// authenticated principal before it is matched against static `members:`.
@@ -431,6 +437,9 @@ func (c *Config) Validate() error {
 	if err := c.validateOAuth(); err != nil {
 		return err
 	}
+	if err := c.validateServicePrincipal(); err != nil {
+		return err
+	}
 
 	if err := c.validateObservabilityHTTP(); err != nil {
 		return err
@@ -739,6 +748,22 @@ func validateFlagExtensions(group, field string, m map[string]string) error {
 				"flag-style SSH cert extensions carry no data and sshd rejects non-empty payloads as corrupt",
 				group, field, k, v)
 		}
+	}
+	return nil
+}
+
+// validateServicePrincipal rejects a service_principal that is not a full SPN.
+// The value selects a keytab entry by exact component match, and keytab
+// entries for HTTP services are two-component (service class + host); a bare
+// hostname would silently match nothing and every ticket would be refused.
+func (c *Config) validateServicePrincipal() error {
+	sp := c.ServicePrincipal
+	if sp == "" {
+		return nil
+	}
+	name, _, _ := strings.Cut(sp, "@")
+	if strings.ContainsAny(sp, " \t") || !strings.Contains(name, "/") || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return fmt.Errorf("service_principal %q must be a full service principal such as \"HTTP/host.example.com\" (optionally \"@REALM\"), not a bare hostname", sp)
 	}
 	return nil
 }
