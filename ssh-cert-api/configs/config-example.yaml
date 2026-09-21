@@ -38,6 +38,9 @@
 # │    which is NOT itself requestable. "*" may be neither side of a    │
 # │    mapping; an explicit mapping beats "*". The winning group's      │
 # │    mapping applies (alphabetical rule above), never a mix.          │
+# │  - The target "$self" issues the CALLER'S OWN uid instead of a      │
+# │    fixed name, so `- root: $self` gives each member an identity-    │
+# │    scoped cert. Requires self_principal (its realms/deny gate it).  │
 # │  - The matched group's certificate_rules (validity, permissions,    │
 # │    attributes, critical_options) are applied to the certificate     │
 # │                                                                     │
@@ -397,6 +400,33 @@ groups:
         - root: webserver-root    # same request, a different role principal
       permissions:
         permit-pty: ""
+
+  # ── Identity-scoped access with $self ──────────────────────────────────
+  # The reserved target "$self" issues the CALLER'S OWN short uid. Members
+  # still type a familiar name (`cssh root@host` requests "root"); the cert
+  # carries "jsmith", "alice", ... so every login is attributable to a human
+  # and revoking one person is a line in the host's file:
+  #   /etc/ssh/auth_principals/root:   jsmith
+  #                                    alice
+  # Requires the self_principal block below: its realms allowlist and deny
+  # list gate which uids may be issued, which is what stops jsmith@FOO.COM
+  # and jsmith@BAR.COM collapsing onto local account "jsmith". A group using
+  # $self while self_principal is disabled is refused at startup. If a caller
+  # is not self-eligible the group simply does not cover the request, and the
+  # next group alphabetically gets a turn.
+  # Commented out because it only loads together with an enabled
+  # self_principal block (see below) — uncomment both, or startup refuses.
+  # humans:
+  #   members:
+  #     - "jsmith@YOUR-REALM.COM"
+  #     - "alice@YOUR-REALM.COM"
+  #   certificate_rules:
+  #     validity: "8h"
+  #     allowed_principals:
+  #       - root: $self         # request "root" → cert principal is your uid
+  #       - "deploy"            # plain entries work alongside
+  #     permissions:
+  #       permit-pty: ""
 
   # Example of an LDAP-backed group. Membership is decided at request time
   # by querying the LDAP backend whose realms cover the user's Kerberos

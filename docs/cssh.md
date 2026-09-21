@@ -275,7 +275,10 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   requested: a group can map a requested name to a role principal
   (`root: global-root` in `allowed_principals`), in which case `cssh root@host`
   yields a cert whose principal is `global-root` — that is what the sidecar
-  above is for. A server-side mapping change is picked up on your next `cssh`
+  above is for. A group may also map it to `$self`, in which case the cert
+  carries **your own uid** — `cssh root@host` yields a cert for `jsmith`, and
+  the host decides which accounts that principal may open.
+  A server-side mapping change is picked up on your next `cssh`
   call (the policy fingerprint changes), or immediately with `--force`.
 - **Principal selection.** With `CSSH_PRINCIPALS`/`--principals` unset, `cssh`
   asks `ssh -G <args>` for the login user it would use for the destination —

@@ -1078,6 +1078,8 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 | User gets wrong permissions                                                                                     | User matches the wrong group                                                             | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request.|
 | Certificate carries a different principal than requested (requested `root`, `ssh-keygen -L` shows `global-root`)| The matched group maps that principal (`root: global-root` in `allowed_principals`)      | Expected — the mapped name is what the account's `AuthorizedPrincipalsFile` should list. If the *wrong* group's mapping won, groups are matched alphabetically: rename or split them.                                                                                                                              |
 | HTTP 403 when requesting a mapping target directly (e.g. `--principals global-root`)                            | Mapping targets are not requestable; only the left-hand names in `allowed_principals` are| Request the left-hand name (`root`) and let the mapping issue the target, or add the target as a plain entry if it should be requestable on its own.                                                                                                                                                               |
+| Startup fails: `allowed_principals maps '<name>' to $self, but self_principal is not enabled`                   | A group issues the caller's own uid but the block gating uid issuance is off             | Set `self_principal.enabled: true` and list the realms allowed to self-issue, or replace the `$self` target with a static name.                                                                                                                                                                                    |
+| A user gets a shared role principal (or a 403) where you expected their own uid                                 | Their realm is not in `self_principal.realms`, or their uid is in `self_principal.deny`  | The `$self` group does not cover the request, so a later group (or nothing) does. Add the realm or drop the deny entry; `DEBUG=true` logs `authz.self_target.ineligible` with the group and requested name.                                                                                                        |
 | User not found in any group                                                                                     | Principal not listed in any `members` list                                               | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                           |
 | HTTP 403 with `authz.ldap.error` in logs                                                                        | LDAP backend unreachable or denied bind                                                  | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                           |
 | Service refuses to start with `ldap[...] initial probe failed`                                                  | Misconfigured LDAP backend at startup                                                    | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                            |
@@ -1447,6 +1449,8 @@ Rules of the road:
 - Only the **left-hand** name is requestable. `cssh --principals global-root` is refused with `403` unless a plain
   `global-root` entry (or `*`) also exists in the group.
 - The mapped certificate carries **only** the target, never the requested name as well.
+- A target may be the reserved `$self`, which issues the **caller's own uid** rather than a fixed name — see
+  [Identity-scoped principals with `$self`](#identity-scoped-principals-with-self).
 - A user in several groups gets the **first group alphabetically** that covers the request — and that group's
   mapping. Dave in both `sysadmins` and `webmasters` gets `global-root` (`s` sorts before `w`); name groups so the
   broader role sorts first, or keep memberships disjoint.
@@ -1471,6 +1475,47 @@ Rules of the road:
 - **The caller's own uid is never remapped.** With `self_principal` enabled, an entry `dave: dave-role` applies to
   other members who request `dave`, but Dave requesting his own uid gets `dave` — the self-service path is independent
   of group membership by design.
+
+#### Identity-scoped principals with `$self`
+
+A static target gives every member of a group the same certificate principal, so the certificate itself cannot say
+which human used it. The reserved target `$self` issues the **caller's own short uid** instead:
+
+```yaml
+groups:
+  humans:
+    members: ["jsmith@REALM.COM", "alice@REALM.COM"]
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: $self
+self_principal:
+  enabled: true
+  realms: [REALM.COM]
+```
+
+`jsmith` runs the usual `cssh root@host` and receives a certificate whose principal is `jsmith`. Each host lists the
+humans allowed to become root:
+
+```bash
+printf '%s\n' jsmith alice | sudo tee /etc/ssh/auth_principals/root
+```
+
+Every login is now attributable in sshd's own logs, and removing one person is a line in that file or a
+group-membership change — no shared-principal rotation.
+
+- `$self` is valid **only as a mapping target**. `- $self` as a plain entry is refused at config load, so is any other
+  `$`-prefixed target (a typo such as `$selff` fails loudly instead of being issued literally), and `/sign` refuses a
+  *requested* principal beginning with `$` with a `400`.
+- It **requires the `self_principal` block**: `enabled: true`, the caller's realm in `realms`, and the uid absent from
+  `deny`. Those gates are what stop `jsmith@FOO.COM` and `jsmith@BAR.COM` collapsing onto local account `jsmith`. A
+  group using `$self` while the block is disabled refuses to start.
+- A caller the gate refuses does **not** get a 403 outright: that group simply does not cover the request, and the
+  first alphabetical group that does still wins. Run with `DEBUG=true` to see `authz.self_target.ineligible`.
+- `--all-principals` expands `$self` to the caller's uid alongside the static entries, and omits it for a caller the
+  gate refuses.
+- The caller's own uid is never remapped, so a group containing both `jsmith: some-role` and `root: $self` still issues
+  plain `jsmith` when `jsmith` requests their own uid.
 
 ### Client Usage
 
