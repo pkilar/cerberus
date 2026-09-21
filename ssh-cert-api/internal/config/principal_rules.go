@@ -27,6 +27,17 @@ type PrincipalRule struct {
 // Mapped reports whether the rule rewrites the requested name.
 func (r PrincipalRule) Mapped() bool { return r.Requested != r.Issued }
 
+// SelfTarget is the reserved allowed_principals mapping target that resolves,
+// per request, to the caller's own short uid — the same principal the
+// top-level self_principal block issues. `- root: $self` means "a member
+// requesting root receives a certificate for their own uid", which is how a
+// group hands out identity-scoped certificates that sshd's
+// AuthorizedPrincipalsFile maps back onto a shared account. The "$" prefix is
+// reserved: it needs no YAML quoting (unlike "*" and "%", which are YAML
+// indicator characters), it cannot collide with a POSIX account name, and any
+// other $-prefixed target is refused at config load.
+const SelfTarget = "$self"
+
 // PrincipalRules is the parsed allowed_principals list, in YAML order.
 type PrincipalRules []PrincipalRule
 
@@ -136,25 +147,63 @@ func (rs PrincipalRules) HasWildcard() bool {
 // Issued returns the sorted, deduplicated certificate names for the whole
 // list — what an all_principals expansion mints. Callers must refuse a
 // wildcard group first (HasWildcard); "*" is otherwise returned verbatim.
-func (rs PrincipalRules) Issued() []string {
+//
+// A SelfTarget entry contributes selfUID, the caller's own self-issuable uid,
+// and contributes nothing when selfUID is empty (self_principal does not
+// permit this caller that uid). A group whose entries are all SelfTarget
+// therefore expands to an empty set for such a caller, which the /sign handler
+// refuses rather than minting an empty certificate.
+func (rs PrincipalRules) Issued(selfUID string) []string {
 	out := make([]string, 0, len(rs))
 	for _, r := range rs {
+		if r.Issued == SelfTarget {
+			if selfUID != "" {
+				out = append(out, selfUID)
+			}
+			continue
+		}
 		out = append(out, r.Issued)
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
 }
 
+// FirstSelfTarget reports the first requested name whose target is SelfTarget.
+// Config validation uses it to refuse a group that issues the caller's own uid
+// while self_principal — which supplies the realm allowlist and denylist that
+// gate uid issuance — is disabled.
+func (rs PrincipalRules) FirstSelfTarget() (requested string, ok bool) {
+	for _, r := range rs {
+		if r.Issued == SelfTarget {
+			return r.Requested, true
+		}
+	}
+	return "", false
+}
+
 // Resolve returns the certificate name for a requested name that has already
 // been authorized against this list: the Issued name of the first rule whose
 // Requested matches, else the requested name itself (it was covered by "*").
-func (rs PrincipalRules) Resolve(requested string) string {
+//
+// A rule targeting SelfTarget resolves to selfUID, the caller's own
+// self-issuable uid. ok is false when such a rule matches but selfUID is empty,
+// i.e. self_principal does not permit this caller that uid: the group does not
+// cover this request, and the caller must move on to the next candidate group
+// rather than issue anything.
+func (rs PrincipalRules) Resolve(requested, selfUID string) (string, bool) {
 	for _, r := range rs {
-		if r.Requested == requested {
-			return r.Issued
+		if r.Requested != requested {
+			continue
 		}
+		if r.Issued == SelfTarget {
+			if selfUID == "" {
+				return "", false
+			}
+			return selfUID, true
+		}
+		return r.Issued, true
 	}
-	return requested
+	return requested, true
 }
 
 // validate enforces the content rules for one group's allowed_principals.
@@ -168,6 +217,14 @@ func (rs PrincipalRules) validate(group string) error {
 		}
 		if strings.TrimSpace(r.Issued) == "" {
 			return fmt.Errorf("group '%s': allowed_principals[%d]: mapping for '%s' has an empty target", group, i, r.Requested)
+		}
+		if strings.HasPrefix(strings.TrimSpace(r.Requested), "$") {
+			return fmt.Errorf("group '%s': allowed_principals[%d]: %q is reserved and cannot be requested (it is only valid as a mapping target)",
+				group, i, r.Requested)
+		}
+		if t := strings.TrimSpace(r.Issued); strings.HasPrefix(t, "$") && t != SelfTarget {
+			return fmt.Errorf("group '%s': allowed_principals[%d]: unknown reserved target %q for '%s' (only %q is defined)",
+				group, i, r.Issued, r.Requested, SelfTarget)
 		}
 		if r.Mapped() && strings.TrimSpace(r.Requested) == "*" {
 			return fmt.Errorf("group '%s': allowed_principals[%d]: the wildcard '*' cannot be mapped", group, i)

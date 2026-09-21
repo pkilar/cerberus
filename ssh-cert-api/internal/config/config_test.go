@@ -218,6 +218,22 @@ groups:
 			expectError: true,
 			errSubstr:   "principal 'root' is listed twice with different targets ('global-root' and 'root')",
 		},
+		{
+			name: "self mapping without self_principal is rejected",
+			yamlContent: `
+keytab_path: "/etc/keytab/test.keytab"
+groups:
+  humans:
+    members:
+      - jsmith@example.com
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: $self
+`,
+			expectError: true,
+			errSubstr:   "self_principal is not enabled",
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,7 +300,7 @@ groups:
 	if r := got.Requestable(); !slices.Equal(r, []string{"deploy", "root", "admin"}) {
 		t.Fatalf("Requestable = %v", r)
 	}
-	if i := got.Issued(); !slices.Equal(i, []string{"deploy", "global-root"}) {
+	if i := got.Issued(""); !slices.Equal(i, []string{"deploy", "global-root"}) {
 		t.Fatalf("Issued = %v", i)
 	}
 }
@@ -1805,15 +1821,15 @@ func TestLoadConfig_ShippedExample(t *testing.T) {
 		t.Fatalf("shipped example must load: %v", err)
 	}
 	sa := cfg.Groups["sysadmins"].CertificateRules.AllowedPrincipals
-	if got := sa.Resolve("root"); got != "global-root" {
+	if got, _ := sa.Resolve("root", ""); got != "global-root" {
 		t.Fatalf("sysadmins: root resolves to %q, want global-root", got)
 	}
 	wm := cfg.Groups["webmasters"].CertificateRules.AllowedPrincipals
-	if got := wm.Resolve("root"); got != "webserver-root" {
+	if got, _ := wm.Resolve("root", ""); got != "webserver-root" {
 		t.Fatalf("webmasters: root resolves to %q, want webserver-root", got)
 	}
-	if !slices.Equal(sa.Issued(), []string{"ec2-user", "global-root"}) {
-		t.Fatalf("sysadmins issued set = %v", sa.Issued())
+	if !slices.Equal(sa.Issued(""), []string{"ec2-user", "global-root"}) {
+		t.Fatalf("sysadmins issued set = %v", sa.Issued(""))
 	}
 }
 
@@ -1852,5 +1868,39 @@ func TestValidate_ServicePrincipalShape(t *testing.T) {
 				t.Fatalf("service_principal %q: unexpected error %v", tc.sp, err)
 			}
 		})
+	}
+}
+
+func TestValidate_SelfTargetRequiresSelfPrincipal(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			KeytabPath: "/etc/krb5.keytab",
+			Groups: map[string]Group{
+				"humans": {
+					Members: []string{"jsmith@EXAMPLE.COM"},
+					CertificateRules: CertificateRules{
+						Validity:          "8h",
+						AllowedPrincipals: PrincipalRules{{Requested: "root", Issued: SelfTarget}},
+					},
+				},
+			},
+		}
+	}
+	err := base().Validate()
+	if err == nil || !strings.Contains(err.Error(), "self_principal is not enabled") {
+		t.Fatalf("a $self mapping without self_principal must fail config load, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "humans") || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("the error must name the group and the requested principal: %v", err)
+	}
+
+	c := base()
+	c.SelfPrincipal = SelfPrincipalConfig{
+		Enabled:          true,
+		Realms:           []string{"EXAMPLE.COM"},
+		CertificateRules: CertificateRules{Validity: "1h"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("an enabled self_principal must accept a $self mapping: %v", err)
 	}
 }

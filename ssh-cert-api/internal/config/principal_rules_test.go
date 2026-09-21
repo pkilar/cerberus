@@ -138,6 +138,11 @@ func TestPrincipalRules_UnmarshalYAML_Shapes(t *testing.T) {
 			yaml: "- \"null\"\n",
 			want: PrincipalRules{{"null", "null"}},
 		},
+		{
+			name: "self target parses unquoted",
+			yaml: "- root: $self\n- deploy\n",
+			want: PrincipalRules{{"root", "$self"}, {"deploy", "deploy"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,16 +188,16 @@ func TestPrincipalRules_Helpers(t *testing.T) {
 	if PlainPrincipals("root").HasWildcard() {
 		t.Fatal("HasWildcard should be false without a plain * entry")
 	}
-	if got, want := rs.Issued(), []string{"*", "deploy", "global-root"}; !slices.Equal(got, want) {
+	if got, want := rs.Issued(""), []string{"*", "deploy", "global-root"}; !slices.Equal(got, want) {
 		t.Fatalf("Issued = %v, want sorted+deduped %v", got, want)
 	}
-	if got := rs.Resolve("root"); got != "global-root" {
+	if got, _ := rs.Resolve("root", ""); got != "global-root" {
 		t.Fatalf("Resolve(root) = %q, want global-root", got)
 	}
-	if got := rs.Resolve("deploy"); got != "deploy" {
+	if got, _ := rs.Resolve("deploy", ""); got != "deploy" {
 		t.Fatalf("Resolve(deploy) = %q, want identity", got)
 	}
-	if got := rs.Resolve("anything-else"); got != "anything-else" {
+	if got, _ := rs.Resolve("anything-else", ""); got != "anything-else" {
 		t.Fatalf("Resolve of a name covered only by * must pass through, got %q", got)
 	}
 	if !rs[1].Mapped() || rs[0].Mapped() {
@@ -220,6 +225,13 @@ func TestPrincipalRules_Validate(t *testing.T) {
 		{name: "wildcard as target", rules: PrincipalRules{{"root", "*"}}, errPart: "'root' cannot be mapped to the wildcard '*'"},
 		{name: "conflicting duplicate", rules: PrincipalRules{{"root", "a"}, {"root", "b"}}, errPart: "principal 'root' is listed twice with different targets ('a' and 'b')"},
 		{name: "plain then mapped conflict", rules: PrincipalRules{{"root", "root"}, {"root", "global-root"}}, errPart: "principal 'root' is listed twice with different targets ('root' and 'global-root')"},
+		{name: "self target ok", rules: PrincipalRules{{"root", SelfTarget}}},
+		{name: "self target beside a plain entry ok", rules: PrincipalRules{{"root", SelfTarget}, {"deploy", "deploy"}}},
+		{name: "two names to self ok", rules: PrincipalRules{{"root", SelfTarget}, {"admin", SelfTarget}}},
+		{name: "self requested rejected", rules: PrincipalRules{{SelfTarget, SelfTarget}}, errPart: `"$self" is reserved and cannot be requested`},
+		{name: "self as mapping key rejected", rules: PrincipalRules{{SelfTarget, "root"}}, errPart: "is reserved and cannot be requested"},
+		{name: "unknown reserved target rejected", rules: PrincipalRules{{"root", "$selff"}}, errPart: `unknown reserved target "$selff"`},
+		{name: "self vs static conflict rejected", rules: PrincipalRules{{"root", SelfTarget}, {"root", "global-root"}}, errPart: "listed twice with different targets"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,6 +250,52 @@ func TestPrincipalRules_Validate(t *testing.T) {
 				t.Fatalf("error %v should name the group", err)
 			}
 		})
+	}
+}
+
+func TestPrincipalRules_SelfTarget(t *testing.T) {
+	t.Parallel()
+	rs := PrincipalRules{
+		{Requested: "root", Issued: SelfTarget},
+		{Requested: "admin", Issued: SelfTarget},
+		{Requested: "deploy", Issued: "deploy"},
+	}
+	// A $self rule issues the caller's own uid.
+	if got, ok := rs.Resolve("root", "jsmith"); !ok || got != "jsmith" {
+		t.Fatalf(`Resolve("root", "jsmith") = %q, %v; want "jsmith", true`, got, ok)
+	}
+	// Without an eligible uid it reports "not covered" rather than issuing anything.
+	if got, ok := rs.Resolve("root", ""); ok || got != "" {
+		t.Fatalf(`Resolve("root", "") = %q, %v; want "", false`, got, ok)
+	}
+	// Static targets and "*" passthrough are unaffected by selfUID.
+	if got, ok := rs.Resolve("deploy", ""); !ok || got != "deploy" {
+		t.Fatalf(`Resolve("deploy", "") = %q, %v; want "deploy", true`, got, ok)
+	}
+	if got, ok := rs.Resolve("other", ""); !ok || got != "other" {
+		t.Fatalf(`Resolve("other", "") = %q, %v; want "other", true`, got, ok)
+	}
+	// Both $self entries collapse onto the one uid.
+	if got, want := rs.Issued("jsmith"), []string{"deploy", "jsmith"}; !slices.Equal(got, want) {
+		t.Fatalf("Issued(\"jsmith\") = %v, want %v", got, want)
+	}
+	// Without a uid the $self entries contribute nothing at all.
+	if got, want := rs.Issued(""), []string{"deploy"}; !slices.Equal(got, want) {
+		t.Fatalf("Issued(\"\") = %v, want %v", got, want)
+	}
+	if got := (PrincipalRules{{Requested: "root", Issued: SelfTarget}}).Issued(""); len(got) != 0 {
+		t.Fatalf("an all-$self group must expand to nothing for an ineligible caller, got %v", got)
+	}
+	// FirstSelfTarget names the entry config validation reports on.
+	if got, ok := rs.FirstSelfTarget(); !ok || got != "root" {
+		t.Fatalf(`FirstSelfTarget = %q, %v; want "root", true`, got, ok)
+	}
+	if _, ok := PlainPrincipals("root").FirstSelfTarget(); ok {
+		t.Fatal("FirstSelfTarget must report false when no rule targets $self")
+	}
+	// $self is a target, never a policy object.
+	if got := rs.Requestable(); slices.Contains(got, SelfTarget) {
+		t.Fatalf("Requestable must not contain %q: %v", SelfTarget, got)
 	}
 }
 

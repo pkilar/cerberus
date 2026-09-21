@@ -498,6 +498,17 @@ func (c *Config) Validate() error {
 			return err
 		}
 
+		// A group that issues the caller's own uid leans on self_principal for
+		// the realm allowlist and denylist that stop two realms' identical uids
+		// collapsing onto one local account. Refuse at load rather than deny
+		// every such request at runtime.
+		if !c.SelfPrincipal.Enabled {
+			if req, hasSelf := rules.AllowedPrincipals.FirstSelfTarget(); hasSelf {
+				return fmt.Errorf("group '%s': allowed_principals maps '%s' to %s, but self_principal is not enabled; set self_principal.enabled: true and list the realms allowed to self-issue",
+					name, req, SelfTarget)
+			}
+		}
+
 		if err := validateFlagExtensions(name, "permissions", rules.Permissions); err != nil {
 			return err
 		}

@@ -232,19 +232,35 @@ func (ca *CasbinAuthorizer) Authorize(ctx context.Context, userPrincipal string,
 		if allAllowed && sawGroupCheckedPrincipal {
 			rules := ca.groupRules[groupName]
 			// Translate the request through the winning group's rules: a
-			// mapping entry (`root: global-root`) issues its target, a plain or
+			// mapping entry (`root: global-root`) issues its target, a `root: $self`
+			// entry issues the caller's own uid, a plain or
 			// "*"-covered name is issued as requested. The caller's own
 			// self-issuable uid rides along unmapped — self_principal is
 			// independent of group membership, and this group never authorized
 			// that name (it was skipped above). Sort + dedupe so two requested
 			// names that map to one target produce a single cert principal.
 			granted := make([]string, 0, len(reqPrincipals))
+			covered := true
 			for _, reqPrincipal := range reqPrincipals {
 				if selfOK && reqPrincipal == selfUID {
 					granted = append(granted, reqPrincipal)
 					continue
 				}
-				granted = append(granted, rules.AllowedPrincipals.Resolve(reqPrincipal))
+				issued, resolved := rules.AllowedPrincipals.Resolve(reqPrincipal, selfUID)
+				if !resolved {
+					// The matching rule issues the caller's own uid ($self) but
+					// self_principal does not permit this caller that uid, so
+					// this group does not cover the request after all. Fall
+					// through to the next candidate instead of denying: a later
+					// group may grant the same name statically.
+					slog.Debug("authz.self_target.ineligible", "principal", userPrincipal, "group", groupName, "requested", reqPrincipal)
+					covered = false
+					break
+				}
+				granted = append(granted, issued)
+			}
+			if !covered {
+				continue
 			}
 			slices.Sort(granted)
 			granted = slices.Compact(granted)
@@ -356,9 +372,10 @@ func (ca *CasbinAuthorizer) candidateGroups(ctx context.Context, userPrincipal s
 // AuthorizeAll implements the all-principals expansion group selection: it
 // returns the first alphabetical group the user belongs to, with that group's
 // CertificateRules. It does not consult requested principals — GrantedPrincipals
-// is the group's issued set (mapping targets, deduplicated) and the caller must
-// still refuse a "*" group. The same fail-closed LDAP semantics as Authorize
-// apply.
+// is the group's issued set (mapping targets, deduplicated; a $self entry
+// contributes the caller's own uid, or nothing when self_principal does not
+// permit it) and the caller must still refuse a "*" group. The same
+// fail-closed LDAP semantics as Authorize apply.
 func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal string) (*AuthorizationResult, error) {
 	candidates, groupSources, ok := ca.candidateGroups(ctx, userPrincipal)
 	if !ok || len(candidates) == 0 {
@@ -367,12 +384,16 @@ func (ca *CasbinAuthorizer) AuthorizeAll(ctx context.Context, userPrincipal stri
 
 	groupName := candidates[0]
 	rules := ca.groupRules[groupName]
+	// A $self entry expands to the caller's own uid when self_principal permits
+	// it; selfEligibleUID returns an empty uid otherwise, and Issued then omits
+	// the entry rather than inventing a principal.
+	selfUID, _ := ca.selfEligibleUID(userPrincipal)
 	return &AuthorizationResult{
 		Allowed:           true,
 		GroupName:         groupName,
 		CertificateRules:  rules,
 		Source:            groupSources[groupName],
-		GrantedPrincipals: rules.AllowedPrincipals.Issued(),
+		GrantedPrincipals: rules.AllowedPrincipals.Issued(selfUID),
 	}, nil
 }
 

@@ -65,13 +65,20 @@ func (f *fakeAuthorizer) Authorize(_ context.Context, _ string, requested []stri
 	return withGrant(f.result, slices.Compact(granted)), f.err
 }
 
-func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
+func (f *fakeAuthorizer) AuthorizeAll(_ context.Context, principal string) (*authz.AuthorizationResult, error) {
 	res, err := f.result, f.err
 	if f.allResult != nil || f.allErr != nil {
 		res, err = f.allResult, f.allErr
 	}
 	if res != nil && res.CertificateRules != nil {
-		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued()), err
+		// Mirror the real authorizer, which expands a $self entry to the
+		// caller's own uid; these fakes have no self_principal gate, so the
+		// uid is derived from the principal exactly as selfEligibleUID does.
+		uid := principal
+		if at := strings.LastIndex(principal, "@"); at >= 0 {
+			uid = principal[:at]
+		}
+		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued(uid)), err
 	}
 	return res, err
 }
@@ -1427,5 +1434,33 @@ func TestHandleSignRequest_ResponseCarriesPolicyFingerprint(t *testing.T) {
 	}
 	if body.SignedKey == "" || body.PolicyFingerprint != cfg.PolicyFingerprint() {
 		t.Fatalf("body = %+v, want signed_key and policy_fingerprint %q", body, cfg.PolicyFingerprint())
+	}
+}
+
+func TestHandleSignRequest_AllPrincipalsExpandsSelfTarget(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity: "1h",
+		AllowedPrincipals: config.PrincipalRules{
+			{Requested: "root", Issued: config.SelfTarget},
+			{Requested: "deploy", Issued: "deploy"},
+		},
+	}
+	// GrantedPrincipals left nil so the fake derives the expansion the way
+	// authz.AuthorizeAll does, including the caller's own uid for $self.
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "humans", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil || !slices.Equal(signer.got.Principals, []string{"dave", "deploy"}) {
+		t.Fatalf("enclave principals = %v, want [dave deploy]", signer.got)
 	}
 }

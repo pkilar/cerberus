@@ -1622,3 +1622,188 @@ func TestAuthorizeSelf_GrantedIsUID(t *testing.T) {
 		t.Fatalf("GrantedPrincipals = %v, want %v", res.GrantedPrincipals, want)
 	}
 }
+
+// selfMappingConfig builds groups whose root entry issues the caller's own uid.
+// selfRealm is the only realm self_principal allows, so a member in another
+// realm is a member but not self-eligible.
+func selfMappingConfig(selfRealm string, deny []string, groups map[string]config.Group) *config.Config {
+	cfg := newTestConfig(groups)
+	cfg.SelfPrincipal = config.SelfPrincipalConfig{
+		Enabled:          true,
+		Realms:           []string{selfRealm},
+		Deny:             deny,
+		CertificateRules: config.CertificateRules{Validity: "1h"},
+	}
+	return cfg
+}
+
+func TestAuthorize_SelfTargetIssuesCallerUID(t *testing.T) {
+	t.Parallel()
+	cfg := selfMappingConfig("REALM.COM", nil, map[string]config.Group{
+		"humans": {
+			Members: []string{"dave@REALM.COM", "erin@REALM.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: config.SelfTarget}},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	for _, tc := range []struct{ principal, want string }{
+		{"dave@REALM.COM", "dave"},
+		{"erin@REALM.COM", "erin"},
+	} {
+		res, err := a.Authorize(t.Context(), tc.principal, []string{"root"})
+		if err != nil || !res.Allowed {
+			t.Fatalf("%s: allowed=%v err=%v", tc.principal, res != nil && res.Allowed, err)
+		}
+		if !slices.Equal(res.GrantedPrincipals, []string{tc.want}) {
+			t.Fatalf("%s: granted %v, want [%s] (own uid, never the requested name)", tc.principal, res.GrantedPrincipals, tc.want)
+		}
+	}
+}
+
+func TestAuthorize_SelfTargetDedupesAndRidesAlong(t *testing.T) {
+	t.Parallel()
+	cfg := selfMappingConfig("REALM.COM", nil, map[string]config.Group{
+		"humans": {
+			Members: []string{"dave@REALM.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity: "8h",
+				AllowedPrincipals: config.PrincipalRules{
+					{Requested: "root", Issued: config.SelfTarget},
+					{Requested: "admin", Issued: config.SelfTarget},
+				},
+			},
+		},
+	})
+	a, err := NewCasbinAuthorizer(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	// Two requested names mapping to one uid collapse to a single principal.
+	res, err := a.Authorize(t.Context(), "dave@REALM.COM", []string{"root", "admin"})
+	if err != nil || !res.Allowed {
+		t.Fatalf("allowed=%v err=%v", res != nil && res.Allowed, err)
+	}
+	if !slices.Equal(res.GrantedPrincipals, []string{"dave"}) {
+		t.Fatalf("granted %v, want [dave]", res.GrantedPrincipals)
+	}
+	// The self ride-along and a $self mapping produce the same name once.
+	res, err = a.Authorize(t.Context(), "dave@REALM.COM", []string{"root", "dave"})
+	if err != nil || !res.Allowed {
+		t.Fatalf("mixed: allowed=%v err=%v", res != nil && res.Allowed, err)
+	}
+	if !slices.Equal(res.GrantedPrincipals, []string{"dave"}) {
+		t.Fatalf("mixed: granted %v, want [dave]", res.GrantedPrincipals)
+	}
+}
+
+func TestAuthorize_SelfTargetIneligibleFallsThroughToNextGroup(t *testing.T) {
+	t.Parallel()
+	// "a-self" sorts first, so an eligible caller always gets the identity-scoped
+	// grant; an ineligible one must fall through to the static group instead of
+	// being denied a name that group genuinely grants.
+	groups := map[string]config.Group{
+		"a-self": {
+			Members: []string{"dave@REALM.COM", "erin@OTHER.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: config.SelfTarget}},
+			},
+		},
+		"b-static": {
+			Members: []string{"dave@REALM.COM", "erin@OTHER.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "4h",
+				AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: "shared-root"}},
+			},
+		},
+	}
+	a, err := NewCasbinAuthorizer(selfMappingConfig("REALM.COM", nil, groups), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.Authorize(t.Context(), "dave@REALM.COM", []string{"root"})
+	if err != nil || !res.Allowed || res.GroupName != "a-self" || !slices.Equal(res.GrantedPrincipals, []string{"dave"}) {
+		t.Fatalf("eligible caller: group=%q granted=%v err=%v", res.GroupName, res.GrantedPrincipals, err)
+	}
+	res, err = a.Authorize(t.Context(), "erin@OTHER.COM", []string{"root"})
+	if err != nil || !res.Allowed || res.GroupName != "b-static" || !slices.Equal(res.GrantedPrincipals, []string{"shared-root"}) {
+		t.Fatalf("ineligible caller must fall through: group=%q granted=%v err=%v", res.GroupName, res.GrantedPrincipals, err)
+	}
+}
+
+func TestAuthorize_SelfTargetIneligibleDeniedWhenNoOtherGroup(t *testing.T) {
+	t.Parallel()
+	groups := map[string]config.Group{
+		"humans": {
+			Members: []string{"erin@OTHER.COM", "dave@REALM.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity:          "8h",
+				AllowedPrincipals: config.PrincipalRules{{Requested: "root", Issued: config.SelfTarget}},
+			},
+		},
+	}
+	// Realm not allowlisted.
+	a, err := NewCasbinAuthorizer(selfMappingConfig("REALM.COM", nil, groups), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.Authorize(t.Context(), "erin@OTHER.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if res.Allowed || res.GrantedPrincipals != nil {
+		t.Fatalf("a caller outside self_principal.realms must be denied, got %+v", res)
+	}
+	// Uid on the self denylist.
+	a, err = NewCasbinAuthorizer(selfMappingConfig("REALM.COM", []string{"dave"}, groups), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err = a.Authorize(t.Context(), "dave@REALM.COM", []string{"root"})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if res.Allowed {
+		t.Fatalf("a denylisted uid must not be issued through a $self mapping, got %+v", res)
+	}
+}
+
+func TestAuthorizeAll_SelfTargetExpandsToUID(t *testing.T) {
+	t.Parallel()
+	groups := map[string]config.Group{
+		"humans": {
+			Members: []string{"dave@REALM.COM", "erin@OTHER.COM"},
+			CertificateRules: config.CertificateRules{
+				Validity: "8h",
+				AllowedPrincipals: config.PrincipalRules{
+					{Requested: "root", Issued: config.SelfTarget},
+					{Requested: "deploy", Issued: "deploy"},
+				},
+			},
+		},
+	}
+	a, err := NewCasbinAuthorizer(selfMappingConfig("REALM.COM", nil, groups), nil)
+	if err != nil {
+		t.Fatalf("NewCasbinAuthorizer: %v", err)
+	}
+	res, err := a.AuthorizeAll(t.Context(), "dave@REALM.COM")
+	if err != nil || !res.Allowed {
+		t.Fatalf("AuthorizeAll: allowed=%v err=%v", res != nil && res.Allowed, err)
+	}
+	if !slices.Equal(res.GrantedPrincipals, []string{"dave", "deploy"}) {
+		t.Fatalf("eligible expansion = %v, want [dave deploy]", res.GrantedPrincipals)
+	}
+	res, err = a.AuthorizeAll(t.Context(), "erin@OTHER.COM")
+	if err != nil || !res.Allowed {
+		t.Fatalf("AuthorizeAll (ineligible): allowed=%v err=%v", res != nil && res.Allowed, err)
+	}
+	if !slices.Equal(res.GrantedPrincipals, []string{"deploy"}) {
+		t.Fatalf("ineligible expansion = %v, want [deploy] ($self contributes nothing)", res.GrantedPrincipals)
+	}
+}
