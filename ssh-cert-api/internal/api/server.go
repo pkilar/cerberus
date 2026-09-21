@@ -400,6 +400,20 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Wildcard principal not allowed"})
 				return
 			}
+			// "$..." is reserved config vocabulary (config.SelfTarget), not a
+			// principal name. Config already refuses it on the requestable side
+			// of a mapping, but a group granting "*" would otherwise pass the
+			// literal through and mint a certificate for a principal called
+			// "$self". No privilege is gained — such a group grants any name —
+			// yet issuing a reserved token as an identity is exactly the
+			// confusion the token exists to avoid.
+			if strings.HasPrefix(strings.TrimSpace(p), "$") {
+				outcome = outcomeInvalidBody
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Reserved principal not allowed"})
+				return
+			}
 		}
 
 		slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)

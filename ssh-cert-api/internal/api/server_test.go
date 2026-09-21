@@ -1464,3 +1464,29 @@ func TestHandleSignRequest_AllPrincipalsExpandsSelfTarget(t *testing.T) {
 		t.Fatalf("enclave principals = %v, want [dave deploy]", signer.got)
 	}
 }
+
+func TestHandleSignRequest_ReservedPrincipalRejected(t *testing.T) {
+	// A "*" group grants any requested name, so without an explicit refusal the
+	// reserved $self token would pass straight through Resolve and be issued as
+	// a certificate principal literally named "$self".
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["`+config.SelfTarget+`"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Reserved principal not allowed") {
+		t.Errorf("body missing reserved-token rejection: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("a reserved principal must be refused before reaching the signer")
+	}
+}
