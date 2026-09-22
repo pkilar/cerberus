@@ -94,6 +94,8 @@ Thumbs.db
 .claude.json
 .claude.json.backup
 CLAUDE.md
+.opencode/
+AGENTS.md
 
 # Superpowers planning artifacts (local only)
 docs/superpowers/
