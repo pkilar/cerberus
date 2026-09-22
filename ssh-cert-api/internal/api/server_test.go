@@ -65,13 +65,20 @@ func (f *fakeAuthorizer) Authorize(_ context.Context, _ string, requested []stri
 	return withGrant(f.result, slices.Compact(granted)), f.err
 }
 
-func (f *fakeAuthorizer) AuthorizeAll(context.Context, string) (*authz.AuthorizationResult, error) {
+func (f *fakeAuthorizer) AuthorizeAll(_ context.Context, principal string) (*authz.AuthorizationResult, error) {
 	res, err := f.result, f.err
 	if f.allResult != nil || f.allErr != nil {
 		res, err = f.allResult, f.allErr
 	}
 	if res != nil && res.CertificateRules != nil {
-		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued()), err
+		// Mirror the real authorizer, which expands a $self entry to the
+		// caller's own uid; these fakes have no self_principal gate, so the
+		// uid is derived from the principal exactly as selfEligibleUID does.
+		uid := principal
+		if at := strings.LastIndex(principal, "@"); at >= 0 {
+			uid = principal[:at]
+		}
+		return withGrant(res, res.CertificateRules.AllowedPrincipals.Issued(uid)), err
 	}
 	return res, err
 }
@@ -1427,5 +1434,119 @@ func TestHandleSignRequest_ResponseCarriesPolicyFingerprint(t *testing.T) {
 	}
 	if body.SignedKey == "" || body.PolicyFingerprint != cfg.PolicyFingerprint() {
 		t.Fatalf("body = %+v, want signed_key and policy_fingerprint %q", body, cfg.PolicyFingerprint())
+	}
+}
+
+func TestHandleSignRequest_AllPrincipalsExpandsSelfTarget(t *testing.T) {
+	rules := &config.CertificateRules{
+		Validity: "1h",
+		AllowedPrincipals: config.PrincipalRules{
+			{Requested: "root", Issued: config.SelfTarget},
+			{Requested: "deploy", Issued: "deploy"},
+		},
+	}
+	// GrantedPrincipals left nil so the fake derives the expansion the way
+	// authz.AuthorizeAll does, including the caller's own uid for $self.
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "dave", Realm: "REALM.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "humans", CertificateRules: rules, Source: "static"}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","all_principals":true}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil || !slices.Equal(signer.got.Principals, []string{"dave", "deploy"}) {
+		t.Fatalf("enclave principals = %v, want [dave deploy]", signer.got)
+	}
+}
+
+func TestHandleSignRequest_ReservedPrincipalRejected(t *testing.T) {
+	// A "*" group grants any requested name, so without an explicit refusal the
+	// reserved $self token would pass straight through Resolve and be issued as
+	// a certificate principal literally named "$self".
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("*")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "superadmins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["`+config.SelfTarget+`"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Reserved principal not allowed") {
+		t.Errorf("body missing reserved-token rejection: %s", w.Body.String())
+	}
+	if signer.got != nil {
+		t.Error("a reserved principal must be refused before reaching the signer")
+	}
+}
+
+func TestHandleSignRequest_LoginAsIssuedAddsExtension(t *testing.T) {
+	// The group turns a mode name into a real account, so the certificate must
+	// carry the marker that tells cssh to log in as the issued principal.
+	rules := &config.CertificateRules{
+		Validity:          "1h",
+		AllowedPrincipals: config.PrincipalRules{{Requested: "root-ro", Issued: "jsmith"}},
+		LoginAsIssued:     true,
+		StaticAttributes:  map[string]string{"team@example.com": "sre"},
+	}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "jsmith", Realm: "REALM.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{
+		Allowed: true, GroupName: "roam-users", CertificateRules: rules, Source: "static",
+		GrantedPrincipals: []string{"jsmith"},
+	}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root-ro"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if signer.got == nil {
+		t.Fatal("signer never invoked")
+	}
+	v, ok := signer.got.CustomAttributes[config.LoginAsIssuedExtension]
+	if !ok {
+		t.Fatalf("cert extensions missing %s: %v", config.LoginAsIssuedExtension, signer.got.CustomAttributes)
+	}
+	if v != "" {
+		t.Errorf("%s must be a flag extension with an empty value, got %q", config.LoginAsIssuedExtension, v)
+	}
+	if signer.got.CustomAttributes["team@example.com"] != "sre" {
+		t.Errorf("operator static_attributes must survive: %v", signer.got.CustomAttributes)
+	}
+}
+
+func TestHandleSignRequest_NoLoginAsIssuedExtensionByDefault(t *testing.T) {
+	rules := &config.CertificateRules{Validity: "1h", AllowedPrincipals: config.PlainPrincipals("root")}
+	authN := &fakeAuthenticator{user: &auth.AuthenticatedUser{Username: "alice", Realm: "EXAMPLE.COM"}}
+	authZ := &fakeAuthorizer{result: &authz.AuthorizationResult{Allowed: true, GroupName: "admins", CertificateRules: rules}}
+	signer := &fakeSigner{signed: "ok"}
+	s := newServerForTest(t, authN, authZ, signer)
+
+	r := httptest.NewRequest(http.MethodPost, "/sign", strings.NewReader(`{"ssh_key":"k","principals":["root"]}`))
+	r.Header.Set("Authorization", "Negotiate x")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if _, ok := signer.got.CustomAttributes[config.LoginAsIssuedExtension]; ok {
+		t.Errorf("a group without login_as_issued must not carry %s", config.LoginAsIssuedExtension)
 	}
 }

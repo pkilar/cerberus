@@ -139,3 +139,9 @@ jobs:
 
       - name: cssh sidecar tests (zsh)
         run: zsh tests/cssh_sidecar_test.sh
+
+      - name: cssh login-as tests (bash)
+        run: bash tests/cssh_login_as_test.sh
+
+      - name: cssh login-as tests (zsh)
+        run: zsh tests/cssh_login_as_test.sh

@@ -400,6 +400,20 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Wildcard principal not allowed"})
 				return
 			}
+			// "$..." is reserved config vocabulary (config.SelfTarget), not a
+			// principal name. Config already refuses it on the requestable side
+			// of a mapping, but a group granting "*" would otherwise pass the
+			// literal through and mint a certificate for a principal called
+			// "$self". No privilege is gained — such a group grants any name —
+			// yet issuing a reserved token as an identity is exactly the
+			// confusion the token exists to avoid.
+			if strings.HasPrefix(strings.TrimSpace(p), "$") {
+				outcome = outcomeInvalidBody
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(messages.SigningResponse{Error: "Reserved principal not allowed"})
+				return
+			}
 		}
 
 		slog.Info("sign.request", "principal", principal, "requested_principals", req.Principals, "remote_addr", r.RemoteAddr)
@@ -473,6 +487,17 @@ func (s *Server) handleSignRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Static attributes from config become custom extensions on the cert.
 	customAttributes := maps.Clone(result.CertificateRules.StaticAttributes)
+	if result.CertificateRules.LoginAsIssued {
+		// A flag extension (empty value) telling cssh that this certificate's
+		// principal is the account to log into, so a request for a mode name
+		// such as "root-ro" lands on the account the mapping actually issued.
+		// config.Validate reserves the name, so this never overwrites an
+		// operator-supplied entry.
+		if customAttributes == nil {
+			customAttributes = make(map[string]string, 1)
+		}
+		customAttributes[config.LoginAsIssuedExtension] = ""
+	}
 
 	enclaveReq := &messages.EnclaveSigningRequest{
 		SSHKey:           req.SSHKey,

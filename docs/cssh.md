@@ -268,6 +268,14 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   A pre-sidecar `cssh` (before this feature) has no such record and re-signs
   on every call once the server maps the requested name — upgrade the
   client before enabling mapping server-side.
+- **Login name from the certificate.** A group may set `login_as_issued`, which
+  marks its certificates with `login-as-principal@cerberus`. `cssh` then logs in
+  as the certificate's principal rather than the name you typed, and prints one
+  line to stderr when that changes the account. This is what lets a requested
+  name be a *mode*: `cssh root-ro@host` against a `root-ro: $self` mapping gets
+  you a cert for your own uid and connects you to your own account. It applies
+  only to a single-principal certificate; with several principals there is no
+  one account to choose, so the login name is left alone and `cssh` says why.
 - **Principal switching.** A cert issued for `principalA` cannot authenticate
   as `principalB`, so `cssh alice@host` then `cssh deploy@host` (both in one
   Cerberus group) transparently re-signs on the switch instead of reusing
@@ -275,7 +283,10 @@ cssh --self --sign-only      # explicitly fetch your own cert; don't connect
   requested: a group can map a requested name to a role principal
   (`root: global-root` in `allowed_principals`), in which case `cssh root@host`
   yields a cert whose principal is `global-root` — that is what the sidecar
-  above is for. A server-side mapping change is picked up on your next `cssh`
+  above is for. A group may also map it to `$self`, in which case the cert
+  carries **your own uid** — `cssh root@host` yields a cert for `jsmith`, and
+  the host decides which accounts that principal may open.
+  A server-side mapping change is picked up on your next `cssh`
   call (the policy fingerprint changes), or immediately with `--force`.
 - **Principal selection.** With `CSSH_PRINCIPALS`/`--principals` unset, `cssh`
   asks `ssh -G <args>` for the login user it would use for the destination —

@@ -336,6 +336,7 @@ This is why `permissions:` in a group's `certificate_rules` should only contain 
 | Extension       | `permit-pty`              | Allow PTY allocation (required for interactive shells)                      |
 | Extension       | `permit-user-rc`          | Run user's `~/.ssh/rc` on connection                                        |
 | Extension       | `no-touch-required`       | FIDO/U2F: skip the touch requirement                                        |
+| Extension       | `login-as-principal@cerberus` | Read by `cssh`, ignored by sshd: log in as the cert's single principal (set `login_as_issued: true`) |
 | Critical option | `force-command`           | Override the user's command with the value (e.g., restrict to `rsync` only) |
 | Critical option | `source-address`          | Comma-separated CIDR list; cert is only valid from these addresses          |
 | Critical option | `verify-required`         | FIDO/U2F: require user verification (PIN/biometric) in addition to presence |
@@ -1078,6 +1079,8 @@ EIF builds can be done on any build host that has Go, Docker (with `buildx`), `n
 | User gets wrong permissions                                                                                     | User matches the wrong group                                                             | Groups are evaluated in **alphabetical order by group name** — the first group whose `allowed_principals` cover the entire request wins. YAML map order is irrelevant. To change the winner, rename groups (e.g., prefix with `a-`) or tighten `allowed_principals` so only the intended group matches the request.|
 | Certificate carries a different principal than requested (requested `root`, `ssh-keygen -L` shows `global-root`)| The matched group maps that principal (`root: global-root` in `allowed_principals`)      | Expected — the mapped name is what the account's `AuthorizedPrincipalsFile` should list. If the *wrong* group's mapping won, groups are matched alphabetically: rename or split them.                                                                                                                              |
 | HTTP 403 when requesting a mapping target directly (e.g. `--principals global-root`)                            | Mapping targets are not requestable; only the left-hand names in `allowed_principals` are| Request the left-hand name (`root`) and let the mapping issue the target, or add the target as a plain entry if it should be requestable on its own.                                                                                                                                                               |
+| Startup fails: `allowed_principals maps '<name>' to $self, but self_principal is not enabled`                   | A group issues the caller's own uid but the block gating uid issuance is off             | Set `self_principal.enabled: true` and list the realms allowed to self-issue, or replace the `$self` target with a static name.                                                                                                                                                                                    |
+| A user gets a shared role principal (or a 403) where you expected their own uid                                 | Their realm is not in `self_principal.realms`, or their uid is in `self_principal.deny`  | The `$self` group does not cover the request, so a later group (or nothing) does. Add the realm or drop the deny entry; `DEBUG=true` logs `authz.self_target.ineligible` with the group and requested name.                                                                                                        |
 | User not found in any group                                                                                     | Principal not listed in any `members` list                                               | Add the user's full Kerberos principal (e.g., `user@REALM.COM`) to the appropriate group                                                                                                                                                                                                                           |
 | HTTP 403 with `authz.ldap.error` in logs                                                                        | LDAP backend unreachable or denied bind                                                  | Check `cerberus_ldap_backend_up{backend="..."}` and the `ldap[]` array in `/health`. Fix the directory or credentials; if simple bind, verify `/etc/cerberus/ldap.pw` perms (`0600`) and contents. LDAP-backed groups fail closed by design — static groups (`members:`) are unaffected.                           |
 | Service refuses to start with `ldap[...] initial probe failed`                                                  | Misconfigured LDAP backend at startup                                                    | Verify `url:`, `bind:` credentials, and TLS settings. The service is intentionally strict here: a misconfigured directory should not silently degrade — restart only succeeds once every configured backend completes its initial bind.                                                                            |
@@ -1447,6 +1450,8 @@ Rules of the road:
 - Only the **left-hand** name is requestable. `cssh --principals global-root` is refused with `403` unless a plain
   `global-root` entry (or `*`) also exists in the group.
 - The mapped certificate carries **only** the target, never the requested name as well.
+- A target may be the reserved `$self`, which issues the **caller's own uid** rather than a fixed name — see
+  [Identity-scoped principals with `$self`](#identity-scoped-principals-with-self).
 - A user in several groups gets the **first group alphabetically** that covers the request — and that group's
   mapping. Dave in both `sysadmins` and `webmasters` gets `global-root` (`s` sorts before `w`); name groups so the
   broader role sorts first, or keep memberships disjoint.
@@ -1471,6 +1476,82 @@ Rules of the road:
 - **The caller's own uid is never remapped.** With `self_principal` enabled, an entry `dave: dave-role` applies to
   other members who request `dave`, but Dave requesting his own uid gets `dave` — the self-service path is independent
   of group membership by design.
+
+#### Identity-scoped principals with `$self`
+
+A static target gives every member of a group the same certificate principal, so the certificate itself cannot say
+which human used it. The reserved target `$self` issues the **caller's own short uid** instead:
+
+```yaml
+groups:
+  humans:
+    members: ["jsmith@REALM.COM", "alice@REALM.COM"]
+    certificate_rules:
+      validity: "8h"
+      allowed_principals:
+        - root: $self
+self_principal:
+  enabled: true
+  realms: [REALM.COM]
+```
+
+`jsmith` runs the usual `cssh root@host` and receives a certificate whose principal is `jsmith`. Each host lists the
+humans allowed to become root:
+
+```bash
+printf '%s\n' jsmith alice | sudo tee /etc/ssh/auth_principals/root
+```
+
+Every login is now attributable in sshd's own logs, and removing one person is a line in that file or a
+group-membership change — no shared-principal rotation.
+
+- `$self` is valid **only as a mapping target**. `- $self` as a plain entry is refused at config load, so is any other
+  `$`-prefixed target (a typo such as `$selff` fails loudly instead of being issued literally), and `/sign` refuses a
+  *requested* principal beginning with `$` with a `400`.
+- It **requires the `self_principal` block**: `enabled: true`, the caller's realm in `realms`, and the uid absent from
+  `deny`. Those gates are what stop `jsmith@FOO.COM` and `jsmith@BAR.COM` collapsing onto local account `jsmith`. A
+  group using `$self` while the block is disabled refuses to start.
+- A caller the gate refuses does **not** get a 403 outright: that group simply does not cover the request, and the
+  first alphabetical group that does still wins. Run with `DEBUG=true` to see `authz.self_target.ineligible`.
+- `--all-principals` expands `$self` to the caller's uid alongside the static entries, and omits it for a caller the
+  gate refuses.
+- The caller's own uid is never remapped, so a group containing both `jsmith: some-role` and `root: $self` still issues
+  plain `jsmith` when `jsmith` requests their own uid.
+
+##### Making the requested name a mode rather than an account
+
+`cssh root-ro@host` asks ssh to log in to an account called `root-ro`, which need not exist. Set `login_as_issued: true`
+on the group and the certificate carries `login-as-principal@cerberus`, a flag extension sshd ignores and `cssh` reads:
+the client logs in as the certificate's single principal instead of the name you typed, and says so on stderr when the
+name changes. The requested name becomes a mode selector, and the session lands on the account the mapping issued.
+
+Paired with a forced command this gives a read-only troubleshooting session that is attributable per human, with no
+shared account and no `AuthorizedPrincipalsFile` anywhere:
+
+```yaml
+groups:
+  roam-users:
+    members: ["jsmith@REALM.COM", "alice@REALM.COM"]
+    certificate_rules:
+      validity: "1h"
+      login_as_issued: true
+      allowed_principals:
+        - root-ro: $self
+      permissions:
+        permit-pty: ""                    # required, or the session gets no tty
+      critical_options:
+        force-command: "/usr/bin/sudo -n /usr/local/bin/roam"
+```
+
+`jsmith` runs `cssh root-ro@host`, the certificate is issued for `jsmith` with the forced command, the client connects
+as `jsmith`, and the session is the read-only shell. Set `ExposeAuthInfo yes` in `sshd_config` and the tool can read the
+certificate named by `$SSH_USER_AUTH` to confirm the forced command is its own and to log the KeyId and serial, which
+tie the session back to the `sign.success` entry on the API.
+
+Two properties are worth stating plainly. The extension is applied only to a single-principal certificate, so a group
+combining it with `--all-principals` leaves the login name alone and warns. And a forced command restricts the session,
+not the human: anyone who can obtain an ordinary certificate for their own account can still open an unrestricted
+session, so this is a mode users choose, not a boundary that contains them.
 
 ### Client Usage
 

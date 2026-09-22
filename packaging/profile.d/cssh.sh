@@ -902,6 +902,52 @@ EOF
         return 0
     fi
 
+    # A group may tell us which account this certificate is for. The
+    # login_as_issued rule adds the extension below, meaning "the single
+    # principal in this cert is the account to log into". That is what lets a
+    # request for a mode name land on the account the mapping actually issued:
+    # `cssh root-ro@host` against a `root-ro: $self` mapping yields a cert for
+    # your own uid, and the session should go to your account, not to a
+    # non-existent "root-ro". Applied only to an unambiguous single-principal
+    # cert, and always announced — a silent account switch is the one failure
+    # this must not cause. One ssh-keygen call: the cached-cert path above may
+    # not have run (the cert can have just been signed), so read it here.
+    local login_as="" connect_info
+    connect_info=$(ssh-keygen -L -f "$cert" 2>/dev/null)
+    if printf '%s\n' "$connect_info" | awk '
+            /^[[:space:]]*Extensions:/ { p=1; next }
+            p && /:/ { p=0; next }
+            p { gsub(/^[[:space:]]+/,""); if ($1 != "") print $1 }
+        ' | grep -Fxq 'login-as-principal@cerberus'; then
+        local connect_princs princ_count
+        connect_princs=$(printf '%s\n' "$connect_info" | awk '
+            /^[[:space:]]*Principals:/ {
+                rest=$0; sub(/^[[:space:]]*Principals:[[:space:]]*/,"",rest)
+                if (rest!="" && rest!="(none)") print rest
+                p=1; next
+            }
+            p && /:/ { p=0; next }
+            p { gsub(/^[[:space:]]+/,""); if ($0!="") print }
+        ' | awk 'NF')
+        princ_count=$(printf '%s\n' "$connect_princs" | awk 'NF' | wc -l | tr -d ' ')
+        if [ "$princ_count" -eq 1 ]; then
+            login_as=$(printf '%s\n' "$connect_princs" | awk 'NF{print; exit}')
+        else
+            printf 'cssh: certificate asks to set the login name but carries %s principals; connecting unchanged\n' \
+                "$princ_count" >&2
+        fi
+    fi
+    if [ -n "$login_as" ]; then
+        # -o User= outranks both `user@host` and a later -l, so the user's own
+        # arguments are left untouched. Prepending keeps a single ssh call.
+        local resolved_login
+        resolved_login=$(ssh -G "$@" 2>/dev/null | awk '/^user /{print $2; exit}')
+        if [ "$resolved_login" != "$login_as" ]; then
+            printf 'cssh: certificate sets the login name; connecting as %s\n' "$login_as" >&2
+        fi
+        set -- -o User="$login_as" "$@"
+    fi
+
     # The Cerberus-signed cert is the only identity cssh uses. IdentitiesOnly=yes
     # prevents ssh from trying agent keys or any IdentityFile entries from
     # ~/.ssh/config; -i pins the key, and CertificateFile is passed explicitly so
