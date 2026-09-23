@@ -1,3 +1,57 @@
+cerberus (0.13.0) unstable; urgency=medium
+
+  Identity-scoped access, and a fix for a setting that silently did nothing.
+  Both new features are opt-in and an existing configuration behaves exactly as
+  before, with one exception: a service_principal set to a bare hostname now
+  refuses to start, because that value could never have matched a keytab entry.
+
+  * allowed_principals mapping targets may now be the reserved "$self", which
+    issues the requesting user's own short uid instead of a fixed name.
+    "- root: $self" gives each member of a group a certificate naming them
+    individually, so sshd's AuthorizedPrincipalsFile can map humans onto a
+    shared account and every login is attributable in the host's own auth log.
+  * $self resolves through the same gate as self_principal (enabled, the realms
+    allowlist and the deny list), so no uid becomes issuable that
+    "self_principal: true" could not already obtain, and a group using it while
+    that block is disabled is refused at config load. A caller the gate refuses
+    is a coverage miss, so the next group alphabetically still gets a turn,
+    logged as authz.self_target.ineligible at Debug; it is never a silent grant.
+  * certificate_rules.login_as_issued marks a group's certificates with the
+    reserved flag extension login-as-principal@cerberus. sshd ignores it; cssh
+    reads it as "log in as this certificate's single principal, not the name
+    typed", which lets a requested name act as a mode selector: cssh
+    root-ro@host against a "root-ro: $self" mapping connects you to your own
+    account. It is applied only to single-principal certificates, announced on
+    stderr when the login name changes, and skipped for --sign-only. The
+    extension name is reserved; config load refuses a group that sets it
+    through static_attributes.
+  * /sign now refuses a requested principal beginning with "$". Config already
+    reserved the prefix on the requestable side of a mapping, but a group
+    granting "*" matched any requested name and would otherwise have issued a
+    certificate for a principal literally called "$self".
+  * service_principal now selects the keytab entry that decrypts incoming
+    service tickets. It was passed to gokrb5's client-side SName option, which
+    server-side verification never reads, so the setting had no effect and a
+    client reaching the API under a name other than the keytab's SPN failed
+    with "matching key not found in keytab". UPGRADE NOTE: a bare hostname is
+    now refused at config load, since it can never match a two-component HTTP/
+    keytab entry. Give it a full service principal such as
+    "HTTP/cerberus.example.com", optionally suffixed with a realm.
+  * Rollout order for the new features: upgrade cerberus-client before enabling
+    a mapping, because an older cssh re-signs on every call once the server
+    rewrites a requested name, and move every API instance to the new
+    configuration together so clients see one policy fingerprint.
+  * AWS SDK v2 refresh in both service modules: core 1.46.0 -> 1.47.0, kms
+    1.59.0 -> 1.61.0 (the attested Decrypt the host performs on the enclave's
+    behalf), sts 1.49.0 -> 1.51.0, imds 1.19.2 -> 1.20.0, config to 1.33.5 and
+    credentials to 1.20.5, plus the signin, sso, ssooidc, v4a, presigned-url,
+    configsources and endpoints set.
+  * CI gains tests/cssh_login_as_test.sh, run under both bash and zsh beside
+    the existing sidecar suite.
+  * govulncheck reports no vulnerabilities reachable from any module.
+
+ -- Paul Kilar <pkilar@gmail.com>  Tue, 22 Sep 2026 21:40:45 -0400
+
 cerberus (0.12.1) unstable; urgency=medium
 
   Dependency-only release. No behavioural change to the API, the signer,
