@@ -72,7 +72,7 @@ Description: VSOCK-connect detective control for the Cerberus enclave boundary
  See docs/vsock-connect-detection.md.
 
 Package: cerberus-client
-Architecture: all
+Architecture: amd64 arm64
 Depends: ${misc:Depends}, openssh-client, curl, jq, krb5-user
 Description: cssh SSH client helper (bash and zsh) for Cerberus
  The cssh shell wrapper for end-user workstations. Using the caller's

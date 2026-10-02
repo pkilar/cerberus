@@ -20,6 +20,10 @@ build:
 	@echo "Building ssh-cert-signer..."
 	$(MAKE) -C ssh-cert-signer build
 
+session:
+	@mkdir -p bin
+	go build -o bin/cerberus-session ./cmd/cerberus-session
+
 # Build the stress-testing CLI (cerberus-stress)
 stress:
 	@echo "Building cerberus-stress..."
@@ -82,6 +86,9 @@ test:
 # shell, not Go, so `go test` never reaches it. Run under both shells cssh
 # supports -- an EXIT trap behaves differently in zsh and the suite caught it.
 test-cssh:
+	bash tests/cssh_extend_test.sh
+	@if command -v zsh >/dev/null 2>&1; then zsh tests/cssh_extend_test.sh; fi
+	sh tests/cssh_extend_test.sh
 	@echo "Running cssh client tests..."
 	bash tests/cssh_sidecar_test.sh
 	@if command -v zsh >/dev/null 2>&1; then \

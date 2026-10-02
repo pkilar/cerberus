@@ -396,3 +396,46 @@ that path instead.
 - Certificate freshness is computed with GNU `date -d`, falling back to BSD/macOS
   `date -j -f`; if neither can parse the timestamp, `cssh` re-signs rather than
   trust an unparseable window.
+
+## Extend an existing session
+
+A certificate with both empty flag extensions `permit-session-renewal@cerberus`
+and `terminate-on-cert-expiry@cerberus` enables session renewal. Connect normally
+with `cssh root-ro@host`; inside that session, run `cssh --extend` (no arguments).
+The remote command delegates to `logsh extend`, which submits the renewal request
+to the privileged session supervisor. Authentication, certificate issuance, and
+proof of ownership of the original SSH key take place on your local workstation.
+Keep your local Kerberos ticket or OIDC authentication available. An encrypted
+private key must be unlocked in your local ssh-agent.
+
+Install the architecture-specific `cerberus-client` package, including
+`/usr/bin/cerberus-session`, on the workstation. The helper creates a private
+Unix socket, forwards it through the active SSH connection, and removes its local
+files when SSH exits. Renewable sessions disable SSH connection multiplexing.
+The destination must install the cssh shell wrapper and a renewal-aware logsh
+supervisor. Ensure `logsh` is on the remote shell's PATH (some installations put
+it in `/usr/sbin`). Configure the destination sshd's applicable `Match` block:
+
+```sshconfig
+AcceptEnv CERBERUS_RENEW_SOCKET
+AllowStreamLocalForwarding remote
+AllowTcpForwarding remote
+PermitListen none
+```
+
+Replace an existing `AllowTcpForwarding no` in that block rather than adding a
+second directive later: sshd uses the first applicable value. OpenSSH 10.5 also
+uses the TCP forwarding permission to authorize remote Unix-socket forwarding,
+so `AllowTcpForwarding no` prevents the renewal bridge. `PermitListen none`
+blocks remote TCP listeners while the Unix-socket bridge remains available.
+Keep any separate local TCP forwarding restrictions as required by site policy.
+The certificate needs empty `permit-port-forwarding`,
+`permit-session-renewal@cerberus`, and `terminate-on-cert-expiry@cerberus` flags.
+Forwarded socket names alone do not authorize renewal.
+
+The renewal preserves the original requested principal or mode (for example
+`root-ro`) and original key identity. It cannot increase the running session's
+permissions. Failed authentication or a changed certificate identity leaves the
+existing deadline in effect. No credentials or private keys are sent remotely.
+For a cssh script installed elsewhere, set `CSSH_SCRIPT_PATH` to its absolute path;
+bash and zsh also capture the path when sourcing this file.

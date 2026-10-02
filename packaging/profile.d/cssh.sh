@@ -82,6 +82,7 @@
 #                         (xdg-open/open); default off (the URL is always printed).
 #
 # ── Per-call flags (consumed before the rest is passed to ssh) ───────────────
+#   --extend              renew the current remote session; accepts no arguments.
 #   --principals u1,u2    override CSSH_PRINCIPALS for this call
 #   --pubkey PATH         override CSSH_PUBKEY for this call
 #   --url URL             override CERBERUS_URL for this call
@@ -385,12 +386,29 @@ _cssh_policy_fingerprint() {
     return 0
 }
 
+# Capture source path for bash/zsh; POSIX shells use the installed path or override.
+if [ -n "${BASH_VERSION:-}" ]; then
+    CSSH_SCRIPT_PATH="${CSSH_SCRIPT_PATH:-${BASH_SOURCE[0]}}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    eval 'CSSH_SCRIPT_PATH="${CSSH_SCRIPT_PATH:-${(%):-%x}}"'
+else
+    CSSH_SCRIPT_PATH="${CSSH_SCRIPT_PATH:-/etc/profile.d/cssh.sh}"
+fi
 cssh() {
+    if [ "${1:-}" = --extend ]; then
+        if [ "$#" -ne 1 ]; then
+            printf 'cssh: --extend accepts no arguments\n' >&2
+            return 2
+        fi
+        command logsh extend
+        return $?
+    fi
     _cssh_usage() {
         cat >&2 <<'EOF'
 Usage: cssh [--principals u1,u2] [--pubkey PATH] [--url URL] [--cacert PATH] [--force] [--sign-only] [--all-principals] [--self] [--oauth] [--verbose] [--] HOST [SSH_ARGS...]
 
 Flags:
+  --extend           renew the current remote session (no other arguments)
   --principals u1,u2  request specific cert principals
   --pubkey PATH       sign this public key (overrides CSSH_PUBKEY)
   --url URL           Cerberus base URL (overrides CERBERUS_URL)
@@ -610,14 +628,18 @@ EOF
         return 2
     fi
 
-    local cert="${privkey}-cert.pub"
+    if [ -n "${CSSH_CERT_OUTPUT:-}" ] && [ "$sign_only" -eq 0 ]; then
+        printf 'cssh: internal certificate output requires --sign-only\n' >&2
+        return 2
+    fi
+    local cert="${CSSH_CERT_OUTPUT:-${privkey}-cert.pub}"
     # Cerberus may issue a different principal than the one requested when the
     # matched group maps it (`root: global-root` in allowed_principals), so the
     # cert's own principal list is not a reliable record of what we asked for.
     # After each sign we record "<serial> <policy-fingerprint> <requested-set>"
     # here ("-" for an unknown fingerprint or an all/self request) and use it
     # for the refresh decision below; see docs/cssh.md "Cache".
-    local sidecar="${privkey}-cert.requested"
+    local sidecar="${CSSH_CERT_OUTPUT:-${privkey}-cert}.requested"
 
     # Sorted, deduplicated requested set (comma-joined, trailing comma), used by
     # the refresh decision and recorded in the sidecar after an explicit sign.
@@ -952,6 +974,13 @@ EOF
     # prevents ssh from trying agent keys or any IdentityFile entries from
     # ~/.ssh/config; -i pins the key, and CertificateFile is passed explicitly so
     # the binding survives a non-standard CSSH_PUBKEY path.
+    # The helper inspects the binary cert extension values, and owns cleanup.
+    if command -v cerberus-session >/dev/null 2>&1; then
+        command cerberus-session --cert "$cert" --key "$privkey" \
+            --script "$CSSH_SCRIPT_PATH" --pubkey "$pubkey" --url "$cerberus_url" \
+            --cacert "$cacert" --auth "$auth_mode" --principals "$principals" -- "$@"
+        return $?
+    fi
     command ssh \
         -o IdentitiesOnly=yes \
         -o PreferredAuthentications=publickey \
