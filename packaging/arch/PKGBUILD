@@ -73,6 +73,7 @@ build() {
     # Root module — already at $srcdir/${pkgbase}-${pkgver}, no subshell cd
     # needed. See packaging/rpm/cerberus.spec's build step for why the
     # embedded eBPF object is prebuilt rather than compiled here.
+    go build -buildmode=pie -trimpath -ldflags="-s -w" -o cerberus-session ./cmd/cerberus-session
     go build -buildmode=pie -trimpath -ldflags="-s -w $ldflags_version" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 }
 
@@ -178,12 +179,12 @@ package_cerberus-vsock-watch() {
 
 package_cerberus-client() {
     pkgdesc="cssh SSH client helper (bash and zsh) for the Cerberus certificate authority"
-    arch=('any')
     depends=('openssh' 'curl' 'jq' 'krb5')
     backup=('etc/profile.d/cerberus-env.sh')
     install=cerberus-client.install
 
     cd "${pkgbase}-${pkgver}"
+    install -Dm755 cerberus-session "$pkgdir/usr/bin/cerberus-session"
 
     # cssh.sh is plain code (replaced on upgrade so fixes always apply); site
     # config lives in the companion cerberus-env.sh, shipped as a backup file so

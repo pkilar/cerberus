@@ -37,7 +37,7 @@ BuildRequires:  golang >= 1.26
 BuildRequires:  systemd-rpm-macros
 
 # `noarch` belongs in this list even though the daemons are arch-specific: the
-# cerberus-client subpackage is BuildArch: noarch, and without it here that
+# cerberus-client subpackage contains a native helper; this setting also keeps
 # subpackage cannot be built on any host outside the allowlist.
 ExclusiveArch:  x86_64 aarch64 noarch
 
@@ -130,13 +130,12 @@ detective, not preventive, control — see docs/vsock-connect-detection.md.
 # ---------------------------------------------------------------------------
 # Subpackage: cerberus-client
 #
-# End-user workstation helper: the `cssh` shell function (bash + zsh) installed
+# End-user workstation helper: native renewal bridge and `cssh` shell function (bash + zsh) installed
 # to /etc/profile.d/. Pure shell, so it is noarch and independent of the API and
 # signer services. Carries no key material and no server config.
 # ---------------------------------------------------------------------------
 %package client
 Summary:        Cerberus SSH client helper (cssh) for bash and zsh
-BuildArch:      noarch
 Requires:       openssh-clients
 Requires:       curl
 Requires:       jq
@@ -248,6 +247,8 @@ cd ..
 # `make vsock-watch-bpf` to regenerate it from source if that file changes.
 go build -ldflags="-s -w -X github.com/pkilar/cerberus/version.Version=%{version}" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 
+go build -ldflags="-s -w" -o cerberus-session ./cmd/cerberus-session
+
 %install
 rm -rf %{buildroot}
 
@@ -323,6 +324,7 @@ install -D -m 0644 packaging/audit-rules/61-cerberus-vsock.rules \
     %{buildroot}%{_sysconfdir}/audit/rules.d/61-cerberus-vsock.rules
 
 # --- cerberus-client ---
+install -D -m 0755 cerberus-session %{buildroot}%{_bindir}/cerberus-session
 # cssh.sh is plain code (replaced on upgrade so fixes always apply); site config
 # lives in the companion cerberus-env.sh, shipped %config(noreplace).
 install -D -m 0644 packaging/profile.d/cssh.sh \
@@ -448,6 +450,7 @@ exit 0
 %config(noreplace) %{_sysconfdir}/audit/rules.d/61-cerberus-vsock.rules
 
 %files client
+%{_bindir}/cerberus-session
 %license LICENSE
 %doc docs/cssh.md
 # cssh.sh is plain code: NOT %config, so security/functionality fixes always
