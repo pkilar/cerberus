@@ -48,6 +48,7 @@ type bridge struct {
 }
 
 func certificate(path string) (*ssh.Certificate, error) {
+	// #nosec G304 -- Path is a local CLI certificate or this process's renewal output, never a remote request field.
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return nil, e
@@ -68,6 +69,7 @@ func renewable(c *ssh.Certificate) bool {
 	return ok && ok2 && a == "" && b == "" && c.CertType == ssh.UserCert && c.ValidBefore != ssh.CertTimeInfinity
 }
 func matchingSigner(key string, public ssh.PublicKey) (ssh.Signer, io.Closer, error) {
+	// #nosec G304 -- The workstation user selects their private key via --key; remote requests cannot select files.
 	b, e := os.ReadFile(key)
 	if e == nil {
 		s, err := ssh.ParsePrivateKey(b)
@@ -75,6 +77,7 @@ func matchingSigner(key string, public ssh.PublicKey) (ssh.Signer, io.Closer, er
 			return s, nil, nil
 		}
 	}
+	// #nosec G704 -- SSH_AUTH_SOCK selects the workstation user's local Unix agent; remote requests cannot set it.
 	c, e := net.DialTimeout("unix", os.Getenv("SSH_AUTH_SOCK"), 3*time.Second)
 	if e != nil {
 		return nil, nil, errors.New("original key unavailable; unlock it in ssh-agent")
@@ -122,6 +125,7 @@ func (b *bridge) renew(ctx context.Context, r request) response {
 	if b.cacert != "" {
 		args = append(args, "--cacert", b.cacert)
 	}
+	// #nosec G204 -- The local user chooses --script; shell source is fixed and paths/arguments are quoted, not interpolated.
 	cmd := exec.CommandContext(ctx, "sh", append([]string{"-c", `. "$CSSH_SCRIPT_PATH"; cssh "$@"`, "cssh"}, args...)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -192,6 +196,7 @@ func run() error {
 	}
 	sshArgs := []string{"-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey", "-i", *key, "-o", "CertificateFile=" + *cert}
 	if !renewable(original) {
+		// #nosec G204 -- This workstation CLI intentionally forwards its user's SSH arguments to fixed ssh, without a shell.
 		cmd := exec.Command("ssh", append(sshArgs, f.Args()...)...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -274,6 +279,7 @@ func run() error {
 	}()
 
 	sshArgs = append(sshArgs, "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindMask=0177", "-o", "SetEnv=CERBERUS_RENEW_SOCKET="+remote, "-R", remote+":"+socket)
+	// #nosec G204 -- This workstation CLI intentionally forwards its user's SSH arguments to fixed ssh, without a shell.
 	cmd := exec.CommandContext(ctx, "ssh", append(sshArgs, f.Args()...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
