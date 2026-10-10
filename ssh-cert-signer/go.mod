@@ -1,6 +1,6 @@
 module github.com/pkilar/cerberus/ssh-cert-signer
 
-go 1.27.0
+go 1.27.2
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
@@ -29,7 +29,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
 	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
