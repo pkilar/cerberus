@@ -1,6 +1,6 @@
 module github.com/pkilar/cerberus
 
-go 1.27.0
+go 1.27.2
 
 require (
 	github.com/cilium/ebpf v0.22.0
@@ -19,7 +19,7 @@ require (
 	github.com/jcmturner/goidentity/v6 v6.0.1 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/mdlayher/socket v0.7.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
