@@ -58,10 +58,24 @@ jobs:
         with:
           # Pinned so a surprise upstream rule release can't red a PR.
           # Dependabot's github-actions ecosystem bumps this PR-by-PR.
-          # Must be built with Go >= our toolchain directive, otherwise
-          # the action errors with "Go language version ... lower than
-          # the targeted Go version".
-          version: v2.13.2
+          #
+          # Two separate constraints tie this pin to the go.mod `go` line, and
+          # they do NOT have the same granularity:
+          #   1. Language version: must be built with Go >= our `go` line or the
+          #      action errors with "Go language version ... lower than the
+          #      targeted Go version". Compared on M.m only (the patch component
+          #      is trimmed), so a patch bump never trips this one.
+          #   2. Export-data reader: the vendored go/types importer must handle
+          #      the export-data version the *installed* toolchain emits. This IS
+          #      patch-sensitive -- Go 1.27.2 bumped it from 4 to 5, and v2.13.2
+          #      (fine under 1.27.0) then fails every file with "export data
+          #      version 5 is greater than maximum supported version 4
+          #      (typecheck)". Neither is a lint finding; no code change clears
+          #      either. v2.14.0 is the first release that reads version 5.
+          #
+          # So when the `go` line moves at all, even by a patch, re-run the
+          # linter locally against that exact toolchain before trusting the pin.
+          version: v2.14.0
           working-directory: ${{ matrix.module }}
 
   vuln:
@@ -100,8 +114,25 @@ jobs:
             ssh-cert-api/go.sum
             ssh-cert-signer/go.sum
 
+      # gosec's newest release (v2.29.0) pins golang.org/x/tools v0.49.0, whose
+      # export-data reader caps at version 4 while Go 1.27.2 emits version 5 --
+      # the same incompatibility described on the golangci-lint pin above. A
+      # plain `go install gosec@latest` therefore reports "export data version 5
+      # is greater than maximum supported version 4" against every import and
+      # exits 1 having found *zero* issues, which looks like a finding but is a
+      # tooling failure. Build it in a throwaway module with x/tools raised so it
+      # can read this toolchain's export data. Both versions are pinned because
+      # they have to be chosen as a pair; collapse this back to a one-line
+      # `go install` once a gosec release ships x/tools >= v0.50.0.
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d)"
+          cd "$d"
+          go mod init gosecbuild
+          go get github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          go get golang.org/x/tools@v0.50.0
+          go build -o "$(go env GOPATH)/bin/gosec" github.com/securego/gosec/v2/cmd/gosec
 
       # -severity=medium filters LOW-severity noise: G104 (unchecked
       # json.NewEncoder(w).Encode — best-effort HTTP response writes) and
