@@ -614,7 +614,7 @@ echo "1.0.0" > VERSION
 
 ### Arch Linux packages
 
-The repo also ships Arch Linux packaging in [`packaging/arch/`](../packaging/arch/) — a `makepkg` split package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (noarch), and the conditional `cerberus-signer-eif`. Build it as a **regular user** (`makepkg` refuses to run as root), with `base-devel` and `go` installed:
+The repo also ships Arch Linux packaging in [`packaging/arch/`](../packaging/arch/) — a `makepkg` split package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client`, and the conditional `cerberus-signer-eif`. Build it as a **regular user** (`makepkg` refuses to run as root), with `base-devel` and `go` installed:
 
 ```bash
 ./packaging/arch/build-arch.sh                                   # → ./archbuild/*.pkg.tar.zst
@@ -626,7 +626,7 @@ sudo pacman -U ./archbuild/cerberus-client-*.pkg.tar.zst
 
 ### Debian / Ubuntu packages
 
-The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: all`), and the conditional `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
+The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: amd64 arm64`), and the conditional `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
 
 ```bash
 ./packaging/debian/build-deb.sh                                    # → ./debbuild/*.deb
@@ -1467,7 +1467,7 @@ Rules of the road:
   differs, so honest users pick up the new principal immediately. Certificates already issued — including any a user
   copied elsewhere — remain valid until they expire: the boundary for a hostile holder is the validity window, so
   **shorten `validity` before a restrictive change** if that window matters.
-- **Still upgrade `cerberus-client` first.** The `cssh` wrapper is a separate, noarch package. An older `cssh` neither
+- **Still upgrade `cerberus-client` first.** The `cssh` wrapper is a separate package (architecture-specific since 0.14.0, when it gained the `cerberus-session` renewal bridge). An older `cssh` neither
   checks the fingerprint nor records the request: once the server maps the requested name it re-signs on **every**
   invocation, hammering the per-principal rate limit (`RATE_LIMIT_RPS=5`, burst 10) with a full Kerberos + HTTPS +
   enclave round trip each time. Upgrading the client against an old server is harmless (`/policy` returns 404 and the

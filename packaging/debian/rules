@@ -41,9 +41,10 @@ override_dh_auto_build-arch:
 	# for why the embedded eBPF object is prebuilt rather than compiled here.
 	go build -buildmode=pie -ldflags="-s -w $(LDFLAGS_VERSION)" -o cerberus-vsock-watch ./cmd/cerberus-vsock-watch
 
-# All binary packages, including the cssh client bridge, are architecture-dependent. Splitting
-# the build override keeps an indep-only build (dpkg-buildpackage -A) from
-# invoking the Go toolchain (or falling through to the default make-based build).
+# No binary package is `Architecture: all` any more -- cerberus-client ships the
+# compiled cerberus-session bridge -- so there is nothing to build here. The
+# empty override stays: it keeps an indep-only build (dpkg-buildpackage -A) from
+# invoking the Go toolchain, or falling through to the default make-based build.
 override_dh_auto_build-indep:
 
 # Upstream tests need network/module access and are run in CI, not at packaging time.
@@ -53,10 +54,10 @@ override_dh_auto_clean:
 	rm -rf _build
 	rm -f cerberus-session ssh-cert-api/ssh-cert-api ssh-cert-signer/ssh-cert-signer cerberus-vsock-watch
 
-# Architecture-dependent packages (api, signer, and the opt-in eif). Installed
-# with explicit modes to mirror the RPM/Arch packaging; files under /etc become
-# conffiles automatically (dpkg preserves operator edits, saving updates as
-# .dpkg-dist / prompting).
+# Every binary package: the client, api, signer, vsock-watch and the opt-in eif.
+# Installed with explicit modes to mirror the RPM/Arch packaging; files under
+# /etc become conffiles automatically (dpkg preserves operator edits, saving
+# updates as .dpkg-dist / prompting).
 override_dh_auto_install-arch:
 	install -D -m 0755 cerberus-session debian/cerberus-client/usr/bin/cerberus-session
 	install -D -m 0644 packaging/profile.d/cssh.sh \
@@ -97,6 +98,9 @@ ifneq (,$(filter pkg.cerberus.eif,$(DEB_BUILD_PROFILES)))
 		debian/cerberus-signer-eif/usr/share/cerberus/ssh-cert-signer.eif
 endif
 
+# Empty for the same reason as the build override above: nothing is
+# `Architecture: all`, and the cssh profile scripts install with the client's
+# bridge in the -arch target.
 override_dh_auto_install-indep:
 
 # Preserve the 0640 (not world-readable) modes on the env files and the config
