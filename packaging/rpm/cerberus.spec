@@ -468,6 +468,66 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Wed Oct 14 2026 Paul Kilar <pkilar@gmail.com> - 0.14.0-1
+- Session renewal for the cssh client, and the October Go security batch. The API
+  and the signer carry no change beyond their dependencies: certificate issuance,
+  authorization and the enclave protocol are untouched, and no server-side
+  configuration changes. UPGRADE NOTE: cerberus-client is no longer noarch,
+  because it now ships a compiled helper.
+- cssh --extend renews the certificate of the session you are already in, taking
+  no hostname, account or session id. It needs a certificate carrying both empty
+  flag extensions permit-session-renewal@cerberus and
+  terminate-on-cert-expiry@cerberus; the remote command delegates to "logsh
+  extend", which asks the privileged session supervisor to move the running
+  session's deadline.
+- The new cerberus-session helper does the local half. It creates a private Unix
+  socket, forwards it through the active SSH connection, and removes its local
+  files when ssh exits; authentication, signing and proof of possession of the
+  original key all stay on the workstation, so no credential and no private key
+  is ever sent to the destination. The bridge pins the original certificate's
+  serial, public key, CA and requested principal or mode (including a mapped mode
+  such as root-ro), signs a domain-separated nonce with the original key, and
+  writes each fresh certificate to a private file. Renewal therefore cannot widen
+  a running session: a failed authentication or a changed certificate identity
+  leaves the existing deadline in effect.
+- Renewable sessions disable SSH connection multiplexing. Request concurrency,
+  agent signing and authentication lifetime are all bounded, and signing
+  subprocesses are terminated when a renewal is cancelled.
+- The destination's sshd needs AcceptEnv CERBERUS_RENEW_SOCKET,
+  AllowStreamLocalForwarding remote, and AllowTcpForwarding remote with
+  PermitListen none in the applicable Match block. OpenSSH 10.5 gates remote
+  Unix-socket forwarding on the TCP forwarding permission, so AllowTcpForwarding
+  no blocks the bridge, while PermitListen none keeps remote TCP listeners
+  refused. See docs/cssh.md for the full recipe.
+- UPGRADE NOTE: cerberus-client is now an architecture-specific subpackage rather
+  than noarch, because it installs /usr/bin/cerberus-session beside the cssh
+  profile script. A mirror or deployment pipeline that assumed one noarch client
+  package has to fetch the per-architecture build instead. The Debian and Arch
+  packagings made the same change.
+- The Go toolchain is pinned to 1.27.2 and golang.org/x/net raised to v0.60.0 in
+  all three modules, which clears the October advisory batch (GO-2026-6603, 6605,
+  6607, 6608, 6610, 6611, 6613 and 6617): eight vulnerabilities govulncheck
+  reported as called, in net/http, net/http/internal/http2, net/textproto and
+  crypto/tls.
+- CI moves golangci-lint to v2.14.0 and builds gosec against golang.org/x/tools
+  v0.50.0. Go 1.27.2 emits export-data version 5, which no released gosec and no
+  earlier golangci-lint can read, so both gates failed on the toolchain bump with
+  import errors rather than findings.
+- SECURITY.md states how to report a vulnerability -- GitHub private reporting or
+  the maintainer's address, never a public issue -- and that only the latest
+  release receives fixes.
+- .oss-scanner/ adds the build environment and threat-model summary used by
+  Anthropic's OSS Scanner, which builds the image with the network on and then
+  analyses it with the network off.
+- AWS SDK v2 refresh in both service modules: core 1.47.0 -> 1.47.1, kms 1.61.0
+  -> 1.61.2 (the attested Decrypt the host performs on the enclave's behalf),
+  config 1.33.5 -> 1.33.7, credentials 1.20.5 -> 1.20.7, sts 1.51.0 -> 1.51.2,
+  imds 1.20.0 -> 1.20.1, plus the signin, sso, ssooidc, v4a, presigned-url,
+  configsources and endpoints set. ssh-cert-api additionally moves
+  go-ldap/ldap/v3 to 3.4.15 and golang.org/x/sync to 0.24.0.
+- CI gains tests/cssh_extend_test.sh, run under bash, zsh and sh beside the
+  existing sidecar and login-as suites.
+- govulncheck reports no vulnerabilities reachable from any module.
 * Tue Sep 22 2026 Paul Kilar <pkilar@gmail.com> - 0.13.0-1
 - Identity-scoped access, and a fix for a setting that silently did nothing. Both
   new features are opt-in and an existing configuration behaves exactly as
