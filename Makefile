@@ -96,6 +96,8 @@ test-cssh:
 	else \
 		echo "zsh not installed; cssh tested under bash only"; \
 	fi
+	bash tests/cssh_renewal_bridge_test.sh
+	@if command -v zsh >/dev/null 2>&1; then zsh tests/cssh_renewal_bridge_test.sh; fi
 
 # Run tests with coverage
 test-coverage:
