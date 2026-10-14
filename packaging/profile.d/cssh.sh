@@ -934,13 +934,14 @@ EOF
     # cert, and always announced — a silent account switch is the one failure
     # this must not cause. One ssh-keygen call: the cached-cert path above may
     # not have run (the cert can have just been signed), so read it here.
-    local login_as="" connect_info
+    local login_as="" connect_info connect_exts
     connect_info=$(ssh-keygen -L -f "$cert" 2>/dev/null)
-    if printf '%s\n' "$connect_info" | awk '
+    connect_exts=$(printf '%s\n' "$connect_info" | awk '
             /^[[:space:]]*Extensions:/ { p=1; next }
             p && /:/ { p=0; next }
             p { gsub(/^[[:space:]]+/,""); if ($1 != "") print $1 }
-        ' | grep -Fxq 'login-as-principal@cerberus'; then
+        ')
+    if printf '%s\n' "$connect_exts" | grep -Fxq 'login-as-principal@cerberus'; then
         local connect_princs princ_count
         connect_princs=$(printf '%s\n' "$connect_info" | awk '
             /^[[:space:]]*Principals:/ {
@@ -975,6 +976,16 @@ EOF
     # ~/.ssh/config; -i pins the key, and CertificateFile is passed explicitly so
     # the binding survives a non-standard CSSH_PUBKEY path.
     # The helper inspects the binary cert extension values, and owns cleanup.
+    #
+    # A renewable certificate needs that helper: it is the local half of the
+    # renewal bridge. Without it the session still opens over plain ssh, but
+    # `cssh --extend` inside it can only fail with "no renewal bridge" -- and
+    # nothing would say why until the user tried to extend, on the server,
+    # where the fix is not. Say so here, on the machine that needs it.
+    if ! command -v cerberus-session >/dev/null 2>&1 \
+        && printf '%s\n' "$connect_exts" | grep -Fxq 'permit-session-renewal@cerberus'; then
+        printf "cssh: this certificate permits session renewal, but cerberus-session is not installed; 'cssh --extend' will not work in this session (install cerberus-client 0.14.0 or later)\n" >&2
+    fi
     if command -v cerberus-session >/dev/null 2>&1; then
         command cerberus-session --cert "$cert" --key "$privkey" \
             --script "$CSSH_SCRIPT_PATH" --pubkey "$pubkey" --url "$cerberus_url" \

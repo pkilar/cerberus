@@ -412,6 +412,9 @@ Install the architecture-specific `cerberus-client` package, including
 `/usr/bin/cerberus-session`, on the workstation. The helper creates a private
 Unix socket, forwards it through the active SSH connection, and removes its local
 files when SSH exits. Renewable sessions disable SSH connection multiplexing.
+Without the helper, `cssh` still connects, over plain `ssh` and with no renewal
+bridge, and warns that `cssh --extend` will not work in that session. Inside such
+a session `logsh extend` reports "this session has no renewal bridge".
 The destination must install the cssh shell wrapper and a renewal-aware logsh
 supervisor. Ensure `logsh` is on the remote shell's PATH (some installations put
 it in `/usr/sbin`). Configure the destination sshd's applicable `Match` block:

@@ -176,3 +176,9 @@ jobs:
 
       - name: cssh login-as tests (zsh)
         run: zsh tests/cssh_login_as_test.sh
+
+      - name: cssh renewal bridge tests (bash)
+        run: bash tests/cssh_renewal_bridge_test.sh
+
+      - name: cssh renewal bridge tests (zsh)
+        run: zsh tests/cssh_renewal_bridge_test.sh
