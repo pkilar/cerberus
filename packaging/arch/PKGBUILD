@@ -9,7 +9,7 @@
 #   cerberus-api          - host-side HTTPS gateway service
 #   cerberus-signer       - Nitro Enclave signer service (binary + wrapper + unit)
 #   cerberus-vsock-watch  - VSOCK-connect detective control (docs/vsock-connect-detection.md)
-#   cerberus-client       - the cssh shell wrapper (noarch)
+#   cerberus-client       - the cssh shell wrapper + cerberus-session bridge
 #   cerberus-signer-eif   - CONDITIONAL: bundles a prebuilt EIF; built when
 #                           CERBERUS_EIF_FILE is set, which build-arch.sh does
 #                           automatically on a tree holding ca_key.enc +

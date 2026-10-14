@@ -36,10 +36,12 @@ Source2:        cerberus-vsock-watch.sysusers
 BuildRequires:  golang >= 1.26
 BuildRequires:  systemd-rpm-macros
 
-# `noarch` belongs in this list even though the daemons are arch-specific: the
-# cerberus-client subpackage contains a native helper; this setting also keeps
-# subpackage cannot be built on any host outside the allowlist.
-ExclusiveArch:  x86_64 aarch64 noarch
+# Every subpackage is arch-specific now that cerberus-client ships the compiled
+# cerberus-session renewal bridge, so the allowlist is the two build arches and
+# nothing else. Re-add `noarch` here alongside any future `BuildArch: noarch`
+# subpackage: without it in this list, such a subpackage cannot be built on any
+# host.
+ExclusiveArch:  x86_64 aarch64
 
 %description
 Cerberus is an SSH Certificate Authority that runs inside an AWS Nitro Enclave.
@@ -130,9 +132,11 @@ detective, not preventive, control — see docs/vsock-connect-detection.md.
 # ---------------------------------------------------------------------------
 # Subpackage: cerberus-client
 #
-# End-user workstation helper: native renewal bridge and `cssh` shell function (bash + zsh) installed
-# to /etc/profile.d/. Pure shell, so it is noarch and independent of the API and
-# signer services. Carries no key material and no server config.
+# End-user workstation helper: the native `cerberus-session` renewal bridge plus
+# the `cssh` shell function (bash + zsh) installed to /etc/profile.d/. That
+# compiled bridge is why this subpackage is arch-specific rather than noarch, as
+# it was through 0.13.0. Independent of the API and signer services; carries no
+# key material and no server config.
 # ---------------------------------------------------------------------------
 %package client
 Summary:        Cerberus SSH client helper (cssh) for bash and zsh
