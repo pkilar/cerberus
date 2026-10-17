@@ -9,7 +9,7 @@ require (
 	github.com/mdlayher/vsock v1.3.0
 	github.com/pkilar/cerberus v0.12.0
 	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
-	golang.org/x/crypto v0.57.0
+	golang.org/x/crypto v0.58.0
 )
 
 require (
@@ -31,7 +31,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
 
 replace github.com/pkilar/cerberus => ../
