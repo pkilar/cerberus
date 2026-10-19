@@ -46,12 +46,19 @@ upload to a Debian archive.)
 | enclave wrapper      | `/usr/libexec/cerberus/`          | `/usr/lib/cerberus/`               |
 | system user + logdir | `useradd` + `install -d` scriptlet | `sysusers.d` + `tmpfiles.d`        |
 | config-noreplace     | `%config(noreplace)`              | dpkg conffiles (automatic for `/etc`) |
+| `cssh.sh` (code)     | real file in `/etc/profile.d`, not `%config` | `/usr/lib/cerberus/cssh.sh` + `/etc` symlink |
 
-Files under `/etc` (the env files, `cssh.sh`,
-`cerberus-env.sh`) are automatically dpkg **conffiles**: operator edits are
-preserved (dpkg prompts / saves `.dpkg-dist`), and an unmodified file is updated
-on upgrade. `cssh.sh` is program code shipped as a conffile so fixes still apply
-when it is unmodified; site config lives in `cerberus-env.sh`.
+Regular files under `/etc` (the service env files, `cerberus-env.sh`) are
+automatically dpkg **conffiles**: operator edits are preserved (dpkg prompts /
+saves `.dpkg-dist`), and an unmodified file is updated on upgrade.
+
+`cssh.sh` is deliberately **not** one. It is program code that must be refreshed
+on every upgrade even when an admin has edited it, and a modified conffile is
+frozen instead, so the script ships at `/usr/lib/cerberus/cssh.sh` with
+`/etc/profile.d/cssh.sh` as a symlink to it (`cerberus-client.links`); a symlink
+is not a conffile. It was a conffile up to 0.14.0, which
+`cerberus-client.maintscript` retires with `rm_conffile`. Site config lives in
+`cerberus-env.sh`, the one conffile the client package has.
 
 The services are installed **without being enabled or started**
 (`dh_installsystemd --no-enable --no-start`) because they need site config and a

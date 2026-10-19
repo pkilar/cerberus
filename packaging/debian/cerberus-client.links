@@ -1,0 +1,6 @@
+# /etc/profile.d/cssh.sh is a symlink to the real script under /usr/lib, not a
+# regular file, so debhelper does not register it as a conffile and dpkg
+# replaces the code it points at on every upgrade -- the whole point being that
+# a security or behaviour fix in cssh.sh reaches hosts whose admin has edited
+# the file. dh_link writes it as a policy-conformant relative symlink.
+usr/lib/cerberus/cssh.sh etc/profile.d/cssh.sh

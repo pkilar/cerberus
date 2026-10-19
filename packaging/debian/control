@@ -81,9 +81,11 @@ Description: cssh SSH client helper (bash and zsh) for Cerberus
  it next to the matching private key as <key>-cert.pub, and hands off to
  ssh(1), re-signing only when the cached cert is missing or about to expire.
  .
- Installed as /etc/profile.d/cssh.sh; it defines the cssh function for login
+ Installed as /etc/profile.d/cssh.sh, a symlink to /usr/lib/cerberus/cssh.sh so
+ upgrades always refresh the code; it defines the cssh function for login
  shells. Set the site endpoint with CERBERUS_URL in the companion
- /etc/profile.d/cerberus-env.sh. See /usr/share/doc/cerberus-client/cssh.md.
+ /etc/profile.d/cerberus-env.sh, which is a conffile and keeps your edits. See
+ /usr/share/doc/cerberus-client/cssh.md.
 
 Package: cerberus-signer-eif
 Architecture: amd64 arm64
