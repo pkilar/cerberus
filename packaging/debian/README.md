@@ -21,7 +21,9 @@ metadata are Debian-specific.
 ```sh
 # Prerequisites: build-essential debhelper dpkg-dev fakeroot, plus Go >= 1.26 on
 # PATH (newer than the distro golang-go — use the golang:1.26 image or a manual
-# toolchain install).
+# toolchain install). Add rsync when the tree is not a usable git work tree
+# (exported tarball, or a worktree whose .git the build cannot follow): that is
+# the fallback path for staging the source snapshot.
 ./packaging/debian/build-deb.sh
 # → packages land in ./debbuild/*.deb
 
