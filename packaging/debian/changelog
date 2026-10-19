@@ -1,3 +1,71 @@
+cerberus (0.15.0) unstable; urgency=medium
+
+  Packaging correctness, one client warning, and a dependency refresh. The API
+  and the signer carry no change beyond their dependencies: certificate
+  issuance, authorization, the enclave protocol and the configuration surface
+  are all untouched, so a server-side upgrade needs nothing but the new
+  packages. UPGRADE NOTE: /etc/profile.d/cssh.sh is no longer a conffile.
+
+  * UPGRADE NOTE: /etc/profile.d/cssh.sh is now a symlink to
+    /usr/lib/cerberus/cssh.sh, and no longer a dpkg conffile. cssh.sh is
+    program code; the RPM and Arch packages have always replaced it on upgrade,
+    but as a conffile it was frozen once an admin edited it, so the hosts most
+    likely to need a fix were exactly the ones that stopped receiving it. If
+    you had modified the file, this upgrade preserves your copy as
+    /etc/profile.d/cssh.sh.dpkg-bak -- kept for reference, no longer in effect
+    -- and the live path becomes the current script. cerberus-env.sh is
+    untouched and remains this package's one conffile: it is site config, and
+    your edits there survive upgrades.
+  * Verified rather than assumed, by building both releases and upgrading
+    across them with the real packages. With both files edited by hand,
+    cssh.sh comes out byte-identical to the shipped 0.15.0 script while the
+    cerberus-env.sh edit is kept; with neither edited, both take the new
+    shipped content. The RPM behaves identically (plain file vs
+    %config(noreplace)). Note that dpkg prompts about an edited
+    cerberus-env.sh when its shipped default also changed, and an unattended
+    apt run keeps your copy; dnf writes .rpmnew without prompting.
+  * cssh warns on stderr before connecting when the certificate carries
+    permit-session-renewal@cerberus but cerberus-session is not on PATH. That
+    combination silently drops the renewal bridge, and the failure otherwise
+    surfaces only later and elsewhere, as "this session has no renewal bridge"
+    from logsh on the server. The session still opens; only renewal is
+    unavailable. The certificate's extension list is parsed once and shared
+    with the login-as check, so a connect still makes one ssh-keygen call.
+  * build-rpm.sh staged its working-tree packaging/ overlay with
+    "cp -a packaging" onto a directory git archive had already created, so the
+    overlaid files landed at packaging/packaging/ where the spec never looks,
+    and every source tarball carried a duplicate copy of the packaging tree.
+    It now merge-copies the contents, as the Debian and Arch builders already
+    did. Build-time only: a build from a clean checkout was never affected,
+    since the tracked copies come out of git archive either way.
+  * rsync is documented as a prerequisite for build-deb.sh and build-arch.sh.
+    Both fall back to it when the tree is not a usable git work tree -- an
+    exported tarball, or a worktree whose .git the build cannot follow -- and
+    only build-rpm.sh said so, which left a container build dying at
+    "rsync: command not found" after the documented deps were installed.
+  * ssh-cert-api is tidy again after the root module's x/crypto bump. The
+    submodules replace the root, so MVS selected a version their own go.sum
+    did not carry and every ssh-cert-api CI leg failed with "updates to go.mod
+    needed"; x/crypto and x/sys now move in all three modules together.
+  * docs: the stale "noarch" descriptions of cerberus-client are corrected
+    across the three packagings and the runbook, and docs/cssh.md states the
+    upgrade contract for cssh.sh and cerberus-env.sh in each format's own
+    terms rather than only the RPM's.
+  * Dependencies: golang.org/x/crypto 0.57.0 -> 0.58.0 and golang.org/x/sys
+    0.48.0 -> 0.49.0 in all three modules. AWS SDK v2 refresh in both service
+    modules: core 1.47.1 -> 1.47.3, kms 1.61.2 -> 1.61.4 (the attested Decrypt
+    the host performs on the enclave's behalf), config 1.33.7 -> 1.33.9,
+    credentials 1.20.7 -> 1.20.9, sts 1.51.2 -> 1.51.4, imds 1.20.1 -> 1.20.3,
+    smithy-go 1.28.1 -> 1.28.5, plus the signin, sso, ssooidc, v4a,
+    presigned-url, accept-encoding, configsources and endpoints set.
+    ssh-cert-api additionally moves prometheus/client_golang 1.24.1 -> 1.25.0
+    and prometheus/common 0.71.0 -> 0.72.0.
+  * CI and "make test-cssh" gain tests/cssh_renewal_bridge_test.sh, run under
+    bash and zsh beside the existing sidecar, login-as and extend suites.
+  * govulncheck reports no vulnerabilities reachable from any module.
+
+ -- Paul Kilar <pkilar@gmail.com>  Mon, 19 Oct 2026 15:40:18 -0400
+
 cerberus (0.14.0) unstable; urgency=medium
 
   Session renewal for the cssh client, and the October Go security batch. The
