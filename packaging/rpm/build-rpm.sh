@@ -115,8 +115,13 @@ mkdir -p "${STAGING_DIR}/${TARBALL}"
 if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree &>/dev/null; then
     git -C "${PROJECT_ROOT}" archive --format=tar HEAD \
         | tar -x -C "${STAGING_DIR}/${TARBALL}"
-    # Include untracked packaging files that may not be committed yet.
-    cp -a "${PROJECT_ROOT}/packaging" "${STAGING_DIR}/${TARBALL}/packaging"
+    # Overlay the working-tree packaging/ so uncommitted or untracked packaging
+    # files are included. Copy the CONTENTS ("/.") into the existing directory:
+    # git archive has already extracted packaging/, so copying the directory
+    # itself lands it at packaging/packaging/ and hides those files from the
+    # spec. Mirrors build-deb.sh / build-arch.sh.
+    mkdir -p "${STAGING_DIR}/${TARBALL}/packaging"
+    cp -a "${PROJECT_ROOT}/packaging/." "${STAGING_DIR}/${TARBALL}/packaging/"
     cp -a "${PROJECT_ROOT}/VERSION" "${STAGING_DIR}/${TARBALL}/VERSION"
 else
     rsync -a --exclude='.git' --exclude='rpmbuild' \
