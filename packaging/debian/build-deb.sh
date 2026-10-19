@@ -27,6 +27,12 @@
 #   apt-get install build-essential debhelper dpkg-dev fakeroot
 #   Go >= 1.26 on PATH (newer than the distro golang-go; use the golang:1.26
 #   image or a manually installed toolchain).
+#   rsync, but only for the non-git fallback below: a normal checkout stages
+#   with `git archive`, and rsync is reached when the tree is not a usable git
+#   work tree -- an exported tarball, or a git worktree whose .git file points
+#   somewhere the build cannot see (a container mount, typically). Without it
+#   the build dies at "rsync: command not found" after the deps are already
+#   installed. build-rpm.sh lists it for the same reason.
 set -euo pipefail
 
 # --- Parse arguments -------------------------------------------------------

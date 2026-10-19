@@ -5,9 +5,13 @@ Set your signing endpoint in /etc/profile.d/cerberus-env.sh (or export
 CERBERUS_URL), then open a new login shell so the cssh function is defined. For
 OIDC (no Kerberos) login, set CSSH_AUTH=oidc and the CSSH_OIDC_* values there.
 
-Note: /etc/profile.d/cssh.sh is shipped as a dpkg conffile. It is program code,
-not site config (which lives in cerberus-env.sh) — leave it unmodified and dpkg
-will update it automatically on upgrade so fixes always apply. See cssh.md in
-this directory.
+Note: /etc/profile.d/cssh.sh is program code, not site config, and it is a
+symlink to /usr/lib/cerberus/cssh.sh. Every upgrade replaces that script, so
+fixes always apply — including on hosts where an admin had edited the old file.
+Up to 0.14.0 the path was a regular file and therefore a dpkg conffile; if you
+had modified it, the upgrade preserves your copy as
+/etc/profile.d/cssh.sh.dpkg-bak for reference, and it no longer takes effect.
+Put site config in cerberus-env.sh, which stays a conffile: your edits there
+survive upgrades. See cssh.md in this directory.
 
  -- Paul Kilar <pkilar@gmail.com>

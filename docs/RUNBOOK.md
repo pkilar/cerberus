@@ -626,7 +626,7 @@ sudo pacman -U ./archbuild/cerberus-client-*.pkg.tar.zst
 
 ### Debian / Ubuntu packages
 
-The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: amd64 arm64`), and the conditional `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`):
+The repo also ships Debian packaging in [`packaging/debian/`](../packaging/debian/) — a `debhelper` multi-binary source package mirroring the RPM: `cerberus-api`, `cerberus-signer`, `cerberus-client` (`Architecture: amd64 arm64`), and the conditional `cerberus-signer-eif` (built under the `pkg.cerberus.eif` build profile). Build it with `build-essential debhelper dpkg-dev fakeroot` installed and Go ≥ 1.26 on PATH (newer than the distro `golang-go`), plus `rsync` if the tree is not a usable git work tree — an exported tarball, or a git worktree whose `.git` the build cannot follow — since that is the fallback for staging the source snapshot:
 
 ```bash
 ./packaging/debian/build-deb.sh                                    # → ./debbuild/*.deb

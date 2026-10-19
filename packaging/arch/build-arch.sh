@@ -24,6 +24,9 @@
 # Prerequisites:
 #   pacman -S --needed base-devel go          # makepkg + Go toolchain
 #   makepkg must not be run as root.
+#   rsync is needed only for the non-git fallback when staging the source
+#   snapshot; a normal checkout stages with `git archive`. See the same note in
+#   build-deb.sh.
 set -euo pipefail
 
 # --- Parse arguments -------------------------------------------------------

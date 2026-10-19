@@ -60,8 +60,18 @@ override_dh_auto_clean:
 # updates as .dpkg-dist / prompting).
 override_dh_auto_install-arch:
 	install -D -m 0755 cerberus-session debian/cerberus-client/usr/bin/cerberus-session
+	# cssh.sh is program code, not site config, and it must be refreshed on every
+	# upgrade even when an admin has edited it. Any regular file under /etc is
+	# automatically a dpkg conffile, and a modified conffile is frozen (dpkg
+	# prompts, and an unattended apt keeps the old copy), so the script itself
+	# ships under /usr/lib where dpkg replaces it unconditionally.
+	# cerberus-client.links puts the /etc/profile.d/cssh.sh symlink on top of it,
+	# and a symlink is not a conffile. Site config stays a real file under /etc:
+	# cerberus-env.sh is the one conffile this package has, and operator edits to
+	# it survive upgrades. See cerberus-client.maintscript for retiring the old
+	# conffile.
 	install -D -m 0644 packaging/profile.d/cssh.sh \
-		debian/cerberus-client/etc/profile.d/cssh.sh
+		debian/cerberus-client/usr/lib/cerberus/cssh.sh
 	install -D -m 0644 packaging/profile.d/cerberus-env.sh \
 		debian/cerberus-client/etc/profile.d/cerberus-env.sh
 

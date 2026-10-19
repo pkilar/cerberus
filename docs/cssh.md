@@ -361,9 +361,12 @@ sudo install -m 0644 packaging/profile.d/cssh.sh /etc/profile.d/cssh.sh
 
 Set the site endpoint once for all users in `/etc/profile.d/cerberus-env.sh`
 (shipped alongside `cssh.sh` by the `cerberus-client` package). That file is
-`%config(noreplace)`, so your edits survive package upgrades — whereas `cssh.sh`
-itself is plain code that is replaced on upgrade, so fixes always apply. Don't
-put site config in `cssh.sh`.
+config and your edits survive package upgrades — `%config(noreplace)` on RPM,
+`backup=()` on Arch, a dpkg conffile on Debian. `cssh.sh` is the opposite: plain
+code, replaced on every upgrade **even if you edited it**, so fixes always
+apply. On Debian that means `/etc/profile.d/cssh.sh` is a symlink to
+`/usr/lib/cerberus/cssh.sh`, since a modified file under `/etc` would otherwise
+be frozen as a conffile. Don't put site config in `cssh.sh`.
 
 ```sh
 # /etc/profile.d/cerberus-env.sh

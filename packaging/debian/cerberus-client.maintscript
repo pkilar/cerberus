@@ -1,0 +1,17 @@
+# /etc/profile.d/cssh.sh was a regular file, and therefore a dpkg conffile, up to
+# and including 0.14.0. It is program code: shipping it under /etc froze it once
+# an admin edited it, so fixes stopped reaching exactly the hosts most likely to
+# need them. The script now lives at /usr/lib/cerberus/cssh.sh with a symlink at
+# the old path; dpkg will not drop a conffile on its own, so retire it here.
+#
+# rm_conffile moves the file aside in preinst -- to .dpkg-bak when the admin
+# modified it, which keeps their copy for reference while the live path becomes
+# the symlink to current code -- and is a no-op once the conffile is gone.
+#
+# The version is 0.15.0~, the release that drops the conffile, NOT 0.14.0~.
+# dpkg-maintscript-helper only acts when the version upgraded FROM sorts at or
+# below this value, and 0.14.0~ sorts *before* 0.14.0, so an upgrade from the
+# release that last shipped the conffile would have skipped the removal. Raise
+# this if the change ships later than 0.15.0: too low silently leaves the
+# conffile behind for good, while too high only costs a no-op check.
+rm_conffile /etc/profile.d/cssh.sh 0.15.0~ cerberus-client
