@@ -1,0 +1,79 @@
+name: Packages
+
+# Builds and lints every target in packaging/targets.tsv on its own architecture,
+# exactly as `make lint-package-<target>` does locally. The matrix is read from
+# the manifest by packaging/targets.sh, so adding a row there adds a CI leg
+# without touching this file.
+#
+# Each leg runs on a runner of the architecture it targets (targets.sh maps
+# amd64 -> ubuntu-latest, arm64 -> ubuntu-24.04-arm); build-in-container.sh
+# refuses to build under emulation, so a mismatched runner fails loudly rather
+# than producing a slow, emulated package.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes the packages of the previous one.
+# Pushes to main always run to completion.
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  matrix:
+    name: Read packaging/targets.tsv
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Generate the build matrix
+        id: targets
+        run: |
+          set -eu
+          matrix=$(./packaging/targets.sh json)
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.id }} (${{ matrix.arch }})
+    needs: matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+    env:
+      # docker rather than podman: it is the engine GitHub's runner images are
+      # built around, and it runs rootful, so the Arch leg's useradd/chown inside
+      # the container needs no subordinate-ID setup on the runner.
+      CONTAINER_ENGINE: docker
+      TARGET: ${{ matrix.id }}
+    steps:
+      # persist-credentials: false keeps the job token out of the checkout. The
+      # whole tree, .git included, is mounted into third-party distribution
+      # images for the build, and nothing there needs to push.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build and lint
+        run: ./packaging/build-in-container.sh "$TARGET" --lint --out dist
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.id }}-${{ matrix.arch }}
+          path: dist/${{ matrix.id }}/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 14

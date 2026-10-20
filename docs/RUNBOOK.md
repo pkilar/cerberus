@@ -1294,6 +1294,8 @@ The workflow at `.github/workflows/go.yml` runs four jobs on every push and pull
 
 `gosec`, `golangci-lint`, and `govulncheck` are installed by the workflow (`go install`) rather than tracked as Go 1.24+ tool dependencies; this keeps them out of `go.sum` and shrinks the supply-chain surface of a signing service.
 
+The workflow at `.github/workflows/packages.yml` builds and lints the distribution packages on the same triggers. It reads `packaging/targets.tsv` through `packaging/targets.sh json` and runs one leg per target and architecture, each on a runner of that architecture (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64) and each running `packaging/build-in-container.sh <target> --lint` exactly as `make lint-package-<target>` does locally. A new row in `targets.tsv` is a new CI leg with no workflow edit. Each leg uploads its packages as the artifact `packages-<target>-<arch>`, kept for 14 days. A target whose distribution ships no linter (UBI 10 has no `rpmlint`) still builds, and its log says `LINT UNAVAILABLE` rather than reporting a clean lint.
+
 ### Deployment Pipeline (Manual)
 
 1. Merge to `main`
