@@ -1,11 +1,11 @@
 #!/usr/bin/make -f
-# Cerberus Debian packaging. Go >= 1.26 must be on PATH (see debian/control).
+# Cerberus Debian packaging. Go >= 1.24 must be on PATH (see debian/control).
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export GOOS = linux
 export CGO_ENABLED = 0
-# debian/control deliberately declares no Go build-dependency, because go.mod's
-# floor is above any golang-go Debian ships -- so the builder supplies Go. Allow
+# debian/control deliberately declares no Go build-dependency, because bookworm's
+# golang-go is too old to switch toolchains -- so the builder supplies Go. Allow
 # the exact toolchain go.mod asks for to be fetched when the supplied one is
 # older: the official golang:* images pin GOTOOLCHAIN=local, which would
 # otherwise fail the build with "go.mod requires go >= 1.27.2". Matches the

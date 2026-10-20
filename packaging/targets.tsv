@@ -10,14 +10,15 @@
 # An arm64 package is built on arm64 hardware, never cross-compiled or emulated,
 # so cgo and shared-library dependency generation stay correct.
 #
-# The RPM set matches the spec's own "Supported distributions" line. Go 1.26 is
-# available from each of their default repositories, which is what the spec's
-# BuildRequires: golang >= 1.26 needs.
+# The RPM set matches the spec's own "Supported distributions" line. Each of
+# their default repositories satisfies the spec's BuildRequires: golang >= 1.24.
+# That golang only bootstraps the build: %build fetches the toolchain go.mod pins.
 #
-# debian uses a Go-provided image rather than plain debian:stable: Debian ships
-# golang-go 1.24, below the go.mod floor of 1.26, and debian/control deliberately
-# declares no Go build-dependency for exactly that reason. The result is still a
-# bookworm-built package -- only the toolchain differs.
+# debian uses a Go-provided image rather than plain debian:bookworm: bookworm's
+# golang-go is 1.19, too old even to fetch the go.mod toolchain, and
+# debian/control deliberately declares no Go build-dependency for exactly that
+# reason. The result is still a bookworm-built package -- only the toolchain
+# differs.
 #
 # id              format  image                                    arches
 fedora            rpm     fedora:latest                            amd64,arm64

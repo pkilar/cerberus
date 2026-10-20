@@ -38,8 +38,9 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/pkilar/cerberus"
 license=('MIT')
 # Arch's go package tracks upstream closely (and carries a pacman epoch, which
-# would dominate any `go>=1.26` version constraint anyway); the module go.mod
-# pins the real 1.26 floor and `go build` fails loudly on an older toolchain.
+# would dominate any `go>=` version constraint anyway). go.mod pins the toolchain
+# the binaries are compiled with, and Arch's go defaults to GOTOOLCHAIN=auto, so
+# a go older than that pin downloads it rather than failing.
 makedepends=('go')
 options=('!debug')
 # build-arch.sh stages this tarball next to the PKGBUILD before invoking makepkg.
