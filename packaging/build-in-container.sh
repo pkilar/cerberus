@@ -18,6 +18,9 @@
 # and a corporate CA are supplied from a directory outside this repo, because
 # they are site-specific and their hostnames are usually not public.
 #
+# The engine is podman when it is installed, else docker. CONTAINER_ENGINE=podman
+# or CONTAINER_ENGINE=docker picks one explicitly (CI pins docker).
+#
 # usage: build-in-container.sh <target-id> [--lint] [--out DIR] [--dry-run]
 #                              [--site DIR]
 set -eu
@@ -62,10 +65,18 @@ if ! "$TARGETS" supports "$TARGET" "$HOST_ARCH"; then
 	exit 2
 fi
 
-if command -v podman >/dev/null 2>&1; then ENGINE=podman
-elif command -v docker >/dev/null 2>&1; then ENGINE=docker
-else ENGINE=none
-fi
+# An explicit choice is validated by name only here; whether it is installed is
+# checked after --dry-run, which must keep working without any engine.
+case "${CONTAINER_ENGINE:-}" in
+podman | docker) ENGINE=$CONTAINER_ENGINE ;;
+"")
+	if command -v podman >/dev/null 2>&1; then ENGINE=podman
+	elif command -v docker >/dev/null 2>&1; then ENGINE=docker
+	else ENGINE=none
+	fi
+	;;
+*) echo "error: CONTAINER_ENGINE must be podman or docker, not '$CONTAINER_ENGINE'" >&2; exit 2 ;;
+esac
 
 # --dry-run resolves the target and reports; it starts no container, so it must
 # not require an engine. It runs where one cannot exist -- notably inside a
@@ -83,6 +94,10 @@ fi
 
 if [ "$ENGINE" = none ]; then
 	echo "error: neither podman nor docker is available" >&2
+	exit 2
+fi
+if ! command -v "$ENGINE" >/dev/null 2>&1; then
+	echo "error: CONTAINER_ENGINE=$ENGINE, but $ENGINE is not installed" >&2
 	exit 2
 fi
 

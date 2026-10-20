@@ -20,10 +20,19 @@
 # reason. The result is still a bookworm-built package -- only the toolchain
 # differs.
 #
-# id              format  image                                    arches
-fedora            rpm     fedora:latest                            amd64,arm64
-rhel9             rpm     registry.access.redhat.com/ubi9/ubi      amd64,arm64
-rhel10            rpm     registry.access.redhat.com/ubi10/ubi     amd64,arm64
-amazonlinux2023   rpm     amazonlinux:2023                         amd64,arm64
-debian-bookworm   deb     golang:1.26-bookworm                     amd64,arm64
-arch              arch    archlinux:latest                         amd64
+# Images are fully qualified. A short name like fedora:latest resolves per engine
+# and per machine: docker always reads it as docker.io, podman consults the
+# local registries.conf aliases and refuses an ambiguous name outright when it
+# cannot prompt, as in CI. A qualified name pins which registry supplies the
+# distribution, so a local build and a CI build of the same id use one image.
+#
+# CI builds every row on every listed architecture: .github/workflows/packages.yml
+# reads this file through `targets.sh json`, so a new row is a new CI leg.
+#
+# id              format  image                                        arches
+fedora            rpm     registry.fedoraproject.org/fedora:latest     amd64,arm64
+rhel9             rpm     registry.access.redhat.com/ubi9/ubi          amd64,arm64
+rhel10            rpm     registry.access.redhat.com/ubi10/ubi         amd64,arm64
+amazonlinux2023   rpm     public.ecr.aws/amazonlinux/amazonlinux:2023  amd64,arm64
+debian-bookworm   deb     docker.io/library/golang:1.26-bookworm       amd64,arm64
+arch              arch    docker.io/library/archlinux:latest           amd64
