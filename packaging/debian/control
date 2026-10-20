@@ -2,11 +2,13 @@ Source: cerberus
 Section: net
 Priority: optional
 Maintainer: Paul Kilar <pkilar@gmail.com>
-# Go >= 1.26 must be on PATH at build time. It is intentionally NOT expressed as
-# a build dependency: the toolchain the code needs (1.26) is newer than the
-# distro's golang-go, so builds use an upstream Go (e.g. the golang:1.26 image or
-# a manually installed toolchain). go.mod's `go 1.26.0` is the real floor and
-# `go build` fails loudly on an older toolchain.
+# Go >= 1.24 must be on PATH at build time, matching the RPM spec's floor. It only
+# bootstraps the build: rules sets GOTOOLCHAIN=auto, so a Go older than the
+# toolchain go.mod pins downloads that toolchain and compiles with it. Go is
+# intentionally NOT expressed as a build dependency: bookworm's golang-go is 1.19,
+# below that floor and too old even to switch toolchains, so builds use an
+# upstream Go (e.g. the golang:1.26-bookworm image or a manually installed
+# toolchain).
 #
 # debhelper (>= 13.6~) is required because rules explicitly invokes
 # dh_installsysusers (added in 13.6); the bare compat-13 pin is otherwise

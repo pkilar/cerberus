@@ -25,8 +25,9 @@
 #
 # Prerequisites:
 #   apt-get install build-essential debhelper dpkg-dev fakeroot
-#   Go >= 1.26 on PATH (newer than the distro golang-go; use the golang:1.26
-#   image or a manually installed toolchain).
+#   Go >= 1.24 on PATH (bookworm's golang-go is too old; use the
+#   golang:1.26-bookworm image or a manually installed toolchain). It only
+#   bootstraps: the build fetches the toolchain go.mod pins.
 #   rsync, but only for the non-git fallback below: a normal checkout stages
 #   with `git archive`, and rsync is reached when the tree is not a usable git
 #   work tree -- an exported tarball, or a git worktree whose .git file points

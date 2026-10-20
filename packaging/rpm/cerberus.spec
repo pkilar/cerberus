@@ -33,7 +33,15 @@ Source0:        %{name}-%{version}.tar.gz
 Source1:        cerberus.sysusers
 Source2:        cerberus-vsock-watch.sysusers
 
-BuildRequires:  golang >= 1.26
+# The distribution's golang only bootstraps the build. go.mod pins the toolchain
+# that compiles the binaries, and %%build sets GOTOOLCHAIN=auto so an older golang
+# downloads that toolchain first. This floor therefore tracks the oldest host
+# repositories worth supporting, not the version go.mod names: Go 1.26 reached
+# RHEL only in 9.8 and 10.2 (9.7 and 10.1 ship 1.25, 9.6 and 10.0 ship 1.24), and
+# an Amazon Linux 2023 host stays locked to its AMI's release -- 2023.10 (January
+# 2026) still ships 1.24. RHEL 9.4 and 9.5 (Go 1.21 and 1.23) are deliberately
+# below it, although any Go >= 1.21 could technically bootstrap the build.
+BuildRequires:  golang >= 1.24
 BuildRequires:  systemd-rpm-macros
 
 # Every subpackage is arch-specific now that cerberus-client ships the compiled
@@ -209,9 +217,9 @@ export GOOS=linux
 # network-isolated buildsystem, but it is not how these packages are produced:
 # they are built in an ephemeral container by packaging/build-in-container.sh,
 # which already needs the network because the Go module dependencies are not
-# vendored. go.mod requires Go 1.27 and no supported distribution ships it yet
-# (Fedora stable, RHEL 9/10 and Amazon Linux 2023 are all on 1.26.7), so allow
-# the toolchain to be fetched.
+# vendored. go.mod requires Go 1.27.2, which no supported distribution's stable
+# repositories ship yet, and the BuildRequires floor above deliberately accepts
+# an older golang, so allow the toolchain to be fetched.
 #
 # This is safe for what is shipped: CGO_ENABLED=0 below makes the binaries
 # statically linked, so the compiler version leaves no trace in the package --

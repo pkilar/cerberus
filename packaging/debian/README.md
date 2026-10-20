@@ -19,11 +19,12 @@ metadata are Debian-specific.
 ## Build
 
 ```sh
-# Prerequisites: build-essential debhelper dpkg-dev fakeroot, plus Go >= 1.26 on
-# PATH (newer than the distro golang-go — use the golang:1.26 image or a manual
-# toolchain install). Add rsync when the tree is not a usable git work tree
-# (exported tarball, or a worktree whose .git the build cannot follow): that is
-# the fallback path for staging the source snapshot.
+# Prerequisites: build-essential debhelper dpkg-dev fakeroot, plus Go >= 1.24 on
+# PATH (bookworm's golang-go is too old — use the golang:1.26-bookworm image or a
+# manual toolchain install; the build fetches the toolchain go.mod pins). Add
+# rsync when the tree is not a usable git work tree (exported tarball, or a
+# worktree whose .git the build cannot follow): that is the fallback path for
+# staging the source snapshot.
 ./packaging/debian/build-deb.sh
 # → packages land in ./debbuild/*.deb
 
