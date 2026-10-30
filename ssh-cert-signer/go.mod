@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
-	github.com/aws/aws-sdk-go-v2/service/kms v1.61.4
+	github.com/aws/aws-sdk-go-v2/service/kms v1.61.5
 	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.3.0
 	github.com/pkilar/cerberus v0.12.0
