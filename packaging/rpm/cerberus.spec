@@ -217,7 +217,7 @@ export GOOS=linux
 # network-isolated buildsystem, but it is not how these packages are produced:
 # they are built in an ephemeral container by packaging/build-in-container.sh,
 # which already needs the network because the Go module dependencies are not
-# vendored. go.mod requires Go 1.27.2, which no supported distribution's stable
+# vendored. go.mod requires Go 1.27.3, which no supported distribution's stable
 # repositories ship yet, and the BuildRequires floor above deliberately accepts
 # an older golang, so allow the toolchain to be fetched.
 #
@@ -480,6 +480,42 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Mon Nov 09 2026 Paul Kilar <pkilar@gmail.com> - 0.15.1-1
+- A security rebuild on Go 1.27.3, a packaging build fix, and a dependency
+  refresh. The API and the signer carry no change beyond their toolchain and
+  dependencies: certificate issuance, authorization, the enclave protocol and the
+  configuration surface are all untouched, so a server-side upgrade needs nothing
+  but the new packages.
+- The Go toolchain moves from 1.27.2 to 1.27.3 in all three modules, which clears
+  GO-2026-6809 (CVE-2026-111943): crypto/x509 now refuses a denylist of
+  compromised intermediate certificates in Certificate.Verify, covering hosts
+  whose system trust store has not been updated to distrust them. govulncheck
+  reported it as called from all three modules; in the API it sits under every
+  TLS connection the service verifies -- KMS, including the attested Decrypt, the
+  OIDC issuer and LDAP. The binaries are statically linked, so the fix arrives
+  only with rebuilt packages: 0.15.0 builds keep the 1.27.2 crypto/x509 whatever
+  Go the host has installed.
+- The golang BuildRequires floor drops from 1.26 to 1.24. The old floor stopped
+  dnf builddep on anything but each distribution's newest release, so a RHEL 9.7
+  or Amazon Linux 2023.10 host could not build these RPMs at all; RHEL 9.6 and
+  later, all of RHEL 10 and Amazon Linux 2023.10 and later now can, while RHEL
+  9.5 stays below the floor on purpose. The distribution's golang only bootstraps
+  the build -- %build sets GOTOOLCHAIN=auto and fetches the Go that go.mod pins --
+  so the floor never chose the compiler that produced the binaries.
+- CI builds and lints every packaging/targets.tsv target on a runner of its own
+  architecture for each pull request and push to main, so a packaging regression
+  fails CI instead of surfacing at the next hand-run build-in-container.sh.
+- Dependencies: golang.org/x/net 0.60.0 -> 0.62.0, mdlayher/vsock 1.3.0 -> 1.4.0
+  (the host-to-enclave transport) and mdlayher/socket 0.7.0 -> 0.8.0 in all three
+  modules, and golang.org/x/sync 0.23.0 -> 0.24.0 in the root and signer modules.
+  AWS SDK v2 refresh in both service modules: core 1.47.3 -> 1.47.5, kms 1.61.4
+  -> 1.62.2 (the attested Decrypt the host performs on the enclave's behalf),
+  config 1.33.9 -> 1.33.13, credentials 1.20.9 -> 1.20.13, sts 1.51.4 -> 1.51.6,
+  imds 1.20.3 -> 1.20.5, smithy-go 1.28.5 -> 1.28.7, plus the signin, sso,
+  ssooidc, v4a, presigned-url, accept-encoding, configsources and endpoints set.
+  ssh-cert-api additionally moves go-jose/v4 4.1.5 -> 4.1.8, which go-oidc uses
+  to verify OIDC tokens.
+- govulncheck reports no vulnerabilities reachable from any module.
 * Mon Oct 19 2026 Paul Kilar <pkilar@gmail.com> - 0.15.0-1
 - Packaging correctness, one client warning, and a dependency refresh. The API and
   the signer carry no change beyond their dependencies: certificate issuance,
