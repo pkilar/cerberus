@@ -217,7 +217,7 @@ export GOOS=linux
 # network-isolated buildsystem, but it is not how these packages are produced:
 # they are built in an ephemeral container by packaging/build-in-container.sh,
 # which already needs the network because the Go module dependencies are not
-# vendored. go.mod requires Go 1.27.2, which no supported distribution's stable
+# vendored. go.mod requires Go 1.27.3, which no supported distribution's stable
 # repositories ship yet, and the BuildRequires floor above deliberately accepts
 # an older golang, so allow the toolchain to be fetched.
 #
