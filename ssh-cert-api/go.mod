@@ -1,6 +1,6 @@
 module github.com/pkilar/cerberus/ssh-cert-api
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.13
