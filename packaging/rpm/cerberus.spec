@@ -480,6 +480,32 @@ exit 0
 # Changelog
 # ---------------------------------------------------------------------------
 %changelog
+* Sun Nov 15 2026 Paul Kilar <pkilar@gmail.com> - 0.15.2-1
+- A security rebuild on Go 1.27.4 and a dependency refresh. The API and the signer
+  carry no change beyond their toolchain and dependencies: certificate issuance,
+  authorization, the enclave protocol and the configuration surface are all
+  untouched, so a server-side upgrade needs nothing but the new packages.
+- The Go toolchain moves from 1.27.3 to 1.27.4 in all three modules, which clears
+  GO-2026-6859: an HTTP/1 server crash caused by a header race in net/http's
+  MaxBytesReader. ssh-cert-api wraps the /sign request body in
+  http.MaxBytesReader, so the API sits on the affected path, and govulncheck
+  reported the advisory as called from all three modules. The binaries are
+  statically linked, so the fix arrives only with rebuilt packages: 0.15.1 builds
+  keep the 1.27.3 net/http whatever Go the host has installed.
+- golang.org/x/crypto 0.58.0 -> 0.59.0 and golang.org/x/sys 0.49.0 -> 0.50.0 in
+  all three modules. x/crypto 0.59.0 refuses to sign an SSH certificate with no
+  principals, which OpenSSH would accept for any user. Issuance does not change:
+  the enclave signer already refused an empty principals list before signing. Two
+  cerberus-session test fixtures that built principal-less certificates now carry
+  a principal.
+- Dependencies: AWS SDK v2 refresh in both service modules: core 1.47.5 -> 1.48.0,
+  kms 1.62.2 -> 1.62.6 (the attested Decrypt the host performs on the enclave's
+  behalf), config 1.33.13 -> 1.33.18, credentials 1.20.13 -> 1.21.0, sts 1.51.6
+  -> 1.52.0, imds 1.20.5 -> 1.20.9, smithy-go 1.28.7 -> 1.28.9, plus the signin,
+  sso, ssooidc, v4a, presigned-url, accept-encoding, configsources and endpoints
+  set. ssh-cert-api additionally moves go-jose/v4 4.1.8 -> 4.1.9 and
+  golang.org/x/sync 0.24.0 -> 0.25.0.
+- govulncheck reports no vulnerabilities in any module.
 * Mon Nov 09 2026 Paul Kilar <pkilar@gmail.com> - 0.15.1-1
 - A security rebuild on Go 1.27.3, a packaging build fix, and a dependency
   refresh. The API and the signer carry no change beyond their toolchain and
