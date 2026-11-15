@@ -68,7 +68,7 @@ func TestRenewalUsesPinnedKeyAndPrivateOutput(t *testing.T) {
 	signer, _ := ssh.NewSignerFromKey(private)
 	_, caPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	ca, _ := ssh.NewSignerFromKey(caPrivate)
-	cert := &ssh.Certificate{Key: signer.PublicKey(), KeyId: "original-user", Serial: 7, CertType: ssh.UserCert, ValidBefore: uint64(time.Now().Add(time.Hour).Unix()), Permissions: ssh.Permissions{Extensions: map[string]string{"permit-session-renewal@cerberus": "", "terminate-on-cert-expiry@cerberus": ""}}}
+	cert := &ssh.Certificate{Key: signer.PublicKey(), KeyId: "original-user", Serial: 7, CertType: ssh.UserCert, ValidPrincipals: []string{"original-user"}, ValidBefore: uint64(time.Now().Add(time.Hour).Unix()), Permissions: ssh.Permissions{Extensions: map[string]string{"permit-session-renewal@cerberus": "", "terminate-on-cert-expiry@cerberus": ""}}}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,9 @@ func TestRenewalUsesPinnedKeyAndPrivateOutput(t *testing.T) {
 		t.Fatal("wrong certificate returned")
 	}
 	fresh.KeyId = "other-user"
-	fresh.SignCert(rand.Reader, ca)
+	if err := fresh.SignCert(rand.Reader, ca); err != nil {
+		t.Fatal(err)
+	}
 	os.WriteFile(source, ssh.MarshalAuthorizedKey(&fresh), 0600)
 	challenge[len(challenge)-1]++
 	if out = b.renew(context.Background(), request{Serial: 7, Challenge: challenge}); out.Error == "" {
@@ -122,11 +124,13 @@ func TestSSHBridgeArgumentsAndCleanup(t *testing.T) {
 			if err = os.WriteFile(key, pem.EncodeToMemory(block), 0600); err != nil {
 				t.Fatal(err)
 			}
-			cert := &ssh.Certificate{Key: signer.PublicKey(), KeyId: "user", Serial: 21, CertType: ssh.UserCert, ValidBefore: uint64(time.Now().Add(time.Hour).Unix())}
+			cert := &ssh.Certificate{Key: signer.PublicKey(), KeyId: "user", Serial: 21, CertType: ssh.UserCert, ValidPrincipals: []string{"user"}, ValidBefore: uint64(time.Now().Add(time.Hour).Unix())}
 			if opted {
 				cert.Extensions = map[string]string{"permit-session-renewal@cerberus": "", "terminate-on-cert-expiry@cerberus": "", "permit-port-forwarding": ""}
 			}
-			cert.SignCert(rand.Reader, signer)
+			if err = cert.SignCert(rand.Reader, signer); err != nil {
+				t.Fatal(err)
+			}
 			certPath := dir + "/cert.pub"
 			os.WriteFile(certPath, ssh.MarshalAuthorizedKey(cert), 0600)
 			mock := `#!/bin/sh
