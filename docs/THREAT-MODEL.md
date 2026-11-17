@@ -84,7 +84,7 @@ pipeline.
 - Nitro Enclave VSOCK connection budget (`maxConcurrentConnections = 32`) and host HTTP fd/goroutine budget
 - Startup availability window (CA key must load before `/sign` is useful)
 - `/metrics` (request rates, Go build metadata, timing) and `/health` (LDAP backend names, error strings) observability plane
-- Supply chain: GitHub Actions workflow, `pkilar/nitro-enclaves-sdk-go` fork (CMS parser on the decrypt path), `govulncheck`/`gosec` binaries, `amazonlinux` base image, RPM packages, `pcr-manifest-{arch}.json`
+- Supply chain: GitHub Actions workflow, `pkilar/nitro-enclaves-sdk-go` fork (NSM driver on the attestation path, CMS parser on the decrypt path), `govulncheck`/`gosec` binaries, `amazonlinux` base image, RPM packages, `pcr-manifest-{arch}.json`
 
 ## 5. Methodology & severity bands
 
@@ -525,7 +525,7 @@ This surface exists only when the optional `oauth:` block is enabled; when disab
 | `SIGN-7` | Medium | 5.4 | RI | KeyId carries host-supplied principal — audit tampering if host compromised | Non-empty KeyId enforced `sign-public-key.go:159-162`; `sign.cert_issued` audit event |
 | `SIGN-8` | Medium | 5.4 | DE | Signing with an uninitialized CA signer — availability window | `handleSignSshKey` returns error (not panic) on nil `caSigner` `main.go:303-318`; double-checked in `SignPublicKey` |
 | `LOG-2` | Medium | 5.4 | I | group_allowed_principals logged at Info on every successful sign | Intentional audit field (`sign.success`, CLAUDE.md-documented) so operators can audit dynamic group assignment; the same event logs `requested_principals` and `granted_principals` so a principal-mapping rewrite is visible on one line |
-| `SC-3` | Medium | 5.4 | TI | pkilar/nitro-enclaves-sdk-go fork is single-point-of-trust on the decrypt path | Exact-hash pin in `ssh-cert-signer/go.sum` (`v1.1.0 h1:...`); fuzz coverage on the CMS path |
+| `SC-3` | Medium | 5.4 | TI | pkilar/nitro-enclaves-sdk-go fork is single-point-of-trust on the decrypt path | Exact-hash pin in `ssh-cert-signer/go.sum` (`v1.2.0 h1:...`); fuzz coverage on the CMS path |
 | `SC-8` | Medium | 5.4 | TR | RPM packages are not GPG-signed; no artifact signing pipeline | Files installed at fixed modes (`cerberus.spec:110-111`); no `%gpg_sign` — relies on a trusted distribution channel |
 | `SC-10` | Medium | 5.4 | TI | CA_PUBLIC_KEY_PATH pin baked into packaged EIFs by default, code-level opt-in (a hand-built/opted-out EIF runs unpinned) | Dockerfile COPYs `ca_key.pub` + sets `CA_PUBLIC_KEY_PATH`; `loadkey.ca_pubkey.unpinned` WARN `load-key-signer.go:164-166` makes a missing pin visible; documented |
 | `AUTHZ-3` | Medium | 5.2 | ES | LDAP filter injection via Kerberos principal UID | `ldap.EscapeFilter(shortUID)` (RFC 4515) `filter.go:47`; `ValidFilterTemplate` checks at config load |
@@ -626,7 +626,7 @@ load-bearing — see §10.
 - No mutual TLS; client auth is solely Kerberos SPNEGO. The TLS server cert is issued by a CA clients trust. NTP keeps the KDC, clients, and API host within the 5-minute clock-skew window.
 - The keytab path is operator-supplied; no world-readable default. The host has network access to configured LDAP servers and KMS.
 - `/metrics` is network-protected at the LB/host-firewall layer (CLAUDE.md invariant). `DEBUG=true` is not set in production; `LOG_FORMAT=json` is used. The log aggregator is a trusted internal system.
-- The EIF build runs on a trusted operator workstation (not CI; CI lacks `nitro-cli` and `ca_key.enc`). The `hf/nsm` and `pkilar/nitro-enclaves-sdk-go` dependencies are pinned by `go.sum` hash. GitHub Actions runners are ephemeral and not cross-tenant. RPM distribution is over an operator-controlled channel — this becomes load-bearing for the optional `cerberus-signer-eif` package, which bundles a per-deployment EIF carrying the KMS-encrypted CA key and PCR0-pinned public key; it must never be published to a shared or public repository. `cerberus-signer.service` runs as root because nitro-cli requires it.
+- The EIF build runs on a trusted operator workstation (not CI; CI lacks `nitro-cli` and `ca_key.enc`). The `pkilar/nitro-enclaves-sdk-go` dependency is pinned by `go.sum` hash. GitHub Actions runners are ephemeral and not cross-tenant. RPM distribution is over an operator-controlled channel — this becomes load-bearing for the optional `cerberus-signer-eif` package, which bundles a per-deployment EIF carrying the KMS-encrypted CA key and PCR0-pinned public key; it must never be published to a shared or public repository. `cerberus-signer.service` runs as root because nitro-cli requires it.
 
 ---
 
