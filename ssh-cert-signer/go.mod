@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.6
 	github.com/mdlayher/vsock v1.4.0
 	github.com/pkilar/cerberus v0.12.0
-	github.com/pkilar/nitro-enclaves-sdk-go v1.2.0
+	github.com/pkilar/nitro-enclaves-sdk-go v1.2.1
 	golang.org/x/crypto v0.59.0
 )
 
