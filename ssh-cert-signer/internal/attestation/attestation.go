@@ -14,9 +14,9 @@ import (
 	"log"
 	"log/slog"
 
-	"github.com/hf/nsm"
-	"github.com/hf/nsm/request"
 	"github.com/pkilar/nitro-enclaves-sdk-go/crypto/cms"
+	"github.com/pkilar/nitro-enclaves-sdk-go/nsm"
+	"github.com/pkilar/nitro-enclaves-sdk-go/nsm/request"
 )
 
 // maxCMSEnvelopeBytes caps the input size accepted by DecryptCMSEnvelope.
@@ -38,7 +38,7 @@ type Provider struct {
 // (not running inside an enclave), the provider is returned in a degraded state
 // where IsAvailable() returns false.
 func NewProvider() *Provider {
-	sess, err := nsm.OpenDefaultSession()
+	sess, err := nsm.Open()
 	if err != nil {
 		log.Printf("NSM device not available: %v (attestation disabled)", err)
 		return &Provider{}
@@ -60,6 +60,9 @@ func (p *Provider) IsAvailable() bool {
 	return p != nil && p.session != nil && p.rsaKey != nil
 }
 
+// errNoAttestationDocument reports an NSM reply without an attestation document.
+var errNoAttestationDocument = errors.New("NSM did not return an attestation document")
+
 // GenerateAttestationDoc requests an attestation document from the NSM device.
 // The document includes the provider's RSA public key so that KMS can encrypt
 // the response plaintext under it.
@@ -77,15 +80,12 @@ func (p *Provider) GenerateAttestationDoc() ([]byte, error) {
 		PublicKey: pubKeyDER,
 	})
 	if err != nil {
+		// A refusal by the NSM arrives here too, as an *nsm.Error.
 		return nil, fmt.Errorf("NSM attestation request failed: %w", err)
 	}
 
-	if res.Error != "" {
-		return nil, fmt.Errorf("NSM returned error: %s", res.Error)
-	}
-
-	if res.Attestation == nil || res.Attestation.Document == nil {
-		return nil, errors.New("NSM did not return an attestation document")
+	if res.Attestation == nil || len(res.Attestation.Document) == 0 {
+		return nil, errNoAttestationDocument
 	}
 
 	return res.Attestation.Document, nil

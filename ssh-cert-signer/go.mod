@@ -5,10 +5,9 @@ go 1.27.4
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.18
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.6
-	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.4.0
 	github.com/pkilar/cerberus v0.12.0
-	github.com/pkilar/nitro-enclaves-sdk-go v1.1.0
+	github.com/pkilar/nitro-enclaves-sdk-go v1.2.0
 	golang.org/x/crypto v0.59.0
 )
 
@@ -26,7 +25,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0 // indirect
 	github.com/aws/smithy-go v1.28.9 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
+	github.com/fxamacker/cbor/v2 v2.10.0 // indirect
 	github.com/mdlayher/socket v0.8.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/net v0.62.0 // indirect
