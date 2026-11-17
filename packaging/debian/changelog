@@ -1,3 +1,42 @@
+cerberus (0.16.0) unstable; urgency=medium
+
+  The enclave signer now reaches the Nitro Security Module through the NSM
+  driver in nitro-enclaves-sdk-go 1.2.1, and github.com/hf/nsm, which has had
+  no commits since 2022, is gone. Minor rather than patch: code that runs
+  inside the enclave changed, so the EIF has to be rebuilt and its PCR0
+  changes. The API, the client and vsock-watch carry no change: certificate
+  issuance, authorization, the enclave protocol and the configuration surface
+  are all untouched.
+
+  * Upgrade: the new driver runs only in an EIF built from this release. Where
+    the KMS key policy is conditioned on PCR0, update it to the new PCR0
+    (pcr-manifest-<arch>.json) BEFORE the new EIF is deployed.
+  * ssh-cert-signer talks to the NSM through
+    github.com/pkilar/nitro-enclaves-sdk-go/nsm, the driver the SDK gained in
+    1.2.0, in place of github.com/hf/nsm. /dev/nsm is opened read-write, as
+    the official Rust NSM library opens it, where hf/nsm opened it read-only.
+    Nothing in the configuration changes.
+  * A refusal by the NSM is reported as "NSM attestation request failed: nsm:
+    request failed: <code>" where it read "NSM returned error: <code>".
+    Anything that matches on the old text needs the new one.
+  * NSM replies are decoded strictly. An attestation document of no bytes is
+    refused inside the enclave and no longer handed to the host, and a request
+    sent after the session has closed returns an error where hf/nsm panicked.
+  * Attestation document generation is covered by tests for the first time,
+    against a fake NSM device: the request must carry the enclave's public key
+    and nothing else.
+  * The driver has run against a real NSM. On a Nitro instance the SDK's
+    nsm-check passes all nine of its checks, and the signer's EIF was tested
+    there before this release.
+  * Dependencies in ssh-cert-signer: nitro-enclaves-sdk-go 1.1.0 -> 1.2.1 and
+    fxamacker/cbor 2.9.3 -> 2.10.0. hf/nsm is removed, and with it the old
+    modules only it pulled in: go.sum is 31 lines shorter.
+  * docs/THREAT-MODEL.md follows: the nitro-enclaves-sdk-go fork now supplies
+    the NSM driver as well as the CMS parser, and SC-3 names the new pin.
+  * govulncheck reports no vulnerabilities in any module.
+
+ -- Paul Kilar <pkilar@gmail.com>  Tue, 17 Nov 2026 10:55:00 -0500
+
 cerberus (0.15.2) unstable; urgency=medium
 
   A security rebuild on Go 1.27.4 and a dependency refresh. The API and the
